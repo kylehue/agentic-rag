@@ -1,0 +1,2 @@
+class IngestionService:
+    pass

@@ -26,11 +26,7 @@ dist/
 build/
 *.egg-info/
 
-# ChromaDB
-storage/chroma/
-
-# Uploaded documents
-storage/uploads/
 
 # Others
 architecture.md
+.storage/

@@ -1,19 +1,12 @@
 from fastapi import APIRouter, UploadFile, File
 
-from app.services.document import DocumentService
-from app.models.document import (
-    Document,
-    Document,
-    DocumentUploadResponse,
-    DocumentDeleteResponse,
-)
+from app.dependencies import document_service
+from app.models.document import Document
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
-document_service = DocumentService()
 
-
-@router.post("/", response_model=DocumentUploadResponse)
+@router.post("/", response_model=Document)
 async def upload_document(file: UploadFile = File(...)):
     return await document_service.upload(file)
 
@@ -28,6 +21,6 @@ async def get_document(document_id: str):
     return await document_service.get(document_id)
 
 
-@router.delete("/{document_id}", response_modeol=DocumentDeleteResponse)
+@router.delete("/{document_id}", response_model=Document)
 async def delete_document(document_id: str):
     return await document_service.delete(document_id)

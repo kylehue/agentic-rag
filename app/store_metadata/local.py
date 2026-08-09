@@ -24,18 +24,14 @@ class LocalMetadataStorage(MetadataStorage):
         with METADATA_FILE.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
 
-    async def save(self, document: Document) -> None:
+    async def save(self, document):
         metadata = self._load()
 
-        metadata[document.id] = {
-            "id": document.id,
-            "filename": document.filename,
-            "path": str(document.path),
-        }
+        metadata[document.id] = document.model_dump()
 
         self._save(metadata)
 
-    async def get(self, document_id: str) -> Document:
+    async def get(self, document_id):
         metadata = self._load()
 
         item = metadata.get(document_id)
@@ -43,25 +39,14 @@ class LocalMetadataStorage(MetadataStorage):
         if item is None:
             raise DocumentNotFoundError(document_id)
 
-        return Document(
-            id=item["id"],
-            filename=item["filename"],
-            path=item["path"],
-        )
+        return Document.model_validate(item)
 
-    async def list(self) -> list[Document]:
+    async def list(self):
         metadata = self._load()
 
-        return [
-            Document(
-                id=item["id"],
-                filename=item["filename"],
-                path=item["path"],
-            )
-            for item in metadata.values()
-        ]
+        return [Document.model_validate(item) for item in metadata.values()]
 
-    async def delete(self, document_id: str) -> bool:
+    async def delete(self, document_id):
         metadata = self._load()
 
         if document_id not in metadata:

@@ -4,13 +4,17 @@ from app.models.document import Document
 
 class MetadataStorage(ABC):
     @abstractmethod
-    async def save(self, document: Document) -> None: ...
+    async def save(self, document: Document) -> None:
+        """Saves a document's metadata."""
 
     @abstractmethod
-    async def get(self, document_id: str) -> Document: ...
+    async def get(self, document_id: str) -> Document:
+        """Retrieves a document's metadata."""
 
     @abstractmethod
-    async def list(self) -> list[Document]: ...
+    async def list(self) -> list[Document]:
+        """Lists all stored documents' metadata."""
 
     @abstractmethod
-    async def delete(self, document_id: str) -> bool: ...
+    async def delete(self, document_id: str) -> bool:
+        """Deletes a document's metadata."""

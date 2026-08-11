@@ -5,7 +5,7 @@ import shutil
 from app.errors.document import InvalidDocumentError
 from app.models.document import Document
 from app.store_file.base import FileStorage
-from app.dependencies import settings
+from app.core.config import settings
 from app.utils.file_type import detect_document_category
 
 UPLOAD_DIR = Path(settings.FILE_LOCAL_STORAGE_DIR)

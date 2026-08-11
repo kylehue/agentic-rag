@@ -1,13 +1,11 @@
+from dataclasses import asdict
+
 from fastapi import APIRouter, UploadFile, File
 
 from app.dependencies import document_service
-from app.models.document import Document, DocumentChunk
+from app.models.document import Document
 from unstructured.partition.auto import partition
-from unstructured.partition.csv import partition_csv
-from unstructured.partition.image import partition_image
 from app.processors.pipeline import process
-
-from unstructured.documents.elements import Element
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -28,7 +26,7 @@ async def process_document(file: UploadFile = File(...)):
         extract_image_block_to_payload=True,  # Store images as base64 data you can actually use
     )
     chunks = await process(document, elements)
-    return [e.model_dump() for e in chunks]
+    return [asdict(e) for e in chunks]
 
 
 @router.get("/", response_model=list[Document])

@@ -4,7 +4,7 @@ from pathlib import Path
 from app.errors.document import DocumentNotFoundError
 from app.models.document import Document
 from app.store_metadata.base import MetadataStorage
-from app.dependencies import settings
+from app.core.config import settings
 
 METADATA_DIR = Path(settings.METADATA_LOCAL_STORAGE_DIR)
 METADATA_DIR.mkdir(parents=True, exist_ok=True)

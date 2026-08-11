@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel
 from unstructured.documents.elements import Element
@@ -18,9 +20,10 @@ class Document(BaseModel):
     category: DocumentCategory
 
 
-class DocumentChunk(BaseModel):
+@dataclass
+class DocumentChunk:
     id: str
     text: str
     document: Document
     orig_elements: list[Element]
-    metadata: dict
+    metadata: dict[str, Any]

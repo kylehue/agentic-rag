@@ -97,11 +97,11 @@ def _build_catalog(tables: list[Table]) -> str:
         max(1, MAX_WORKBOOK_CONTEXT_CHARS // len(tables)),
     )
     catalog = []
-    for index, table in enumerate(tables):
+    for i, table in enumerate(tables):
         catalog.append(
             {
-                "index": index,
-                "sheet_name": _table_label(table, index),
+                "index": i,
+                "sheet_name": _table_label(table, i),
                 "table_id": getattr(table.metadata, "table_id", None),
                 "data_preview": _sample_table_rows(table, per_table_limit),
             }
@@ -253,12 +253,12 @@ async def process_table(
     _add_related_sheet_names(analyses, tables)
 
     chunks: list[DocumentChunk] = []
-    for index, table in enumerate(tables):
-        analysis = analyses[index]
-        sheet_name = _table_label(table, index)
+    for i, table in enumerate(tables):
+        analysis = analyses[i]
+        sheet_name = _table_label(table, i)
         chunks.append(
             DocumentChunk(
-                id=f"{document.id}:table:{index}",
+                id=f"{document.id}:table:{i}",
                 document=document,
                 text=_analysis_text(
                     sheet_name, workbook_description, analysis, table.text

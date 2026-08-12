@@ -1,4 +1,4 @@
-from app.models.document import Document, DocumentCategory, DocumentChunk
+from app.models.document import Document, DocumentCategory, DocumentProcessorChunk
 
 from app.processors.table import process_table
 from app.processors.text import process_text
@@ -9,7 +9,7 @@ from unstructured.documents.elements import Element, Table, Image
 async def process(
     document: Document,
     elements: list[Element],
-) -> list[DocumentChunk]:
+) -> list[DocumentProcessorChunk]:
     """Processor for all kinds of documents."""
     chunks = []
 

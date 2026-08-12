@@ -25,5 +25,11 @@ class DocumentChunk:
     id: str
     text: str
     document: Document
-    orig_elements: list[Element]
     metadata: dict[str, Any]
+
+
+@dataclass
+class DocumentProcessorChunk(DocumentChunk):
+    """A chunk while processing, retaining its source elements."""
+
+    orig_elements: list[Element]

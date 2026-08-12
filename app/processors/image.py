@@ -1,5 +1,3 @@
-"""Create retrieval-friendly descriptions for extracted images."""
-
 import base64
 import binascii
 import mimetypes
@@ -7,8 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.dependencies import llm
-from app.llm.base import LLMProvider
-from app.models.document import Document, DocumentChunk
+from app.models.document import Document, DocumentProcessorChunk
 from unstructured.documents.elements import Element, Image
 
 IMAGE_PROMPT = """Describe the image for a retrieval system. Identify its subject,
@@ -84,22 +81,20 @@ def _description_text(description: str, context: str) -> str:
 async def process_image(
     document: Document,
     elements: list[Element],
-    provider: LLMProvider | None = None,
-) -> list[DocumentChunk]:
+) -> list[DocumentProcessorChunk]:
     """Describe every image while grounding it with nearby extracted text."""
     images = [element for element in elements if isinstance(element, Image)]
     if not images:
         return []
 
-    provider = provider or llm
     context = _text_context(elements)
-    chunks: list[DocumentChunk] = []
+    chunks: list[DocumentProcessorChunk] = []
     for i, image in enumerate(images):
         image_bytes, mime_type, source = _image_bytes(document, image)
         description = ""
         if image_bytes:
             try:
-                description = await provider.answer_image(
+                description = await llm.answer_image(
                     IMAGE_PROMPT.format(context=context or "(none)"),
                     image_bytes,
                     mime_type,
@@ -108,7 +103,7 @@ async def process_image(
                 pass
 
         chunks.append(
-            DocumentChunk(
+            DocumentProcessorChunk(
                 id=f"{document.id}:image:{i}",
                 document=document,
                 text=_description_text(description, context),

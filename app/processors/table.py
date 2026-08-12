@@ -3,13 +3,12 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 from app.dependencies import llm
-from app.llm.base import LLMProvider
-from app.models.document import Document, DocumentChunk
+from app.models.document import Document, DocumentProcessorChunk
 from unstructured.documents.elements import Element, Table
 
-MAX_WORKBOOK_CONTEXT_CHARS = 48_000
-MAX_TABLE_CONTEXT_CHARS = 6_000
-SAMPLED_DATA_ROWS_PER_TABLE = 10
+MAX_WORKBOOK_CONTEXT_CHARS = 30_000
+MAX_TABLE_CONTEXT_CHARS = 10_000
+SAMPLED_DATA_ROWS_PER_TABLE = 3
 
 WORKBOOK_ANALYSIS_PROMPT = """You are analyzing a workbook for a retrieval system.
 The input is a catalog of tables extracted from one workbook. Tables may refer to,
@@ -233,7 +232,7 @@ def _add_related_sheet_names(
 async def process_table(
     document: Document,
     elements: list[Element],
-) -> list[DocumentChunk]:
+) -> list[DocumentProcessorChunk]:
     """Create chunks enriched by a single workbook-level LLM analysis."""
     tables = [e for e in elements if isinstance(e, Table)]
     if not tables:
@@ -252,12 +251,12 @@ async def process_table(
 
     _add_related_sheet_names(analyses, tables)
 
-    chunks: list[DocumentChunk] = []
+    chunks: list[DocumentProcessorChunk] = []
     for i, table in enumerate(tables):
         analysis = analyses[i]
         sheet_name = _table_label(table, i)
         chunks.append(
-            DocumentChunk(
+            DocumentProcessorChunk(
                 id=f"{document.id}:table:{i}",
                 document=document,
                 text=_analysis_text(

@@ -2,13 +2,13 @@ from unstructured.chunking.basic import chunk_elements
 from unstructured.chunking.title import chunk_by_title
 from unstructured.documents.elements import Element
 
-from app.models.document import Document, DocumentChunk
+from app.models.document import Document, DocumentProcessorChunk
 
 
 async def process_text(
     document: Document,
     elements: list[Element],
-) -> list[DocumentChunk]:
+) -> list[DocumentProcessorChunk]:
     # chunk smartly(?)
     has_title = any(type(e).__name__ == "Title" for e in elements)
     if has_title:
@@ -30,7 +30,7 @@ async def process_text(
     document_chunks = []
     for i, chunk in enumerate(chunks):
         document_chunks.append(
-            DocumentChunk(
+            DocumentProcessorChunk(
                 id=f"{document.id}:{i}",
                 document=document,
                 text=chunk.text,

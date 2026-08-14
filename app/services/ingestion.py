@@ -3,7 +3,11 @@ from app.processors.pipeline import process
 from app.services.document import DocumentService
 from app.embedders.base import Embedder
 from app.store_vector.base import VectorStorage
+from app.store_sql.base import SqlStorage, StoredSqlTable, SqlTableData
+from app.models.document import DocumentCategory, DocumentProcessorChunk
 from unstructured.partition.auto import partition
+from pathlib import Path
+import pandas as pd
 
 
 class IngestionService:
@@ -12,10 +16,12 @@ class IngestionService:
         document_service: DocumentService,
         embedder: Embedder,
         vector_storage: VectorStorage,
+        sql_storage: SqlStorage | None = None,
     ):
         self.document_service = document_service
         self.embedder = embedder
         self.vector_storage = vector_storage
+        self.sql_storage = sql_storage
 
     async def ingest(self, file: UploadFile):
         document = await self.document_service.upload(file)
@@ -29,9 +35,59 @@ class IngestionService:
         )
 
         chunks = await process(document, elements)
+        if document.category is DocumentCategory.SPREADSHEET and self.sql_storage:
+            tables = await self.sql_storage.replace_document_tables(
+                document.id,
+                self._extract_spreadsheet_tables(document.path),
+            )
+            self._attach_sql_metadata(chunks, tables)
         embeddings = await self.embedder.embed_documents(
             [chunk.text for chunk in chunks]
         )
         await self.vector_storage.add_documents(chunks, embeddings)
 
         return document
+
+    @staticmethod
+    def _attach_sql_metadata(
+        chunks: list[DocumentProcessorChunk], tables: list[StoredSqlTable]
+    ) -> None:
+        tables_by_sheet = {table.source_name.casefold(): table for table in tables}
+        for chunk in chunks:
+            sheet_name = str(chunk.metadata.get("sheet_name", "")).casefold()
+            table = tables_by_sheet.get(sheet_name)
+            if table is None and len(tables) == 1:
+                table = tables[0]
+            if table is None:
+                continue
+            columns = [column.__dict__ for column in table.columns]
+            chunk.metadata["sql_table"] = table.name
+            chunk.metadata["sql_columns"] = columns
+            chunk.text += (
+                "\nSQL table: "
+                + table.name
+                + "\nSQL columns: "
+                + ", ".join(
+                    f"{column['source_name']} -> {column['name']} ({column['type']})"
+                    for column in columns
+                )
+            )
+
+    @staticmethod
+    def _extract_spreadsheet_tables(path: str | Path) -> list[SqlTableData]:
+        """Load an XLSX workbook or CSV file into backend-neutral SQL table data."""
+        path = Path(path)
+        if path.suffix.casefold() == ".csv":
+            sheets = {path.stem or "Sheet1": pd.read_csv(path)}
+        else:
+            sheets = pd.read_excel(path, sheet_name=None)
+
+        return [
+            SqlTableData(
+                source_name=str(sheet_name),
+                columns=[str(column) for column in frame.columns],
+                rows=list(frame.itertuples(index=False, name=None)),
+            )
+            for sheet_name, frame in sheets.items()
+            if len(frame.columns)
+        ]

@@ -3,6 +3,7 @@ from fastapi import UploadFile
 from app.models.document import Document
 from app.store_file.base import FileStorage
 from app.store_metadata.base import MetadataStorage
+from app.store_sql.base import SqlStorage
 
 
 class DocumentService:
@@ -10,9 +11,11 @@ class DocumentService:
         self,
         file_storage: FileStorage,
         metadata_storage: MetadataStorage,
+        sql_storage: SqlStorage | None = None,
     ):
         self.file_storage = file_storage
         self.metadata_storage = metadata_storage
+        self.sql_storage = sql_storage
 
     async def upload(self, file: UploadFile) -> Document:
         # save file
@@ -36,6 +39,8 @@ class DocumentService:
             return False
 
         await self.file_storage.delete(document_id)
+        if self.sql_storage:
+            await self.sql_storage.delete_document(document_id)
         await self.metadata_storage.delete(document_id)
 
         return True

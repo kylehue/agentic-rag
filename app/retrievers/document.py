@@ -13,6 +13,7 @@ class DocumentRetriever(Retriever):
         request: RetrievalRequest,
         candidates: Sequence[RetrievalCandidate],
     ) -> list[RetrievedEvidence]:
+        """Returns text-document candidates as plain textual evidence."""
         return [
             RetrievedEvidence(
                 id=item.id,

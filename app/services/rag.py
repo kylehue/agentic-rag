@@ -1,7 +1,7 @@
 from fastapi import UploadFile
 
+from app.models.llm import LLMAttachment
 from app.llm.base import LLMProvider
-from app.llm.base import LLMAttachment
 from app.models.rag import RagAnswer, RetrievalRequest
 from app.services.ingestion import IngestionService
 from app.services.retrieval import RetrievalService
@@ -30,12 +30,15 @@ class RagService:
         self._llm = llm
 
     async def ingest(self, file: UploadFile):
+        """Store and index a file."""
         return await self._ingestion_service.ingest(file)
 
     async def retrieve(self, request: RetrievalRequest):
+        """Return evidence without asking the final-answer LLM."""
         return await self._retrieval_service.retrieve(request)
 
     async def answer(self, request: RetrievalRequest) -> RagAnswer:
+        """Build a grounded prompt and answer it with text."""
         result = await self.retrieve(request)
         evidence = (
             "\n\n".join(

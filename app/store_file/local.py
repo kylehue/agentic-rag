@@ -13,7 +13,12 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class LocalFileStorage(FileStorage):
+    """Stores uploaded files in the configured local directory.
+
+    Flow: save() > create ID > write file > return Document
+    """
     async def save(self, file):
+        """Write an uploaded file with a generated ID while keeping its extension."""
         document_id = str(uuid4())
 
         if not file.filename:
@@ -35,6 +40,7 @@ class LocalFileStorage(FileStorage):
         )
 
     async def delete(self, document_id):
+        """Remove the locally stored file for one document ID."""
         matches = list(UPLOAD_DIR.glob(f"{document_id}.*"))
 
         if not matches:

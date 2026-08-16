@@ -3,6 +3,8 @@ from app.models.document import Document
 
 
 class MetadataStorage(ABC):
+    """Interface for document metadata kept separately from file contents."""
+
     @abstractmethod
     async def save(self, document: Document) -> None:
         """Saves a document's metadata."""

@@ -7,6 +7,11 @@ from app.store_sql.base import SqlStorage
 
 
 class DocumentService:
+    """Coordinates file, metadata, and spreadsheet-table lifecycle operations.
+
+    Flow: upload() > FileStorage.save() > MetadataStorage.save()
+    """
+
     def __init__(
         self,
         file_storage: FileStorage,
@@ -18,21 +23,25 @@ class DocumentService:
         self.sql_storage = sql_storage
 
     async def upload(self, file: UploadFile) -> Document:
-        # save file
+        """Save an upload and register the resulting document metadata."""
+        # Save the file first because metadata needs its generated document details.
         document = await self.file_storage.save(file)
 
-        # save metadata
+        # Store the small searchable record separately from the uploaded file.
         await self.metadata_storage.save(document)
 
         return document
 
     async def list(self) -> list[Document]:
+        """List every saved document record."""
         return await self.metadata_storage.list()
 
     async def get(self, document_id: str) -> Document | None:
+        """Get one document record by its ID."""
         return await self.metadata_storage.get(document_id)
 
     async def delete(self, document_id: str) -> bool:
+        """Delete the file, its SQL tables, and its metadata when it exists."""
         document = await self.metadata_storage.get(document_id)
 
         if document is None:

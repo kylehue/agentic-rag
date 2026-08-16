@@ -4,8 +4,8 @@ import mimetypes
 from pathlib import Path
 from typing import Any
 
-from app.dependencies import llm
-from app.llm.base import LLMAttachment
+from app.models.llm import LLMAttachment
+from app.llm.base import LLMProvider
 from app.models.document import Document, DocumentProcessorChunk
 from unstructured.documents.elements import Element, Image
 
@@ -20,6 +20,7 @@ what is visibly present in the image:
 
 
 def _text_context(elements: list[Element]) -> str:
+    """Collect nearby extracted text to help describe an image during ingestion."""
     texts = []
     for element in elements:
         text = getattr(element, "text", None)
@@ -29,6 +30,7 @@ def _text_context(elements: list[Element]) -> str:
 
 
 def _decode_base64(value: Any) -> bytes | None:
+    """Decode a base64 image payload safely, returning None for invalid input."""
     if isinstance(value, bytes):
         return value
     if not isinstance(value, str) or not value.strip():
@@ -43,6 +45,7 @@ def _decode_base64(value: Any) -> bytes | None:
 
 
 def _image_bytes(document: Document, image: Image) -> tuple[bytes | None, str, str]:
+    """Get image bytes from embedded data or a file, and record where they came from."""
     metadata = image.metadata
     embedded = _decode_base64(getattr(metadata, "image_base64", None))
     if embedded:
@@ -73,6 +76,7 @@ def _image_bytes(document: Document, image: Image) -> tuple[bytes | None, str, s
 
 
 def _description_text(description: str, context: str) -> str:
+    """Build text used only to make an image retrievable by semantic search."""
     parts = ["Image description:", description or "Image description unavailable."]
     if context:
         parts.extend(("Related document text:", context))
@@ -82,8 +86,9 @@ def _description_text(description: str, context: str) -> str:
 async def process_image(
     document: Document,
     elements: list[Element],
+    llm: LLMProvider,
 ) -> list[DocumentProcessorChunk]:
-    """Describe every image while grounding it with nearby extracted text."""
+    """Create retrievable image chunks while keeping original bytes for final answers."""
     images = [element for element in elements if isinstance(element, Image)]
     if not images:
         return []

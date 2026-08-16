@@ -7,12 +7,16 @@ from unstructured.documents.elements import Element
 
 
 class DocumentCategory(str, Enum):
+    """The supported source types used to choose processing and retrieval behavior."""
+
     DOCUMENT = "document"
     SPREADSHEET = "spreadsheet"
     IMAGE = "image"
 
 
 class Document(BaseModel):
+    """The persistent record describing one uploaded source file."""
+
     id: str
     filename: str
     extension: str
@@ -22,6 +26,8 @@ class Document(BaseModel):
 
 @dataclass
 class DocumentChunk:
+    """One searchable piece of a document."""
+
     id: str
     text: str
     document: Document
@@ -33,6 +39,6 @@ class DocumentChunk:
 
 @dataclass
 class DocumentProcessorChunk(DocumentChunk):
-    """A chunk while processing, retaining its source elements from Unstructured.io"""
+    """A chunk during processing, retaining its source elements from Unstructured.io"""
 
     orig_elements: list[Element] = field(default_factory=list)

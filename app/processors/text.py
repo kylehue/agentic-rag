@@ -9,7 +9,8 @@ async def process_text(
     document: Document,
     elements: list[Element],
 ) -> list[DocumentProcessorChunk]:
-    # chunk smartly(?)
+    """Split extracted text into useful chunks while preserving source elements."""
+    # Use titles when available so sections remain together.
     has_title = any(type(e).__name__ == "Title" for e in elements)
     if has_title:
         chunks = chunk_by_title(
@@ -26,7 +27,7 @@ async def process_text(
             overlap=200,
         )
 
-    # clean chunks for output
+    # Convert unstructured chunks into the app's simple chunk model.
     document_chunks = []
     for i, chunk in enumerate(chunks):
         document_chunks.append(

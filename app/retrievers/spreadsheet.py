@@ -23,15 +23,22 @@ Retrieved spreadsheet context and SQL schema:
 
 
 class SpreadsheetRetriever(Retriever):
+    """Uses retrieved sheet context to optionally query a spreadsheet's SQL tables.
+
+    Flow: retrieve() > _retrieve_document() > SQL query > RetrievedEvidence
+    """
+
     name = "spreadsheet"
 
     def __init__(self, llm: LLMProvider, sql_storage: SqlStorage):
+        """Receive the LLM that writes SQL and the storage that safely runs it."""
         self._llm = llm
         self._sql_storage = sql_storage
 
     async def retrieve(
         self, request: RetrievalRequest, candidates: Sequence[RetrievalCandidate]
     ) -> list[RetrievedEvidence]:
+        """Returns spreadsheet candidates with their SQL results attached for the LLM."""
         groups: dict[str, list[RetrievalCandidate]] = defaultdict(list)
         for item in candidates:
             if item.document.category is DocumentCategory.SPREADSHEET:
@@ -45,6 +52,7 @@ class SpreadsheetRetriever(Retriever):
     async def _retrieve_document(
         self, request: RetrievalRequest, candidates: list[RetrievalCandidate]
     ) -> list[RetrievedEvidence]:
+        """Ask for SQL when possible, otherwise return the retrieved sheet context."""
         document = candidates[0].document
         if not any(item.metadata.get("sql_table") for item in candidates):
             return [self._chunk_evidence(item) for item in candidates]
@@ -94,6 +102,7 @@ class SpreadsheetRetriever(Retriever):
 
     @staticmethod
     def _context(candidate: RetrievalCandidate) -> str:
+        """Add the SQL table mapping to a candidate before giving it to the LLM."""
         schema = {
             "sql_table": candidate.metadata.get("sql_table"),
             "sql_columns": candidate.metadata.get("sql_columns", []),
@@ -101,6 +110,7 @@ class SpreadsheetRetriever(Retriever):
         return f"{candidate.text}\nSQL mapping: {json.dumps(schema, default=str)}"
 
     def _chunk_evidence(self, candidate: RetrievalCandidate) -> RetrievedEvidence:
+        """Turn one retrieved spreadsheet chunk into fallback text evidence."""
         return RetrievedEvidence(
             id=candidate.id,
             retriever=self.name,
@@ -112,6 +122,7 @@ class SpreadsheetRetriever(Retriever):
 
     @staticmethod
     def _clean_sql(response: str) -> str:
+        """Remove an optional Markdown code fence from LLM-produced SQL."""
         value = response.strip()
         if value.startswith("```"):
             value = value.split("\n", 1)[-1]
@@ -121,6 +132,7 @@ class SpreadsheetRetriever(Retriever):
 
     @staticmethod
     def _workbook_context(candidates: Sequence[RetrievalCandidate]) -> str:
+        """Collect unique workbook descriptions for the final SQL evidence."""
         descriptions = {
             str(item.metadata["workbook_description"])
             for item in candidates
@@ -135,6 +147,7 @@ class SpreadsheetRetriever(Retriever):
         rows: list[tuple[object, ...]],
         workbook_context: str,
     ) -> str:
+        """Format SQL, rows, and workbook context as readable final evidence."""
         content = (
             "Spreadsheet SQL query:\n"
             + sql

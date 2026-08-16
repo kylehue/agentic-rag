@@ -27,7 +27,11 @@ from app.retrievers.spreadsheet import SpreadsheetRetriever
 
 document_service = DocumentService(file_storage, metadata_storage, sql_storage)
 ingestion_service = IngestionService(
-    document_service, embedder, vector_storage, sql_storage
+    document_service,
+    embedder,
+    vector_storage,
+    llm,
+    sql_storage,
 )
 
 retrieval_service = RetrievalService(

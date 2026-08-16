@@ -12,6 +12,11 @@ from app.store_vector.base import VectorStorage
 
 
 class LocalVectorStorage(VectorStorage):
+    """Stores embeddings in local Chroma while hiding Chroma-specific details.
+
+    Flow: search() > Chroma query > _chunk_from_result() > RetrievalCandidate
+    """
+
     def __init__(
         self, storage_dir: str | Path | None = None, collection_name: str | None = None
     ):
@@ -50,6 +55,7 @@ class LocalVectorStorage(VectorStorage):
         documents: Sequence[DocumentChunk],
         embeddings: Sequence[Sequence[float]],
     ) -> None:
+        """Upsert chunks and their matching embeddings into Chroma."""
         if len(documents) != len(embeddings):
             raise ValueError("documents and embeddings must have the same length")
         if not documents:
@@ -66,6 +72,7 @@ class LocalVectorStorage(VectorStorage):
     async def search(
         self, query_embedding: list[float], top_k: int = 5
     ) -> list[RetrievalCandidate]:
+        """Ask Chroma for nearest chunks and convert them to app candidates."""
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
         collection_count = await asyncio.to_thread(self._collection.count)
@@ -97,6 +104,7 @@ class LocalVectorStorage(VectorStorage):
         metadata: dict[str, Any] | None,
         distance: float | None,
     ) -> RetrievalCandidate:
+        """Rebuild one app-level candidate from Chroma's stored fields."""
         stored_metadata = dict(metadata or {})
         raw_document = stored_metadata.get("document")
         try:
@@ -121,6 +129,7 @@ class LocalVectorStorage(VectorStorage):
 
     @staticmethod
     def _decode_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+        """Read chunk JSON metadata, returning an empty dictionary if invalid."""
         raw_metadata = (metadata or {}).get("chunk_metadata", "{}")
         try:
             decoded = json.loads(raw_metadata)
@@ -132,6 +141,7 @@ class LocalVectorStorage(VectorStorage):
     def _decode_binary_content(
         metadata: dict[str, Any] | None,
     ) -> tuple[bytes | None, str | None]:
+        """Read an optional binary attachment and its MIME type from metadata."""
         try:
             payload = json.loads((metadata or {}).get("binary_content", "{}"))
             data = payload.get("data")
@@ -144,6 +154,7 @@ class LocalVectorStorage(VectorStorage):
             return None, None
 
     async def delete_document(self, document_id: str) -> None:
+        """Remove all Chroma entries that belong to one document."""
         await asyncio.to_thread(
             self._collection.delete,
             where={"document_id": document_id},

@@ -2,7 +2,7 @@ import json
 from typing import Any
 
 from bs4 import BeautifulSoup
-from app.dependencies import llm
+from app.llm.base import LLMProvider
 from app.models.document import Document, DocumentProcessorChunk
 from unstructured.documents.elements import Element, Table
 
@@ -232,6 +232,7 @@ def _add_related_sheet_names(
 async def process_table(
     document: Document,
     elements: list[Element],
+    llm: LLMProvider,
 ) -> list[DocumentProcessorChunk]:
     """Create chunks enriched by a single workbook-level LLM analysis."""
     tables = [e for e in elements if isinstance(e, Table)]

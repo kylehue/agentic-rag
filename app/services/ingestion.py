@@ -5,25 +5,34 @@ from app.embedders.base import Embedder
 from app.store_vector.base import VectorStorage
 from app.store_sql.base import SqlStorage, StoredSqlTable, SqlTableData
 from app.models.document import DocumentCategory, DocumentProcessorChunk
+from app.llm.base import LLMProvider
 from unstructured.partition.auto import partition
 from pathlib import Path
 import pandas as pd
 
 
 class IngestionService:
+    """Turns an uploaded file into searchable chunks and optional SQL tables.
+
+    Flow: ingest() > process() > embed_documents() > add_documents()
+    """
+
     def __init__(
         self,
         document_service: DocumentService,
         embedder: Embedder,
         vector_storage: VectorStorage,
+        llm: LLMProvider,
         sql_storage: SqlStorage | None = None,
     ):
         self.document_service = document_service
         self.embedder = embedder
         self.vector_storage = vector_storage
+        self.llm = llm
         self.sql_storage = sql_storage
 
     async def ingest(self, file: UploadFile):
+        """Save, partition, process, embed, and index one uploaded document."""
         document = await self.document_service.upload(file)
 
         elements = partition(
@@ -34,7 +43,7 @@ class IngestionService:
             extract_image_block_to_payload=True,  # Store images as base64 data you can actually use
         )
 
-        chunks = await process(document, elements)
+        chunks = await process(document, elements, self.llm)
         if document.category is DocumentCategory.SPREADSHEET and self.sql_storage:
             tables = await self.sql_storage.replace_document_tables(
                 document.id,
@@ -52,6 +61,7 @@ class IngestionService:
     def _attach_sql_metadata(
         chunks: list[DocumentProcessorChunk], tables: list[StoredSqlTable]
     ) -> None:
+        """Add each spreadsheet chunk's generated SQL table and column names."""
         tables_by_sheet = {table.source_name.casefold(): table for table in tables}
         for chunk in chunks:
             sheet_name = str(chunk.metadata.get("sheet_name", "")).casefold()
@@ -75,7 +85,7 @@ class IngestionService:
 
     @staticmethod
     def _extract_spreadsheet_tables(path: str | Path) -> list[SqlTableData]:
-        """Load an XLSX workbook or CSV file into backend-neutral SQL table data."""
+        """Read an XLSX workbook or CSV file into backend-neutral table data."""
         path = Path(path)
         if path.suffix.casefold() == ".csv":
             sheets = {path.stem or "Sheet1": pd.read_csv(path)}

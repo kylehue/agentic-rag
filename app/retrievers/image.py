@@ -13,6 +13,7 @@ class ImageRetriever(Retriever):
         request: RetrievalRequest,
         candidates: Sequence[RetrievalCandidate],
     ) -> list[RetrievedEvidence]:
+        """Returns image candidates with their real image bytes attached for the LLM."""
         return [
             RetrievedEvidence(
                 id=item.id,

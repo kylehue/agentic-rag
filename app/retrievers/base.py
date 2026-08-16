@@ -5,6 +5,8 @@ from app.models.rag import RetrievalCandidate, RetrievedEvidence, RetrievalReque
 
 
 class Retriever(ABC):
+    """Interface for turning search candidates into answer-ready evidence."""
+
     name: str
 
     @abstractmethod

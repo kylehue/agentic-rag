@@ -13,6 +13,11 @@ from app.store_vector.base import VectorStorage
 
 
 class RetrievalService:
+    """Finds relevant chunks and lets each retriever turn them into evidence.
+
+    Flow: retrieve() > _search_candidates() > retriever.retrieve()
+    """
+
     def __init__(
         self,
         embedder: Embedder,
@@ -27,6 +32,7 @@ class RetrievalService:
             raise ValueError("Retriever names must be unique")
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
+        """Search once, then run all applicable evidence retrievers in parallel."""
         candidates = await self._search_candidates(request)
         outputs = await asyncio.gather(
             *(retriever.retrieve(request, candidates) for retriever in self._retrievers)
@@ -39,6 +45,7 @@ class RetrievalService:
     async def _search_candidates(
         self, request: RetrievalRequest
     ) -> list[RetrievalCandidate]:
+        """Embed the question, search vectors, and apply any category filter."""
         query_embedding = await self._embedder.embed_query(request.query)
         candidates = await self._vector_storage.search(query_embedding, request.top_k)
         if request.categories is None:
@@ -49,6 +56,7 @@ class RetrievalService:
 
     @staticmethod
     def _deduplicate(evidence: Iterable[RetrievedEvidence]) -> list[RetrievedEvidence]:
+        """Keep the first copy when two retrievers produce the same evidence."""
         unique: dict[tuple[str, str], RetrievedEvidence] = {}
         for item in evidence:
             unique.setdefault((item.retriever, item.id), item)

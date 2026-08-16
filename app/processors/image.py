@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.dependencies import llm
+from app.llm.base import LLMAttachment
 from app.models.document import Document, DocumentProcessorChunk
 from unstructured.documents.elements import Element, Image
 
@@ -94,10 +95,9 @@ async def process_image(
         description = ""
         if image_bytes:
             try:
-                description = await llm.answer_image(
+                description = await llm.answer(
                     IMAGE_PROMPT.format(context=context or "(none)"),
-                    image_bytes,
-                    mime_type,
+                    attachments=(LLMAttachment(image_bytes, mime_type),),
                 )
             except Exception:
                 pass
@@ -115,6 +115,8 @@ async def process_image(
                     "description": description,
                     "context": context,
                 },
+                binary_content=image_bytes,
+                binary_mime_type=mime_type if image_bytes else None,
             )
         )
     return chunks

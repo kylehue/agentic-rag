@@ -9,8 +9,6 @@ from app.embedders.base import Embedder
 
 
 class GeminiEmbedder(Embedder):
-    """Google Gemini embedding adapter with lazy API-client initialization."""
-
     def __init__(self):
         settings = Settings()
         self._api_key = settings.GOOGLE_API_KEY

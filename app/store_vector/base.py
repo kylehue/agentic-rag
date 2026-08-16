@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Sequence
 
 from app.models.document import DocumentChunk
+from app.models.rag import RetrievalCandidate
 
 
 class VectorStorage(ABC):
@@ -22,8 +23,12 @@ class VectorStorage(ABC):
         self,
         query_embedding: list[float],
         top_k: int = 5,
-    ) -> list[DocumentChunk]:
-        """Return relevant chunks; implementations may add retrieval data to metadata."""
+    ) -> list[RetrievalCandidate]:
+        """Return provider-neutral ranked candidates.
+
+        Storage adapters own distance semantics and may omit a normalized score when
+        their backend cannot provide a meaningful comparable value.
+        """
 
     @abstractmethod
     async def delete_document(self, document_id: str) -> None:

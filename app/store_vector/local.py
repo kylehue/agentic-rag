@@ -7,12 +7,11 @@ import chromadb
 
 from app.core.config import settings
 from app.models.document import Document, DocumentChunk
+from app.models.rag import RetrievalCandidate
 from app.store_vector.base import VectorStorage
 
 
 class LocalVectorStorage(VectorStorage):
-    """A persistent Chroma implementation of the provider-neutral vector API."""
-
     def __init__(
         self, storage_dir: str | Path | None = None, collection_name: str | None = None
     ):
@@ -34,6 +33,13 @@ class LocalVectorStorage(VectorStorage):
             "document": json.dumps(chunk.document.model_dump(mode="json")),
             "chunk_metadata": json.dumps(chunk.metadata, default=str),
         }
+        if chunk.binary_content is not None:
+            metadata["binary_content"] = json.dumps(
+                {
+                    "data": chunk.binary_content.hex(),
+                    "mime_type": chunk.binary_mime_type,
+                }
+            )
         page_number = chunk.metadata.get("page_number")
         if isinstance(page_number, (str, int, float, bool)):
             metadata["page_number"] = page_number
@@ -59,7 +65,7 @@ class LocalVectorStorage(VectorStorage):
 
     async def search(
         self, query_embedding: list[float], top_k: int = 5
-    ) -> list[DocumentChunk]:
+    ) -> list[RetrievalCandidate]:
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
         collection_count = await asyncio.to_thread(self._collection.count)
@@ -90,7 +96,7 @@ class LocalVectorStorage(VectorStorage):
         text: str,
         metadata: dict[str, Any] | None,
         distance: float | None,
-    ) -> DocumentChunk:
+    ) -> RetrievalCandidate:
         stored_metadata = dict(metadata or {})
         raw_document = stored_metadata.get("document")
         try:
@@ -100,13 +106,17 @@ class LocalVectorStorage(VectorStorage):
                 "Stored vector is missing a valid document payload; re-ingest the document."
             ) from error
 
-        chunk_metadata = cls._decode_metadata(stored_metadata)
-        chunk_metadata["vector_distance"] = distance
-        return DocumentChunk(
+        binary_content, binary_mime_type = cls._decode_binary_content(stored_metadata)
+        return RetrievalCandidate(
             id=identifier,
             text=text,
             document=document,
-            metadata=chunk_metadata,
+            metadata=cls._decode_metadata(stored_metadata),
+            # Chroma cosine distance is lower-is-better. Convert it at the adapter
+            # boundary so no retriever relies on Chroma metadata or scoring.
+            score=1.0 - distance if isinstance(distance, (int, float)) else None,
+            binary_content=binary_content,
+            binary_mime_type=binary_mime_type,
         )
 
     @staticmethod
@@ -117,6 +127,21 @@ class LocalVectorStorage(VectorStorage):
         except (TypeError, json.JSONDecodeError):
             return {}
         return decoded if isinstance(decoded, dict) else {}
+
+    @staticmethod
+    def _decode_binary_content(
+        metadata: dict[str, Any] | None,
+    ) -> tuple[bytes | None, str | None]:
+        try:
+            payload = json.loads((metadata or {}).get("binary_content", "{}"))
+            data = payload.get("data")
+            return (
+                (bytes.fromhex(data), payload.get("mime_type"))
+                if isinstance(data, str)
+                else (None, None)
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, None
 
     async def delete_document(self, document_id: str) -> None:
         await asyncio.to_thread(

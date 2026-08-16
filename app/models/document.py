@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -26,10 +26,13 @@ class DocumentChunk:
     text: str
     document: Document
     metadata: dict[str, Any]
+    # chunk.text is only used for vector search but the image itself should be sent to llm
+    binary_content: bytes | None = None
+    binary_mime_type: str | None = None
 
 
 @dataclass
 class DocumentProcessorChunk(DocumentChunk):
-    """A chunk while processing, retaining its source elements."""
+    """A chunk while processing, retaining its source elements from Unstructured.io"""
 
-    orig_elements: list[Element]
+    orig_elements: list[Element] = field(default_factory=list)

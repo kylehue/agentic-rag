@@ -1,15 +1,14 @@
 import asyncio
+from collections.abc import Sequence
 from typing import Any
 
 from google import genai
 from google.genai import types
 from app.core.config import Settings
-from app.llm.base import LLMProvider
+from app.llm.base import LLMAttachment, LLMProvider
 
 
 class GeminiProvider(LLMProvider):
-    """Gemini adapter that owns its configuration and creates its client lazily."""
-
     def __init__(self):
         settings = Settings()
         self._api_key = settings.GOOGLE_API_KEY
@@ -23,25 +22,24 @@ class GeminiProvider(LLMProvider):
             self._client = genai.Client(api_key=self._api_key)
         return self._client
 
-    async def answer(self, query: str) -> str:
+    async def answer(
+        self, query: str, attachments: Sequence[LLMAttachment] = ()
+    ) -> str:
         client = self._ensure_client()
-
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=self._model,
-            contents=query,
-        )
-        return response.text or ""
-
-    async def answer_image(self, query: str, image: bytes, mime_type: str) -> str:
-        client = self._ensure_client()
-
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=self._model,
-            contents=[
+        contents: str | list[object] = query
+        if attachments:
+            contents = [
                 query,
-                types.Part.from_bytes(data=image, mime_type=mime_type),
-            ],
+                *(
+                    types.Part.from_bytes(
+                        data=attachment.content, mime_type=attachment.mime_type
+                    )
+                    for attachment in attachments
+                ),
+            ]
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=self._model,
+            contents=contents,  # type: ignore
         )
         return response.text or ""

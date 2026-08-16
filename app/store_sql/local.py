@@ -20,8 +20,6 @@ from app.store_sql.base import (
 
 
 class LocalSqlStorage(SqlStorage):
-    """SQLite implementation. Other SQL backends only need to implement SqlStorage."""
-
     def __init__(self, database_path: str | Path | None = None):
         self._path = Path(database_path or settings.SQL_LOCAL_STORAGE_DIR)
         self._path.parent.mkdir(parents=True, exist_ok=True)

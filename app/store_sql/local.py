@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from datetime import date, datetime, time
 from numbers import Integral, Real
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Generator
 
 from app.core.config import settings
 from app.store_sql.base import SqlStorage
@@ -32,7 +32,7 @@ class LocalSqlStorage(SqlStorage):
         return sqlite3.connect(self._path)
 
     @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
+    def _connection(self) -> Generator[sqlite3.Connection, None, None]:
         """Provide a connection that commits on success and rolls back on errors."""
         connection = self._connect()
         try:

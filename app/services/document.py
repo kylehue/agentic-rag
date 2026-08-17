@@ -1,9 +1,12 @@
 from fastapi import UploadFile
 
+from app.errors.document import DocumentNotFoundError
 from app.models.document import Document
 from app.store_file.base import FileStorage
 from app.store_metadata.base import MetadataStorage
 from app.store_sql.base import SqlStorage
+
+DOCUMENT_METADATA_COLLECTION = "documents"
 
 
 class DocumentService:
@@ -27,25 +30,29 @@ class DocumentService:
         # Save the file first because metadata needs its generated document details.
         document = await self.file_storage.save(file)
 
-        # Store the small searchable record separately from the uploaded file.
-        await self.metadata_storage.save(document)
+        # Serialization belongs to this caller; the metadata store only persists JSON.
+        await self.metadata_storage.upsert(
+            DOCUMENT_METADATA_COLLECTION, document.id, document.model_dump_json()
+        )
 
         return document
 
     async def list(self) -> list[Document]:
         """List every saved document record."""
-        return await self.metadata_storage.list()
+        records = await self.metadata_storage.list()
+        return [Document.model_validate_json(record) for record in records]
 
-    async def get(self, document_id: str) -> Document | None:
+    async def get(self, document_id: str) -> Document:
         """Get one document record by its ID."""
-        return await self.metadata_storage.get(document_id)
+        try:
+            record = await self.metadata_storage.get(document_id)
+        except KeyError:
+            raise DocumentNotFoundError(document_id) from None
+        return Document.model_validate_json(record)
 
     async def delete(self, document_id: str) -> bool:
         """Delete the file, its SQL tables, and its metadata when it exists."""
-        document = await self.metadata_storage.get(document_id)
-
-        if document is None:
-            return False
+        await self.get(document_id)
 
         await self.file_storage.delete(document_id)
         if self.sql_storage:

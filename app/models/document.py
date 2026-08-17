@@ -35,10 +35,5 @@ class DocumentChunk:
     # chunk.text is only used for vector search but the image itself should be sent to llm
     binary_content: bytes | None = None
     binary_mime_type: str | None = None
-
-
-@dataclass
-class DocumentProcessorChunk(DocumentChunk):
-    """A chunk during processing, retaining its source elements from Unstructured.io"""
-
+    # chunk's original Unstructured.io elements, used for processing
     orig_elements: list[Element] = field(default_factory=list)

@@ -4,7 +4,7 @@ from app.services.document import DocumentService
 from app.embedders.base import Embedder
 from app.store_vector.base import VectorStorage
 from app.store_sql.base import SqlStorage, StoredSqlTable, SqlTableData
-from app.models.document import DocumentCategory, DocumentProcessorChunk
+from app.models.document import DocumentCategory, DocumentChunk
 from app.llm.base import LLMProvider
 from unstructured.partition.auto import partition
 from pathlib import Path
@@ -59,7 +59,7 @@ class IngestionService:
 
     @staticmethod
     def _attach_sql_metadata(
-        chunks: list[DocumentProcessorChunk], tables: list[StoredSqlTable]
+        chunks: list[DocumentChunk], tables: list[StoredSqlTable]
     ) -> None:
         """Add each spreadsheet chunk's generated SQL table and column names."""
         tables_by_sheet = {table.source_name.casefold(): table for table in tables}

@@ -6,7 +6,7 @@ from typing import Any
 
 from app.models.llm import LLMAttachment
 from app.llm.base import LLMProvider
-from app.models.document import Document, DocumentProcessorChunk
+from app.models.document import Document, DocumentChunk
 from unstructured.documents.elements import Element, Image
 
 IMAGE_PROMPT = """Describe the image for a retrieval system. Identify its subject,
@@ -87,14 +87,14 @@ async def process_image(
     document: Document,
     elements: list[Element],
     llm: LLMProvider,
-) -> list[DocumentProcessorChunk]:
+) -> list[DocumentChunk]:
     """Create retrievable image chunks while keeping original bytes for final answers."""
     images = [element for element in elements if isinstance(element, Image)]
     if not images:
         return []
 
     context = _text_context(elements)
-    chunks: list[DocumentProcessorChunk] = []
+    chunks: list[DocumentChunk] = []
     for i, image in enumerate(images):
         image_bytes, mime_type, source = _image_bytes(document, image)
         description = ""
@@ -108,7 +108,7 @@ async def process_image(
                 pass
 
         chunks.append(
-            DocumentProcessorChunk(
+            DocumentChunk(
                 id=f"{document.id}:image:{i}",
                 document=document,
                 text=_description_text(description, context),

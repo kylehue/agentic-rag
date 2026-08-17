@@ -1,4 +1,4 @@
-from app.models.document import Document, DocumentCategory, DocumentProcessorChunk
+from app.models.document import Document, DocumentCategory, DocumentChunk
 from app.llm.base import LLMProvider
 
 from app.processors.table import process_table
@@ -11,7 +11,7 @@ async def process(
     document: Document,
     elements: list[Element],
     llm: LLMProvider,
-) -> list[DocumentProcessorChunk]:
+) -> list[DocumentChunk]:
     """Process document and return every searchable chunk."""
     chunks = []
 

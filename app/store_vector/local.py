@@ -1,24 +1,20 @@
 import asyncio
-import json
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 import chromadb
 
 from app.core.config import settings
-from app.models.document import Document, DocumentChunk
-from app.models.rag import RetrievalCandidate
 from app.store_vector.base import VectorStorage
 
 
 class LocalVectorStorage(VectorStorage):
-    """Stores embeddings in local Chroma while hiding Chroma-specific details.
-
-    Flow: search() > Chroma query > _chunk_from_result() > RetrievalCandidate
-    """
+    """Stores chunk IDs and embeddings in local Chroma."""
 
     def __init__(
-        self, storage_dir: str | Path | None = None, collection_name: str | None = None
+        self,
+        storage_dir: str | Path | None = None,
+        collection_name: str | None = None,
     ):
         path = Path(storage_dir or settings.VECTOR_LOCAL_STORAGE_DIR)
         path.mkdir(parents=True, exist_ok=True)
@@ -28,51 +24,28 @@ class LocalVectorStorage(VectorStorage):
             metadata={"hnsw:space": "cosine"},
         )
 
-    @staticmethod
-    def _metadata(chunk: DocumentChunk) -> dict[str, str | int | float | bool]:
-        """Chroma metadata is scalar-only; retain richer processor metadata as JSON."""
-        metadata: dict[str, str | int | float | bool] = {
-            "document_id": chunk.document.id,
-            "filename": chunk.document.filename,
-            "category": chunk.document.category.value,
-            "document": json.dumps(chunk.document.model_dump(mode="json")),
-            "chunk_metadata": json.dumps(chunk.metadata, default=str),
-        }
-        if chunk.binary_content is not None:
-            metadata["binary_content"] = json.dumps(
-                {
-                    "data": chunk.binary_content.hex(),
-                    "mime_type": chunk.binary_mime_type,
-                }
-            )
-        page_number = chunk.metadata.get("page_number")
-        if isinstance(page_number, (str, int, float, bool)):
-            metadata["page_number"] = page_number
-        return metadata
-
-    async def add_documents(
+    async def add(
         self,
-        documents: Sequence[DocumentChunk],
+        ids: Sequence[str],
         embeddings: Sequence[Sequence[float]],
     ) -> None:
-        """Upsert chunks and their matching embeddings into Chroma."""
-        if len(documents) != len(embeddings):
-            raise ValueError("documents and embeddings must have the same length")
-        if not documents:
+        """Upsert chunk IDs and their matching embeddings into Chroma."""
+        if len(ids) != len(embeddings):
+            raise ValueError("ids and embeddings must have the same length")
+        if not ids:
             return
 
+        # Delete first so re-indexing an existing ID also removes legacy Chroma
+        # documents and metadata from versions that stored chunk payloads here.
+        await asyncio.to_thread(self._collection.delete, ids=list(ids))
         await asyncio.to_thread(
             self._collection.upsert,
-            ids=[chunk.id for chunk in documents],
-            documents=[chunk.text for chunk in documents],
+            ids=list(ids),
             embeddings=[list(embedding) for embedding in embeddings],
-            metadatas=[self._metadata(chunk) for chunk in documents],
         )
 
-    async def search(
-        self, query_embedding: list[float], top_k: int = 5
-    ) -> list[RetrievalCandidate]:
-        """Ask Chroma for nearest chunks and convert them to app candidates."""
+    async def search(self, query_embedding: list[float], top_k: int = 5) -> list[str]:
+        """Return the IDs of the nearest chunks in ranked order."""
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
         collection_count = await asyncio.to_thread(self._collection.count)
@@ -83,79 +56,11 @@ class LocalVectorStorage(VectorStorage):
             self._collection.query,
             query_embeddings=[query_embedding],
             n_results=min(top_k, collection_count),
-            include=["documents", "metadatas", "distances"],
+            include=[],
         )
+        return result["ids"][0]
 
-        return [
-            self._chunk_from_result(identifier, text, metadata, distance)  # type: ignore
-            for identifier, text, metadata, distance in zip(
-                result["ids"][0],
-                result["documents"][0],  # type: ignore
-                result["metadatas"][0],  # type: ignore
-                result["distances"][0],  # type: ignore
-            )
-        ]
-
-    @classmethod
-    def _chunk_from_result(
-        cls,
-        identifier: str,
-        text: str,
-        metadata: dict[str, Any] | None,
-        distance: float | None,
-    ) -> RetrievalCandidate:
-        """Rebuild one app-level candidate from Chroma's stored fields."""
-        stored_metadata = dict(metadata or {})
-        raw_document = stored_metadata.get("document")
-        try:
-            document = Document.model_validate_json(raw_document)  # type: ignore
-        except (TypeError, ValueError) as error:
-            raise ValueError(
-                "Stored vector is missing a valid document payload; re-ingest the document."
-            ) from error
-
-        binary_content, binary_mime_type = cls._decode_binary_content(stored_metadata)
-        return RetrievalCandidate(
-            id=identifier,
-            text=text,
-            document=document,
-            metadata=cls._decode_metadata(stored_metadata),
-            # Chroma cosine distance is lower-is-better. Convert it at the adapter
-            # boundary so no retriever relies on Chroma metadata or scoring.
-            score=1.0 - distance if isinstance(distance, (int, float)) else None,
-            binary_content=binary_content,
-            binary_mime_type=binary_mime_type,
-        )
-
-    @staticmethod
-    def _decode_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
-        """Read chunk JSON metadata, returning an empty dictionary if invalid."""
-        raw_metadata = (metadata or {}).get("chunk_metadata", "{}")
-        try:
-            decoded = json.loads(raw_metadata)
-        except (TypeError, json.JSONDecodeError):
-            return {}
-        return decoded if isinstance(decoded, dict) else {}
-
-    @staticmethod
-    def _decode_binary_content(
-        metadata: dict[str, Any] | None,
-    ) -> tuple[bytes | None, str | None]:
-        """Read an optional binary attachment and its MIME type from metadata."""
-        try:
-            payload = json.loads((metadata or {}).get("binary_content", "{}"))
-            data = payload.get("data")
-            return (
-                (bytes.fromhex(data), payload.get("mime_type"))
-                if isinstance(data, str)
-                else (None, None)
-            )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return None, None
-
-    async def delete_document(self, document_id: str) -> None:
-        """Remove all Chroma entries that belong to one document."""
-        await asyncio.to_thread(
-            self._collection.delete,
-            where={"document_id": document_id},
-        )
+    async def delete(self, ids: Sequence[str]) -> None:
+        """Remove vectors for the supplied chunk IDs."""
+        if ids:
+            await asyncio.to_thread(self._collection.delete, ids=list(ids))

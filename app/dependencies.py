@@ -25,11 +25,14 @@ from app.retrievers.document import DocumentRetriever
 from app.retrievers.image import ImageRetriever
 from app.retrievers.spreadsheet import SpreadsheetRetriever
 
-document_service = DocumentService(file_storage, metadata_storage, sql_storage)
+document_service = DocumentService(
+    file_storage, metadata_storage, sql_storage, vector_storage
+)
 ingestion_service = IngestionService(
     document_service,
     embedder,
     vector_storage,
+    metadata_storage,
     llm,
     sql_storage,
 )
@@ -37,6 +40,7 @@ ingestion_service = IngestionService(
 retrieval_service = RetrievalService(
     embedder,
     vector_storage,
+    metadata_storage,
     [
         DocumentRetriever(),
         SpreadsheetRetriever(llm, sql_storage),

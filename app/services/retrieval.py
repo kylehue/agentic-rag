@@ -10,6 +10,8 @@ from app.models.rag import (
 )
 from app.retrievers.base import Retriever
 from app.store_vector.base import VectorStorage
+from app.store_metadata.base import MetadataStorage
+from app.utils.chunks import deserialize_chunk
 
 
 class RetrievalService:
@@ -22,10 +24,12 @@ class RetrievalService:
         self,
         embedder: Embedder,
         vector_storage: VectorStorage,
+        metadata_storage: MetadataStorage,
         retrievers: Sequence[Retriever],
     ):
         self._embedder = embedder
         self._vector_storage = vector_storage
+        self._metadata_storage = metadata_storage
         self._retrievers = tuple(retrievers)
         names = [retriever.name for retriever in retrievers]
         if len(names) != len(set(names)):
@@ -47,7 +51,29 @@ class RetrievalService:
     ) -> list[RetrievalCandidate]:
         """Embed the question, search vectors, and apply any category filter."""
         query_embedding = await self._embedder.embed_query(request.query)
-        candidates = await self._vector_storage.search(query_embedding, request.top_k)
+        chunk_ids = await self._vector_storage.search(query_embedding, request.top_k)
+        records = await asyncio.gather(
+            *(self._metadata_storage.get(chunk_id) for chunk_id in chunk_ids),
+            return_exceptions=True,
+        )
+        candidates = []
+        for chunk_id, record in zip(chunk_ids, records):
+            try:
+                if isinstance(record, Exception):
+                    continue
+                chunk = deserialize_chunk(record)  # type: ignore
+            except ValueError:
+                continue
+            candidates.append(
+                RetrievalCandidate(
+                    id=chunk.id,
+                    text=chunk.text,
+                    document=chunk.document,
+                    metadata=chunk.metadata,
+                    binary_content=chunk.binary_content,
+                    binary_mime_type=chunk.binary_mime_type,
+                )
+            )
         if request.categories is None:
             return candidates
         return [

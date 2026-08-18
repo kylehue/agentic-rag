@@ -3,12 +3,16 @@ from app.processors.pipeline import process
 from app.services.document import DocumentService
 from app.embedders.base import Embedder
 from app.store_vector.base import VectorStorage
+from app.store_metadata.base import MetadataStorage
+from app.utils.chunks import serialize_chunk
 from app.store_sql.base import SqlStorage, StoredSqlTable, SqlTableData
 from app.models.document import DocumentCategory, DocumentChunk
 from app.llm.base import LLMProvider
 from unstructured.partition.auto import partition
 from pathlib import Path
 import pandas as pd
+
+CHUNK_METADATA_COLLECTION = "chunks"
 
 
 class IngestionService:
@@ -22,12 +26,14 @@ class IngestionService:
         document_service: DocumentService,
         embedder: Embedder,
         vector_storage: VectorStorage,
+        metadata_storage: MetadataStorage,
         llm: LLMProvider,
         sql_storage: SqlStorage | None = None,
     ):
         self.document_service = document_service
         self.embedder = embedder
         self.vector_storage = vector_storage
+        self.metadata_storage = metadata_storage
         self.llm = llm
         self.sql_storage = sql_storage
 
@@ -53,7 +59,11 @@ class IngestionService:
         embeddings = await self.embedder.embed_documents(
             [chunk.text for chunk in chunks]
         )
-        await self.vector_storage.add_documents(chunks, embeddings)
+        for chunk in chunks:
+            await self.metadata_storage.upsert(
+                CHUNK_METADATA_COLLECTION, chunk.id, serialize_chunk(chunk)
+            )
+        await self.vector_storage.add([chunk.id for chunk in chunks], embeddings)
 
         return document
 

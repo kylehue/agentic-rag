@@ -7,7 +7,7 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
 
 @router.get("/", response_model=list[Document])
 async def get_documents():
-    return await document_service.list()
+    return await document_service.get_all()
 
 
 @router.get("/{document_id}", response_model=Document)

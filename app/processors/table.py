@@ -46,7 +46,7 @@ def _table_label(table: Table, index: int) -> str:
     return getattr(table.metadata, "page_name", None) or f"Table {index + 1}"
 
 
-def _source_rows(table: Table) -> list[str]:
+def _source_rows(table: Table, limit: int) -> list[str]:
     """Return readable rows, preferring the table structure retained by Unstructured."""
     html = getattr(table.metadata, "text_as_html", None)
     if not html:
@@ -54,7 +54,7 @@ def _source_rows(table: Table) -> list[str]:
 
     soup = BeautifulSoup(html, "html.parser")
     rows = []
-    for row in soup.find_all("tr"):
+    for row in soup.find_all("tr", limit=limit + 1):
         cells = [cell.get_text(" ", strip=True) for cell in row.find_all(["th", "td"])]
         if cells:
             rows.append(" | ".join(cells))
@@ -63,34 +63,25 @@ def _source_rows(table: Table) -> list[str]:
 
 def _sample_table_rows(table: Table, char_limit: int) -> str:
     """Give the LLM headers and representative data, never an entire large sheet."""
-    rows = _source_rows(table)
+
+    rows = _source_rows(table, SAMPLED_DATA_ROWS_PER_TABLE)
     if not rows:
         return "[empty table]"
 
     header, data_rows = rows[0], rows[1:]
-    if len(data_rows) <= SAMPLED_DATA_ROWS_PER_TABLE:
-        sampled_rows = data_rows
-        omitted_count = 0
-    else:
-        head_count = SAMPLED_DATA_ROWS_PER_TABLE // 2
-        tail_count = SAMPLED_DATA_ROWS_PER_TABLE - head_count
-        sampled_rows = data_rows[:head_count] + data_rows[-tail_count:]
-        omitted_count = len(data_rows) - len(sampled_rows)
 
-    preview_lines = [header, *sampled_rows]
-    if omitted_count:
-        preview_lines.insert(
-            1 + SAMPLED_DATA_ROWS_PER_TABLE // 2,
-            f"[{omitted_count:,} data rows omitted from LLM context]",
-        )
+    preview_lines = [header, *data_rows]
+
     preview = "\n".join(preview_lines)
     if len(preview) > char_limit:
         return preview[:char_limit] + "\n[preview truncated]"
+
     return preview
 
 
 def _build_catalog(tables: list[Table]) -> str:
     """Create a balanced, row-sampled preview so no large sheet hides the rest."""
+
     per_table_limit = min(
         MAX_TABLE_CONTEXT_CHARS,
         max(1, MAX_WORKBOOK_CONTEXT_CHARS // len(tables)),
@@ -212,12 +203,12 @@ def _analysis_text(
 
 
 def _add_related_sheet_names(
-    analyses: list[dict[str, Any]], tables: list[Table]
+    table_analyses: list[dict[str, Any]], tables: list[Table]
 ) -> None:
     """Turn model indexes into stable, human-readable worksheet references."""
-    for analysis in analyses:
+    for table_analysis in table_analyses:
         enriched_relationships = []
-        for relationship in analysis["relationships"]:
+        for relationship in table_analysis["relationships"]:
             if not isinstance(relationship, dict):
                 enriched_relationships.append(relationship)
                 continue
@@ -226,7 +217,7 @@ def _add_related_sheet_names(
             if isinstance(index, int) and 0 <= index < len(tables):
                 enriched["sheet_name"] = _table_label(tables[index], index)
             enriched_relationships.append(enriched)
-        analysis["relationships"] = enriched_relationships
+        table_analysis["relationships"] = enriched_relationships
 
 
 async def process_table(
@@ -235,44 +226,52 @@ async def process_table(
     llm: LLMProvider,
 ) -> list[DocumentChunk]:
     """Create chunks enriched by a single workbook-level LLM analysis."""
+
+    # Collect all table elements in `elements`
     tables = [e for e in elements if isinstance(e, Table)]
     if not tables:
         return []
 
+    # LLM: Generate description and schema
     workbook_description = ""
-    analyses = [_empty_analysis() for _ in tables]
+    table_analyses = [_empty_analysis() for _ in tables]
     try:
         response = await llm.answer(
             WORKBOOK_ANALYSIS_PROMPT.replace("{catalog}", _build_catalog(tables))
         )
-        workbook_description, analyses = _parse_workbook_analysis(response, len(tables))
+        workbook_description, table_analyses = _parse_workbook_analysis(
+            response, len(tables)
+        )
     except Exception:
         # Index source data even when the provider is unavailable or malformed.
         pass
+    _add_related_sheet_names(table_analyses, tables)
 
-    _add_related_sheet_names(analyses, tables)
-
+    # Output chunks
     chunks: list[DocumentChunk] = []
     for i, table in enumerate(tables):
-        analysis = analyses[i]
+        table_analysis = table_analyses[i]
         sheet_name = _table_label(table, i)
         chunks.append(
             DocumentChunk(
                 id=f"{document.id}:table:{i}",
                 document=document,
                 text=_analysis_text(
-                    sheet_name, workbook_description, analysis, table.text
+                    sheet_name,
+                    workbook_description,
+                    table_analysis,
+                    table.text,
                 ),
                 orig_elements=[table],
                 metadata={
                     "page_number": getattr(table.metadata, "page_number", None),
                     "sheet_name": sheet_name,
-                    "table_html": getattr(table.metadata, "text_as_html", None),
+                    "table_html": getattr(table.metadata, "", None),
                     "workbook_description": workbook_description,
-                    "description": analysis["description"],
-                    "role": analysis["role"],
-                    "schema": analysis["schema"],
-                    "relationships": analysis["relationships"],
+                    "description": table_analysis["description"],
+                    "role": table_analysis["role"],
+                    "schema": table_analysis["schema"],
+                    "relationships": table_analysis["relationships"],
                 },
             )
         )

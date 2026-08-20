@@ -1,13 +1,13 @@
 import base64
 import binascii
 import mimetypes
-from pathlib import Path
 from typing import Any
 
 from app.models.llm import LLMAttachment
 from app.llm.base import LLMProvider
 from app.models.document import Document, DocumentChunk
 from unstructured.documents.elements import Element, Image
+from app.dependencies import document_service
 
 IMAGE_PROMPT = """Describe the image for a retrieval system. Identify its subject,
 important objects, people, actions, layout, visible labels, and any useful chart,
@@ -20,17 +20,20 @@ what is visibly present in the image:
 
 
 def _text_context(elements: list[Element]) -> str:
-    """Collect nearby extracted text to help describe an image during ingestion."""
+    """Collect nearby extracted text to help LLM describe an image."""
+
     texts = []
     for element in elements:
         text = getattr(element, "text", None)
         if isinstance(text, str) and text.strip():
             texts.append(text.strip())
+
     return "\n\n".join(texts)[:8_000]
 
 
 def _decode_base64(value: Any) -> bytes | None:
     """Decode a base64 image payload safely, returning None for invalid input."""
+
     if isinstance(value, bytes):
         return value
     if not isinstance(value, str) or not value.strip():
@@ -44,39 +47,36 @@ def _decode_base64(value: Any) -> bytes | None:
         return None
 
 
-def _image_bytes(document: Document, image: Image) -> tuple[bytes | None, str, str]:
+async def _image_bytes(document: Document, image: Image) -> tuple[bytes | None, str]:
     """Get image bytes from embedded data or a file, and record where they came from."""
+
     metadata = image.metadata
+
+    # For images in text documents
     embedded = _decode_base64(getattr(metadata, "image_base64", None))
     if embedded:
         mime_type = getattr(metadata, "image_mime_type", None) or "image/png"
-        return embedded, mime_type, "embedded"
+        return embedded, mime_type
 
-    candidates = [getattr(metadata, "image_path", None), document.path]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        path = Path(candidate)
-        if path.is_file():
-            try:
-                payload = path.read_bytes()
-            except OSError:
-                continue
-            mime_type = (
-                getattr(metadata, "image_mime_type", None)
-                or mimetypes.guess_type(path.name)[0]
-                or "application/octet-stream"
-            )
-            return payload, mime_type, "file"
-    return (
-        None,
-        getattr(metadata, "image_mime_type", None) or "image/png",
-        "unavailable",
-    )
+    # For image documents
+    try:
+        payload = await document_service.read_bytes(document.id)
+        mime_type = (
+            getattr(metadata, "image_mime_type", None)
+            or mimetypes.guess_type(document.path)[0]
+            or "application/octet-stream"
+        )
+        return payload, mime_type
+    except:
+        return (
+            None,
+            getattr(metadata, "image_mime_type", None) or "image/png",
+        )
 
 
 def _description_text(description: str, context: str) -> str:
     """Build text used only to make an image retrievable by semantic search."""
+
     parts = ["Image description:", description or "Image description unavailable."]
     if context:
         parts.extend(("Related document text:", context))
@@ -89,15 +89,22 @@ async def process_image(
     llm: LLMProvider,
 ) -> list[DocumentChunk]:
     """Create retrievable image chunks while keeping original bytes for final answers."""
-    images = [element for element in elements if isinstance(element, Image)]
+
+    # Collect all image elements in `elements`.
+    # Ideally, there should be only one image element unless it came from a text document chunk.
+    images = [e for e in elements if isinstance(e, Image)]
     if not images:
         return []
 
+    # Collect text content around the image to help LLM describe the image.
     context = _text_context(elements)
+
     chunks: list[DocumentChunk] = []
     for i, image in enumerate(images):
-        image_bytes, mime_type, source = _image_bytes(document, image)
+        image_bytes, mime_type = await _image_bytes(document, image)
         description = ""
+
+        # LLM: Generate image description
         if image_bytes:
             try:
                 description = await llm.answer(
@@ -107,6 +114,7 @@ async def process_image(
             except Exception:
                 pass
 
+        # Output chunk
         chunks.append(
             DocumentChunk(
                 id=f"{document.id}:image:{i}",
@@ -115,13 +123,13 @@ async def process_image(
                 orig_elements=[image],
                 metadata={
                     "page_number": getattr(image.metadata, "page_number", None),
-                    "image_mime_type": mime_type,
-                    "image_source": source,
-                    "description": description,
-                    "context": context,
+                    "is_image_embedded": bool(
+                        getattr(image.metadata, "image_base64", None)
+                    ),
                 },
                 binary_content=image_bytes,
                 binary_mime_type=mime_type if image_bytes else None,
             )
         )
+
     return chunks

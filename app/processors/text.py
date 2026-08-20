@@ -3,7 +3,7 @@ from unstructured.chunking.title import chunk_by_title
 from unstructured.documents.elements import Element, Image, Table
 
 from app.llm.base import LLMProvider
-from app.models.document import Document, DocumentChunk
+from app.models.document import Document
 from app.processors.image import process_image
 
 
@@ -11,7 +11,7 @@ async def process_text(
     document: Document,
     elements: list[Element],
     llm: LLMProvider,
-) -> list[DocumentChunk]:
+) -> list[Document]:
     """Split extracted text into useful chunks while preserving source elements."""
 
     # Chunk
@@ -32,12 +32,12 @@ async def process_text(
         )
 
     # Convert unstructured chunks into the app's chunk model
-    document_chunks: list[DocumentChunk] = []
+    document_chunks: list[Document] = []
     for i, chunk in enumerate(raw_chunks):
         document_chunks.append(
-            DocumentChunk(
+            Document(
+                **document.model_dump(),
                 id=f"{document.id}:{i}",
-                document=document,
                 text=chunk.text,
                 orig_elements=chunk.metadata.orig_elements or [],
                 metadata={
@@ -49,6 +49,8 @@ async def process_text(
     # Extract tables and images
     for chunk in document_chunks:
         # Check whether this document chunk includes an image or table element
+        if chunk.orig_elements is None:
+            continue
         has_table, has_image = False, False
         for element in chunk.orig_elements:
             if isinstance(element, Image):

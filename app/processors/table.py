@@ -3,7 +3,7 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 from app.llm.base import LLMProvider
-from app.models.document import Document, DocumentChunk
+from app.models.document import Document
 from unstructured.documents.elements import Element, Table
 
 MAX_WORKBOOK_CONTEXT_CHARS = 30_000
@@ -224,7 +224,7 @@ async def process_table(
     document: Document,
     elements: list[Element],
     llm: LLMProvider,
-) -> list[DocumentChunk]:
+) -> list[Document]:
     """Create chunks enriched by a single workbook-level LLM analysis."""
 
     # Collect all table elements in `elements`
@@ -248,14 +248,14 @@ async def process_table(
     _add_related_sheet_names(table_analyses, tables)
 
     # Output chunks
-    chunks: list[DocumentChunk] = []
+    chunks: list[Document] = []
     for i, table in enumerate(tables):
         table_analysis = table_analyses[i]
         sheet_name = _table_label(table, i)
         chunks.append(
-            DocumentChunk(
+            Document(
+                **document.model_dump(),
                 id=f"{document.id}:table:{i}",
-                document=document,
                 text=_analysis_text(
                     sheet_name,
                     workbook_description,

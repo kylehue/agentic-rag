@@ -5,7 +5,7 @@ from typing import Any
 
 from app.models.llm import LLMAttachment
 from app.llm.base import LLMProvider
-from app.models.document import Document, DocumentChunk
+from app.models.document import Document
 from unstructured.documents.elements import Element, Image
 from app.dependencies import document_service
 
@@ -87,7 +87,7 @@ async def process_image(
     document: Document,
     elements: list[Element],
     llm: LLMProvider,
-) -> list[DocumentChunk]:
+) -> list[Document]:
     """Create retrievable image chunks while keeping original bytes for final answers."""
 
     # Collect all image elements in `elements`.
@@ -97,9 +97,10 @@ async def process_image(
         return []
 
     # Collect text content around the image to help LLM describe the image.
+    # Ideally, this would be empty if the image element came from an image document.
     context = _text_context(elements)
 
-    chunks: list[DocumentChunk] = []
+    chunks: list[Document] = []
     for i, image in enumerate(images):
         image_bytes, mime_type = await _image_bytes(document, image)
         description = ""
@@ -116,9 +117,9 @@ async def process_image(
 
         # Output chunk
         chunks.append(
-            DocumentChunk(
+            Document(
+                **document.model_dump(),
                 id=f"{document.id}:image:{i}",
-                document=document,
                 text=_description_text(description, context),
                 orig_elements=[image],
                 metadata={

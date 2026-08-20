@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
 from unstructured.documents.elements import Element
 
 
@@ -14,23 +14,19 @@ class DocumentCategory(str, Enum):
     IMAGE = "image"
 
 
-class Document(BaseModel):
-    """The persistent record describing one uploaded source file."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)  # allow orig_elements
+@dataclass
+class Document:
+    """The persistent record describing a document chunk."""
 
     # --- file info ---
-    id: str
-    filename: str
-    extension: str
-    path: str
-    category: DocumentCategory
+    file_filename: str
+    file_bytes: bytes
+    file_content_type: str
 
     # --- chunk info ---
+    category: DocumentCategory = DocumentCategory.DOCUMENT
     text: str = ""
     metadata: dict[str, Any] = {}
-    # chunk.text is only used for vector search but the image itself should be sent to llm
-    binary_content: bytes | None = None
-    binary_mime_type: str | None = None
     # chunk's original Unstructured.io elements, used for processing
     orig_elements: list[Element] | None = None
+    id: str = str(uuid4())

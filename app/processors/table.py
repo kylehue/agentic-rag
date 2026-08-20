@@ -3,8 +3,10 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 from app.llm.base import LLMProvider
-from app.models.document import Document
+from app.models.document import Document, DocumentCategory
 from unstructured.documents.elements import Element, Table
+
+from app.models.ingestion import ProcessorPayload
 
 MAX_WORKBOOK_CONTEXT_CHARS = 30_000
 MAX_TABLE_CONTEXT_CHARS = 10_000
@@ -220,15 +222,11 @@ def _add_related_sheet_names(
         table_analysis["relationships"] = enriched_relationships
 
 
-async def process_table(
-    document: Document,
-    elements: list[Element],
-    llm: LLMProvider,
-) -> list[Document]:
+async def process_table(payload: ProcessorPayload) -> list[Document]:
     """Create chunks enriched by a single workbook-level LLM analysis."""
 
     # Collect all table elements in `elements`
-    tables = [e for e in elements if isinstance(e, Table)]
+    tables = [e for e in payload.elements if isinstance(e, Table)]
     if not tables:
         return []
 
@@ -236,7 +234,7 @@ async def process_table(
     workbook_description = ""
     table_analyses = [_empty_analysis() for _ in tables]
     try:
-        response = await llm.answer(
+        response = await payload.llm.answer(
             WORKBOOK_ANALYSIS_PROMPT.replace("{catalog}", _build_catalog(tables))
         )
         workbook_description, table_analyses = _parse_workbook_analysis(
@@ -254,16 +252,18 @@ async def process_table(
         sheet_name = _table_label(table, i)
         chunks.append(
             Document(
-                **document.model_dump(),
-                id=f"{document.id}:table:{i}",
+                file_filename=payload.file_filename,
+                file_bytes=payload.file_bytes,
+                file_content_type=payload.file_content_type,
+                category=DocumentCategory.SPREADSHEET,
                 text=_analysis_text(
                     sheet_name,
                     workbook_description,
                     table_analysis,
                     table.text,
                 ),
-                orig_elements=[table],
                 metadata={
+                    "file_id": payload.file_id,
                     "page_number": getattr(table.metadata, "page_number", None),
                     "sheet_name": sheet_name,
                     "table_html": getattr(table.metadata, "", None),
@@ -273,6 +273,7 @@ async def process_table(
                     "schema": table_analysis["schema"],
                     "relationships": table_analysis["relationships"],
                 },
+                orig_elements=[table],
             )
         )
     return chunks

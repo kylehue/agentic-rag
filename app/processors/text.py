@@ -1,24 +1,20 @@
 from unstructured.chunking.basic import chunk_elements
 from unstructured.chunking.title import chunk_by_title
-from unstructured.documents.elements import Element, Image, Table
+from unstructured.documents.elements import Image, Table
 
-from app.llm.base import LLMProvider
-from app.models.document import Document
+from app.models.document import Document, DocumentCategory
+from app.models.ingestion import ProcessorPayload
 from app.processors.image import process_image
 
 
-async def process_text(
-    document: Document,
-    elements: list[Element],
-    llm: LLMProvider,
-) -> list[Document]:
+async def process_text(payload: ProcessorPayload) -> list[Document]:
     """Split extracted text into useful chunks while preserving source elements."""
 
     # Chunk
-    has_title = any(type(e).__name__ == "Title" for e in elements)
+    has_title = any(type(e).__name__ == "Title" for e in payload.elements)
     if has_title:
         raw_chunks = chunk_by_title(
-            elements,
+            payload.elements,
             max_characters=3000,
             new_after_n_chars=2400,
             overlap=200,
@@ -26,7 +22,7 @@ async def process_text(
         )
     else:
         raw_chunks = chunk_elements(
-            elements,
+            payload.elements,
             max_characters=1500,
             overlap=200,
         )
@@ -36,17 +32,21 @@ async def process_text(
     for i, chunk in enumerate(raw_chunks):
         document_chunks.append(
             Document(
-                **document.model_dump(),
-                id=f"{document.id}:{i}",
+                file_filename=payload.file_filename,
+                file_bytes=payload.file_bytes,
+                file_content_type=payload.file_content_type,
+                category=DocumentCategory.DOCUMENT,
                 text=chunk.text,
-                orig_elements=chunk.metadata.orig_elements or [],
                 metadata={
+                    "file_id": payload.file_id,
                     "page_number": getattr(chunk.metadata, "page_number", None),
                 },
+                orig_elements=chunk.metadata.orig_elements or [],
             )
         )
 
-    # Extract tables and images
+    # Extract embedded tables and images
+    embedded_chunks: list[Document] = []
     for chunk in document_chunks:
         # Check whether this document chunk includes an image or table element
         if chunk.orig_elements is None:
@@ -62,8 +62,11 @@ async def process_text(
 
         # Create dedicated image chunks when images are present
         if has_image:
-            image_chunks = await process_image(document, chunk.orig_elements, llm)
-            document_chunks.extend(image_chunks)
+            processor_payload = ProcessorPayload(
+                **payload.__dict__,
+                elements=chunk.orig_elements,
+            )
+            embedded_chunks.extend(await process_image(processor_payload))
 
         # TODO:
         # We shouldn't blindly feed a table to its processor because it could be splitted in different chunks.
@@ -74,5 +77,7 @@ async def process_text(
         # if has_table:
         #     table_chunks = await process_table(document, chunk.orig_elements)
         #     chunks.extend(table_chunks)
+
+    document_chunks.extend(embedded_chunks)
 
     return document_chunks

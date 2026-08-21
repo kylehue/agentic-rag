@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import pandas as pd
@@ -34,7 +36,7 @@ Return valid JSON only in this exact shape:
       "role": "for example: lookup, fact data, summary, instructions, assumptions",
       "schema": [
         {
-          "name": "column name",
+          "name": "column_name",
           "description": "meaning of the column"
         }
       ],
@@ -118,6 +120,56 @@ def _table_html(table: Table) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _normalize_column_name(name: Any) -> str:
+    """Convert a column name into a safe SQL-friendly snake_case name."""
+
+    name = str(name).strip()
+
+    # Replace non-alphanumeric characters with underscores.
+    name = re.sub(r"[^a-zA-Z0-9]+", "_", name)
+
+    # Remove leading/trailing underscores.
+    name = name.strip("_")
+
+    # Lowercase.
+    name = name.lower()
+
+    # Avoid empty names.
+    if not name:
+        name = "column"
+
+    # Avoid identifiers starting with a number.
+    if name[0].isdigit():
+        name = f"column_{name}"
+
+    return name
+
+
+def _normalize_dataframe_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Normalize DataFrame columns into unique SQL-safe snake_case names."""
+
+    used: set[str] = set()
+    normalized: list[str] = []
+
+    for column in dataframe.columns:
+        base_name = _normalize_column_name(column)
+
+        name = base_name
+        suffix = 2
+
+        while name in used:
+            name = f"{base_name}_{suffix}"
+            suffix += 1
+
+        used.add(name)
+        normalized.append(name)
+
+    dataframe = dataframe.copy()
+    dataframe.columns = normalized
+
+    return dataframe
+
+
 def _dataframe_from_html(
     table: Table,
 ) -> pd.DataFrame:
@@ -148,11 +200,12 @@ def _read_document_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
 
     for index, table in enumerate(unstructured_tables):
         dataframe = _dataframe_from_html(table)
+        dataframe = _normalize_dataframe_columns(dataframe)
         name = _table_label(table, index)
         tables.append(
             ExtractedTable(
                 dataframe=dataframe,
-                file_filename=name + ".csv",
+                file_filename=f"{name}.csv",
                 # We don't really need to save these embedded tables as long as they're in SQL
                 # file_bytes=dataframe.to_csv(index=False).encode("utf-8"),
                 file_content_type="text/csv",
@@ -183,6 +236,7 @@ def _read_spreadsheet_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
 
     if extension == ".csv":
         dataframe = pd.read_csv(source)
+        dataframe = _normalize_dataframe_columns(dataframe)
         return [
             ExtractedTable(
                 dataframe=dataframe,
@@ -196,17 +250,20 @@ def _read_spreadsheet_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
 
     if extension in {".xlsx", ".xls"}:
         sheets = pd.read_excel(source, sheet_name=None)
-        return [
-            ExtractedTable(
-                dataframe=dataframe,
-                file_filename=payload.file_filename,
-                file_bytes=payload.file_bytes,
-                file_content_type=payload.file_content_type,
-                name=sheet_name,
-                orig_elements=payload.elements,
+        res: list[ExtractedTable] = []
+        for sheet_name, dataframe in sheets.items():
+            dataframe = _normalize_dataframe_columns(dataframe)
+            res.append(
+                ExtractedTable(
+                    dataframe=dataframe,
+                    file_filename=payload.file_filename,
+                    file_bytes=payload.file_bytes,
+                    file_content_type=payload.file_content_type,
+                    name=sheet_name,
+                    orig_elements=payload.elements,
+                )
             )
-            for sheet_name, dataframe in sheets.items()
-        ]
+        return res
 
     return []
 
@@ -231,9 +288,7 @@ def _extract_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
     return []
 
 
-def _pandas_dtype_to_sql_type(
-    dtype: Any,
-) -> str:
+def _pandas_dtype_to_sql_type(dtype: Any) -> str:
     """
     Convert a pandas dtype into the SQL type used by the application.
 
@@ -253,9 +308,7 @@ def _pandas_dtype_to_sql_type(
     return "TEXT"
 
 
-def _schema_for_prompt(
-    dataframe: pd.DataFrame,
-) -> list[dict[str, str]]:
+def _schema_for_prompt(dataframe: pd.DataFrame) -> list[dict[str, str]]:
     """
     Build the schema representation sent to the LLM.
 
@@ -273,10 +326,7 @@ def _schema_for_prompt(
     ]
 
 
-def _sample_table_rows(
-    dataframe: pd.DataFrame,
-    char_limit: int,
-) -> str:
+def _sample_table_rows(dataframe: pd.DataFrame, char_limit: int) -> str:
     """
     Produce a compact preview containing column names and a few representative
     rows from the DataFrame.
@@ -302,9 +352,7 @@ def _sample_table_rows(
     return preview
 
 
-def _build_catalog(
-    tables: list[ExtractedTable],
-) -> str:
+def _build_catalog(tables: list[ExtractedTable]) -> str:
     """
     Create a row-sampled catalog containing each table's schema, data preview,
     and location information.
@@ -342,9 +390,7 @@ def _build_catalog(
     )
 
 
-def _parse_json(
-    response: str,
-) -> Any:
+def _parse_json(response: str) -> Any:
     """Accept JSON wrapped in a Markdown code fence."""
 
     response = response.strip()
@@ -370,10 +416,7 @@ def _empty_analysis() -> dict[str, Any]:
 def _parse_workbook_analysis(
     response: str,
     table_count: int,
-) -> tuple[
-    str,
-    list[dict[str, Any]],
-]:
+) -> tuple[str, list[dict[str, Any]]]:
     """Normalize model output and preserve missing table analyses."""
 
     payload = _parse_json(response)
@@ -470,7 +513,6 @@ def _analysis_text(
     table_name: str,
     workbook_description: str,
     analysis: dict[str, Any],
-    dataframe: pd.DataFrame,
     context: str,
 ) -> str:
     """
@@ -518,13 +560,6 @@ def _analysis_text(
                 parts.append(f"- {target}: " f"{description}")
             else:
                 parts.append(f"- {relationship}")
-
-    parts.extend(
-        (
-            "Data:",
-            _sample_table_rows(dataframe, MAX_TABLE_CONTEXT_CHARS),
-        )
-    )
 
     return "\n".join(parts)
 
@@ -622,7 +657,6 @@ async def process_table(payload: ProcessorPayload) -> list[Document]:
                     table_name=table_name,
                     workbook_description=workbook_description,
                     analysis=analysis,
-                    dataframe=table.dataframe,
                     context=context,
                 ),
                 metadata={

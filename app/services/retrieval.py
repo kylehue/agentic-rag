@@ -10,7 +10,7 @@ from app.models.rag import (
 )
 from app.retrievers.base import Retriever
 from app.store_vector.base import VectorStorage
-from app.store_metadata.base import MetadataStorage
+from app.store_sql2.base import SqlStorage
 from app.utils.chunks import deserialize_chunk
 
 
@@ -23,13 +23,13 @@ class RetrievalService:
     def __init__(
         self,
         embedder: Embedder,
-        vector_storage: VectorStorage,
-        metadata_storage: MetadataStorage,
         retrievers: Sequence[Retriever],
+        vector_storage: VectorStorage,
+        sql_storage: SqlStorage,
     ):
         self._embedder = embedder
         self._vector_storage = vector_storage
-        self._metadata_storage = metadata_storage
+        self._sql_storage = sql_storage
         self._retrievers = tuple(retrievers)
         names = [retriever.name for retriever in retrievers]
         if len(names) != len(set(names)):
@@ -53,7 +53,7 @@ class RetrievalService:
         query_embedding = await self._embedder.embed_query(request.query)
         chunk_ids = await self._vector_storage.search(query_embedding, request.top_k)
         records = await asyncio.gather(
-            *(self._metadata_storage.get(chunk_id) for chunk_id in chunk_ids),
+            *(self._sql_storage.get(chunk_id) for chunk_id in chunk_ids),
             return_exceptions=True,
         )
         candidates = []

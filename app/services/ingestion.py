@@ -9,7 +9,6 @@ from app.processors.pipeline import process
 from app.embedders.base import Embedder
 from app.store_file.base import FileStorage
 from app.store_vector.base import VectorStorage
-from app.utils.chunks import serialize_chunk
 from app.store_sql2.base import SqlStorage
 from app.models.document import Document, DocumentCategory
 from app.llm.base import LLMProvider
@@ -17,9 +16,11 @@ from unstructured.partition.auto import partition
 from pathlib import Path
 import pandas as pd
 
+from app.utils.chunks import columns_from_document_chunk
 from app.utils.file_type import detect_document_category
 
 CHUNK_METADATA_COLLECTION = "chunks"
+SPREADSHEET_CHUNK_DB_NAME = "spreadsheets"
 
 
 class IngestionService:
@@ -91,21 +92,6 @@ class IngestionService:
             await self._save_image_chunk(chunk)
             await self._save_chunk(chunk)
 
-            # All kinds of chunks to SQL DB
-
-        # if document.category is DocumentCategory.SPREADSHEET:
-        #     tables = await self.sql_storage.replace_document_tables(
-        #         document.id,
-        #         self._extract_spreadsheet_tables(document.path),
-        #     )
-        #     self._attach_sql_metadata(chunks, tables)
-
-        # for chunk in chunks:
-        #     await self.metadata_storage.upsert(
-        #         CHUNK_METADATA_COLLECTION, chunk.id, serialize_chunk(chunk)
-        #     )
-        # await self.vector_storage.add([chunk.id for chunk in chunks], embeddings)
-
     async def _save_image_chunk(self, chunk: Document):
         """Saves image chunk to File DB and attaches file path to chunk metadata."""
 
@@ -122,57 +108,49 @@ class IngestionService:
         )
         chunk.metadata["image_path"] = image_path
 
-    async def _save_spreadsheet_chunk(self, chunk: Document):
-        """Saves spreadsheet chunk's table data to SQL DB and attaches table location to chunk metadata."""
+    async def _save_spreadsheet_chunk(self, chunk: Document) -> None:
+        """Save spreadsheet chunk table data to SQL and attach its SQL location."""
 
         if chunk.category is not DocumentCategory.SPREADSHEET:
             return
 
+        metadata = chunk.metadata
+
+        table_name = metadata.get("sheet_name")
+
+        if not isinstance(table_name, str) or not table_name:
+            raise ValueError("Spreadsheet chunk is missing 'sheet_name'.")
+
+        rows = metadata.get("rows")
+
+        if not isinstance(rows, list):
+            raise ValueError("Spreadsheet chunk is missing 'rows'.")
+
+        # Create the table if it doesn't already exist
+        await self.sql_storage.ensure_table(
+            SPREADSHEET_CHUNK_DB_NAME,
+            table_name,
+            columns_from_document_chunk(chunk),
+        )
+
+        # Nothing to insert
+        if not rows:
+            chunk.metadata["sql_table"] = table_name
+            chunk.metadata["sql_database"] = SPREADSHEET_CHUNK_DB_NAME
+            return
+
+        # Insert/update the table data
+        await self.sql_storage.upsert(
+            SPREADSHEET_CHUNK_DB_NAME,
+            table_name,
+            rows,
+            conflict_columns=[],
+        )
+
+        # Attach the SQL DB location to chunk metadata
+        chunk.metadata["sql_table"] = table_name
+        chunk.metadata["sql_database"] = SPREADSHEET_CHUNK_DB_NAME
+
     async def _save_chunk(self, chunk: Document):
         """Saves chunk's data to SQL DB."""
         await self.sql_storage.upsert("chunks", "chunks", [], ["id"])
-
-    # @staticmethod
-    # def _attach_sql_metadata(
-    #     chunks: list[DocumentChunk], tables: list[StoredSqlTable]
-    # ) -> None:
-    #     """Add each spreadsheet chunk's generated SQL table and column names."""
-    #     tables_by_sheet = {table.source_name.casefold(): table for table in tables}
-    #     for chunk in chunks:
-    #         sheet_name = str(chunk.metadata.get("sheet_name", "")).casefold()
-    #         table = tables_by_sheet.get(sheet_name)
-    #         if table is None and len(tables) == 1:
-    #             table = tables[0]
-    #         if table is None:
-    #             continue
-    #         columns = [column.__dict__ for column in table.columns]
-    #         chunk.metadata["sql_table"] = table.name
-    #         chunk.metadata["sql_columns"] = columns
-    #         chunk.text += (
-    #             "\nSQL table: "
-    #             + table.name
-    #             + "\nSQL columns: "
-    #             + ", ".join(
-    #                 f"{column['source_name']} -> {column['name']} ({column['type']})"
-    #                 for column in columns
-    #             )
-    #         )
-
-    # @staticmethod
-    # def _extract_spreadsheet_tables(path: str | Path) -> list[SqlTableData]:
-    #     """Read an XLSX workbook or CSV file into backend-neutral table data."""
-    #     path = Path(path)
-    #     if path.suffix.casefold() == ".csv":
-    #         sheets = {path.stem or "Sheet1": pd.read_csv(path)}
-    #     else:
-    #         sheets = pd.read_excel(path, sheet_name=None)
-
-    #     return [
-    #         SqlTableData(
-    #             source_name=str(sheet_name),
-    #             columns=[str(column) for column in frame.columns],
-    #             rows=list(frame.itertuples(index=False, name=None)),
-    #         )
-    #         for sheet_name, frame in sheets.items()
-    #         if len(frame.columns)
-    #     ]

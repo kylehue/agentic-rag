@@ -5,14 +5,17 @@ from app.models.document import DocumentCategory
 DOCUMENT_TYPES = {
     "pdf",
     "docx",
+    "doc",
     "txt",
     "md",
     "pptx",
+    "ppt",
 }
 
 SPREADSHEET_TYPES = {
     "csv",
     "xlsx",
+    "xls",
 }
 
 IMAGE_TYPES = {
@@ -22,10 +25,8 @@ IMAGE_TYPES = {
 }
 
 
-def detect_document_category(file_extension: str) -> DocumentCategory:
-    normalized = (
-        file_extension[1:] if file_extension.startswith(".") else file_extension
-    )
+def detect_document_category(filename: str) -> DocumentCategory:
+    normalized = filename.split(".")[-1]
     if normalized in SPREADSHEET_TYPES:
         return DocumentCategory.SPREADSHEET
     elif normalized in IMAGE_TYPES:

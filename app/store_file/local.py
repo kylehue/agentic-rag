@@ -1,49 +1,74 @@
 from pathlib import Path
+from shutil import copyfileobj
+from typing import IO
 from uuid import uuid4
-import shutil
 
-from app.errors.document import InvalidDocumentError
-from app.models.document import Document
 from app.store_file.base import FileStorage
-from app.core.config import settings
-from app.utils.file_type import detect_document_category
-
-UPLOAD_DIR = Path(settings.FILE_LOCAL_STORAGE_DIR)
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class LocalFileStorage(FileStorage):
-    """Stores uploaded files in the configured local directory."""
+    """Stores files in a local directory."""
 
-    async def save(self, file):
-        """Write an uploaded file with a generated ID while keeping its extension."""
-        document_id = str(uuid4())
-
-        if not file.filename:
-            raise InvalidDocumentError()
-
-        extension = Path(file.filename).suffix
-
-        path = UPLOAD_DIR / f"{document_id}{extension}"
-
-        with path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        return Document(
-            id=document_id,
-            filename=file.filename,
-            extension=extension,
-            path=str(path),
-            category=detect_document_category(extension),
+    def __init__(
+        self,
+        storage_dir: str | Path,
+    ):
+        self._storage_dir = Path(storage_dir)
+        self._storage_dir.mkdir(
+            parents=True,
+            exist_ok=True,
         )
 
-    async def delete(self, document_id):
-        """Remove the locally stored file for one document ID."""
-        matches = list(UPLOAD_DIR.glob(f"{document_id}.*"))
+    async def upload(
+        self,
+        *,
+        file: IO[bytes],
+        file_filename: str,
+        file_content_type: str,
+        file_dir: str = "",
+    ) -> str:
+        # Preserve the original extension.
+        extension = Path(file_filename).suffix
 
-        if not matches:
+        # Generate a unique filename.
+        filename = f"{uuid4()}{extension}"
+
+        # Resolve the destination directory.
+        directory = self._storage_dir / file_dir
+        directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        # Full destination path.
+        path = directory / filename
+
+        # Write the file.
+        with path.open("wb") as output:
+            copyfileobj(file, output)
+
+        return str(path)
+
+    async def delete(
+        self,
+        full_path: str,
+    ) -> bool:
+        path = Path(full_path)
+
+        if not path.is_file():
             return False
 
-        matches[0].unlink()
+        path.unlink()
 
         return True
+
+    async def read_bytes(
+        self,
+        full_path: str,
+    ) -> bytes:
+        path = Path(full_path)
+
+        if not path.is_file():
+            raise FileNotFoundError(f"File not found: {full_path}")
+
+        return path.read_bytes()

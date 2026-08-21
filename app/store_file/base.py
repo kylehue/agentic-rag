@@ -1,15 +1,25 @@
 from abc import ABC, abstractmethod
-from fastapi import UploadFile
-from app.models.document import Document
+from typing import IO
 
 
 class FileStorage(ABC):
     """Interface for storing the original uploaded file."""
 
     @abstractmethod
-    async def save(self, file: UploadFile) -> Document:
-        """Save an uploaded file and return its document record."""
+    async def upload(
+        self,
+        *,
+        file: IO[bytes],
+        file_filename: str,
+        file_content_type: str,
+        file_dir: str = "",
+    ) -> str:
+        """Save an uploaded file and return its full path."""
 
     @abstractmethod
-    async def delete(self, document_id: str) -> bool:
-        """Delete the stored file for one document."""
+    async def delete(self, full_path: str) -> bool:
+        """Deletes the stored file for one document."""
+
+    @abstractmethod
+    async def read_bytes(self, full_path: str) -> bytes:
+        """Read the stored file."""

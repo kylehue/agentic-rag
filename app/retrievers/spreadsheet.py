@@ -6,7 +6,7 @@ from app.llm.base import LLMProvider
 from app.models.document import DocumentCategory
 from app.models.rag import RetrievalCandidate, RetrievedEvidence, RetrievalRequest
 from app.retrievers.base import Retriever
-from app.store_sql.base import SqlStorage
+from app.store_sql2.base import SqlStorage
 
 SQL_PROMPT = """You create one SQLite read-only query for a retrieval system.
 Use only the generated table and column names in the supplied schema. Return SQL
@@ -20,6 +20,8 @@ Question:
 Retrieved spreadsheet context and SQL schema:
 {context}
 """
+
+SPREADSHEET_DB = "spreadsheets"
 
 
 class SpreadsheetRetriever(Retriever):
@@ -70,7 +72,9 @@ class SpreadsheetRetriever(Retriever):
 
         try:
             result = await self._sql_storage.query(
-                document.id, sql, max_rows=request.max_sql_rows
+                db_name=SPREADSHEET_DB,
+                sql_query=sql,
+                limit=request.max_sql_rows,
             )
         except Exception as error:
             # Keep the retrieved source context useful when generated SQL is invalid.

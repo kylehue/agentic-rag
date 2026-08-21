@@ -1,52 +1,51 @@
 import json
 from typing import Any
 
-from app.models.document import Document, DocumentChunk
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String
+from app.models.document import Document, DocumentCategory
 
 
-def serialize_chunk(chunk: DocumentChunk) -> str:
-    """Serialize the persistent fields of a chunk without processor-only elements."""
-    return json.dumps(
-        {
-            "id": chunk.id,
-            "text": chunk.text,
-            "document": chunk.document.model_dump(mode="json"),
-            "metadata": chunk.metadata,
-            "binary_content": (
-                chunk.binary_content.hex() if chunk.binary_content is not None else None
-            ),
-            "binary_mime_type": chunk.binary_mime_type,
-        },
-        default=str,
-    )
+def columns_from_document_chunk(chunk: Document) -> list[Column[Any]]:
+    """Create SQLAlchemy columns from the authoritative chunk schema."""
 
+    if chunk.category is not DocumentCategory.SPREADSHEET:
+        raise ValueError("Chunk is not a spreadsheet chunk.")
 
-def deserialize_chunk(chunk_json: str) -> DocumentChunk:
-    """Deserialize a chunk record stored by :func:`serialize_chunk`."""
-    try:
-        payload: dict[str, Any] = json.loads(chunk_json)
-        binary_content = payload.get("binary_content")
-        return DocumentChunk(
-            id=str(payload["id"]),
-            text=str(payload["text"]),
-            document=Document.model_validate(payload["document"]),
-            metadata=dict(payload.get("metadata", {})),
-            binary_content=(
-                bytes.fromhex(binary_content)
-                if isinstance(binary_content, str)
-                else None
-            ),
-            binary_mime_type=(
-                str(payload["binary_mime_type"])
-                if payload.get("binary_mime_type") is not None
-                else None
-            ),
-        )
-    except (
-        AttributeError,
-        KeyError,
-        TypeError,
-        ValueError,
-        json.JSONDecodeError,
-    ) as error:
-        raise ValueError("Invalid stored chunk JSON") from error
+    schema = chunk.metadata.get("schema")
+
+    if not isinstance(schema, list) or not schema:
+        raise ValueError("Spreadsheet chunk has no schema.")
+
+    type_map = {
+        "INTEGER": Integer,
+        "REAL": Float,
+        "TEXT": String,
+        "BOOLEAN": Boolean,
+        "DATETIME": DateTime,
+    }
+
+    columns: list[Column[Any]] = []
+
+    for column in schema:
+        if not isinstance(column, dict):
+            continue
+
+        name = column.get("name")
+        sql_type = column.get("type", "TEXT")
+
+        if not isinstance(name, str) or not name:
+            raise ValueError("Invalid column name.")
+
+        sqlalchemy_type = type_map.get(sql_type)
+
+        if sqlalchemy_type is None:
+            raise ValueError(
+                f"Unsupported SQL type {sql_type!r} " f"for column {name!r}."
+            )
+
+        columns.append(Column(name, sqlalchemy_type))
+
+    if not columns:
+        raise ValueError("Spreadsheet chunk has no valid columns.")
+
+    return columns

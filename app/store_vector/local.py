@@ -4,7 +4,6 @@ from typing import Sequence
 
 import chromadb
 
-from app.core.config import settings
 from app.store_vector.base import VectorStorage
 
 
@@ -13,14 +12,14 @@ class LocalVectorStorage(VectorStorage):
 
     def __init__(
         self,
-        storage_dir: str | Path | None = None,
-        collection_name: str | None = None,
+        storage_dir: str | Path,
+        collection_name: str,
     ):
-        path = Path(storage_dir or settings.VECTOR_LOCAL_STORAGE_DIR)
-        path.mkdir(parents=True, exist_ok=True)
-        self._client = chromadb.PersistentClient(path=str(path))
+        self._storage_dir = Path(storage_dir)
+        self._storage_dir.mkdir(parents=True, exist_ok=True)
+        self._client = chromadb.PersistentClient(path=str(self._storage_dir))
         self._collection = self._client.get_or_create_collection(
-            name=collection_name or settings.VECTOR_COLLECTION_NAME,
+            name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
 

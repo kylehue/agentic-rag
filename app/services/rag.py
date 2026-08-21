@@ -42,7 +42,7 @@ class RagService:
         result = await self.retrieve(request)
         evidence = (
             "\n\n".join(
-                f"Source: {item.document.filename}:{item.id}\n{item.content}"
+                f"Source: {item.document.file_filename}:{item.id}\n{item.content}"
                 for item in result.evidence
             )
             or "(no evidence retrieved)"

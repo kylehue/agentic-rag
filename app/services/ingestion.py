@@ -61,7 +61,7 @@ class IngestionService:
             file_filename=file_filename,
             content_type=file_content_type,
             strategy="hi_res",
-            infer_table_structure=True,  # Keep tables as structured HTML, not jumbled text
+            infer_table_structure=False,  # Keep tables as structured HTML, not jumbled text (false for now)
             extract_image_block_types=["Image"],  # Grab images found in the PDF
             extract_image_block_to_payload=True,  # Store images as base64 data you can actually use
         )
@@ -110,6 +110,9 @@ class IngestionService:
         """Saves image chunk to File DB and attaches file path to chunk metadata."""
 
         if chunk.category is not DocumentCategory.IMAGE:
+            return
+
+        if not chunk.file_bytes:
             return
 
         image_path = await self.file_storage.upload(

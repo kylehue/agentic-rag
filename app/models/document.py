@@ -20,8 +20,8 @@ class Document:
 
     # --- file info ---
     file_filename: str
-    file_bytes: bytes
     file_content_type: str
+    file_bytes: bytes | None = None
 
     # --- chunk info ---
     category: DocumentCategory = DocumentCategory.DOCUMENT

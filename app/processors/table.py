@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
@@ -596,7 +597,10 @@ def _add_related_table_names(
 async def process_table(payload: ProcessorPayload) -> list[Document]:
     """Create chunks enriched by a single workbook-level LLM analysis."""
 
-    tables = _extract_tables(payload)
+    tables = await asyncio.to_thread(
+        _extract_tables,
+        payload,
+    )
 
     if not tables:
         return []
@@ -620,10 +624,7 @@ async def process_table(payload: ProcessorPayload) -> list[Document]:
             )
         )
 
-        (
-            workbook_description,
-            table_analyses,
-        ) = _parse_workbook_analysis(
+        workbook_description, table_analyses = _parse_workbook_analysis(
             response,
             len(tables),
         )

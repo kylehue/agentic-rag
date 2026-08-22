@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     METADATA_LOCAL_STORAGE_DIR: str = "./.storage/metadata"
     VECTOR_LOCAL_STORAGE_DIR: str = "./.storage/vector"
     VECTOR_COLLECTION_NAME: str = "document_chunks"
-    CHUNK_TABLE_NAME = "__chunks__"
-    DOCUMENT_METADATA_TABLE_NAME = "__documents__"
+    CHUNK_TABLE_NAME: str = "__chunks__"
+    DOCUMENT_METADATA_TABLE_NAME: str = "__documents__"
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",

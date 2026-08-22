@@ -5,9 +5,9 @@ import mimetypes
 from typing import Any
 from uuid import uuid4
 
-from app.models.document import DocumentChunk, DocumentCategory
+from app.models.chunk import IngestedChunk, ChunkCategory
 from app.models.ingestion import ProcessorPayload
-from app.models.llm import LLMAttachment
+from app.llm.base import LLMAttachment
 from unstructured.documents.elements import Element, Image
 
 IMAGE_PROMPT = """Describe the image for a retrieval system. Identify its subject,
@@ -88,7 +88,7 @@ async def _process_single_image(
     payload: ProcessorPayload,
     image: Image,
     context: str,
-) -> DocumentChunk:
+) -> IngestedChunk:
     """Process one image and create its retrievable document chunk."""
 
     image_bytes, mime_type, filename = _image_bytes(
@@ -115,7 +115,7 @@ async def _process_single_image(
         pass
 
     # Output chunk
-    return DocumentChunk(
+    return IngestedChunk(
         # Avoid saving the chunk as file if it is not embedded because
         # they'll be automatically saved at the end of ingestion
         file_filename=filename if payload.is_embedded else None,
@@ -125,7 +125,7 @@ async def _process_single_image(
             description,
             context,
         ),
-        category=DocumentCategory.IMAGE,
+        category=ChunkCategory.IMAGE,
         metadata={
             "chunk_source_id": payload.source_id,
             "chunk_source_page_number": getattr(
@@ -139,7 +139,7 @@ async def _process_single_image(
     )
 
 
-async def process_image(payload: ProcessorPayload) -> list[DocumentChunk]:
+async def process_image(payload: ProcessorPayload) -> list[IngestedChunk]:
     """Create retrievable image chunks while keeping original bytes for final answers."""
 
     # Collect all image elements in `elements`.

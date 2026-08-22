@@ -1,25 +1,41 @@
 import json
-from collections import defaultdict
-from collections.abc import Sequence
+from dataclasses import replace
 
+from app.finalizers.base import Finalizer
 from app.llm.base import LLMProvider
-from app.models.document import DocumentCategory
-from app.models.rag import RetrievalCandidate, RetrievedEvidence, RetrievalRequest
-from app.retrievers.base import Retriever
-from app.store_sql2.base import SqlStorage
+from app.models.chunk import ChunkCategory, RetrievedChunk
+from app.store_sql.base import SqlStorage
 
-SQL_PROMPT = """You generate exactly one read-only {dialect} SQL query
+SQL_PROMPT = """You generate at most one read-only {dialect} SQL query
 for a retrieval system.
 
 Return SQL only. Do not use Markdown, code fences, explanations, or comments.
 
-Return an empty response if the retrieved spreadsheet context does not contain
-enough information to answer the question reliably with SQL.
+IMPORTANT:
+Only generate SQL when the user's question actually requires querying the
+underlying spreadsheet rows.
 
-Use only the tables and columns provided in the schema.
-Never invent tables, columns, values, or relationships.
+Return an empty response if the question can be answered from the retrieved
+spreadsheet context alone without executing SQL.
 
-ALL COLUMNS ARE NULLABLE.
+Return an empty response if the supplied spreadsheet context does not contain
+enough information to answer the question reliably.
+
+The retrieved context may describe multiple related spreadsheet tables.
+You may JOIN multiple tables when the question requires information from more
+than one table.
+
+You may ONLY use tables and columns explicitly provided in the retrieved
+spreadsheet context.
+
+Never invent:
+- tables
+- columns
+- relationships
+- values
+- join conditions
+
+ALL TABLE COLUMNS ARE NULLABLE.
 
 Generate valid {dialect} SQL and account for NULL values correctly:
 - Never use = NULL or != NULL.
@@ -27,155 +43,119 @@ Generate valid {dialect} SQL and account for NULL values correctly:
 - Do not assume nullable columns contain values.
 - Use COALESCE only when a NULL replacement is semantically appropriate.
 - Preserve the meaning of missing data rather than silently converting it.
-- Avoid unsafe or destructive statements.
-- Generate exactly one read-only query.
+- Use NULL-safe expressions for comparisons and calculations.
+- Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, PRAGMA,
+  ATTACH, or any other mutating statement.
+- Generate exactly one read-only SELECT statement.
+- Only reference tables and columns supplied in the context.
+- Only use relationships explicitly supported by the context.
 
 Question:
 {query}
 
-Retrieved spreadsheet context and SQL schema:
+Retrieved spreadsheet context:
 {context}
 """
 
-SPREADSHEET_DB = "spreadsheets"
 
-
-class SpreadsheetRetriever(Retriever):
-    """Uses retrieved sheet context to optionally query a spreadsheet's SQL tables.
-
-    Flow: retrieve() > _retrieve_document() > SQL query > RetrievedEvidence
-    """
-
-    name = "spreadsheet"
-
-    def __init__(self, llm: LLMProvider, sql_storage: SqlStorage):
-        """Receive the LLM that writes SQL and the storage that safely runs it."""
+class SpreadsheetFinalizer(Finalizer):
+    def __init__(
+        self,
+        llm: LLMProvider,
+        sql_storage: SqlStorage,
+        *,
+        max_sql_rows: int | None = 50,
+    ):
         self._llm = llm
         self._sql_storage = sql_storage
+        self._max_sql_rows = max_sql_rows
 
-    async def retrieve(
-        self, request: RetrievalRequest, candidates: Sequence[RetrievalCandidate]
-    ) -> list[RetrievedEvidence]:
-        """Returns spreadsheet candidates with their SQL results attached for the LLM."""
-        groups: dict[str, list[RetrievalCandidate]] = defaultdict(list)
-        for item in candidates:
-            if item.document.category is DocumentCategory.SPREADSHEET:
-                groups[item.document.id].append(item)
+    async def finalize(
+        self,
+        user_query: str,
+        chunk: RetrievedChunk,
+    ) -> RetrievedChunk:
+        """Optionally query the underlying spreadsheet and append SQL evidence."""
 
-        evidence: list[RetrievedEvidence] = []
-        for document_candidates in groups.values():
-            evidence.extend(await self._retrieve_document(request, document_candidates))
-        return evidence
+        if chunk.category is not ChunkCategory.SPREADSHEET:
+            return chunk
 
-    async def _retrieve_document(
-        self, request: RetrievalRequest, candidates: list[RetrievalCandidate]
-    ) -> list[RetrievedEvidence]:
-        """Ask for SQL when possible, otherwise return the retrieved sheet context."""
-        document = candidates[0].document
-        if not any(item.metadata.get("sql_table") for item in candidates):
-            return [self._chunk_evidence(item) for item in candidates]
-        context = "\n\n".join(self._context(item) for item in candidates)
         try:
-            sql = self._clean_sql(
-                await self._llm.answer(
-                    SQL_PROMPT.format(query=request.query, context=context)
+            response = await self._llm.answer(
+                SQL_PROMPT.format(
+                    dialect=self._sql_storage.get_sql_dialect(),
+                    query=user_query,
+                    context=chunk.text,
                 )
             )
         except Exception:
-            return [self._chunk_evidence(item) for item in candidates]
+            # SQL generation is optional. Keep the original evidence usable.
+            return chunk
+
+        sql = self._clean_sql(response)
+
+        # Empty response means the LLM decided that SQL is unnecessary.
         if not sql:
-            return [self._chunk_evidence(item) for item in candidates]
+            return chunk
 
         try:
-            result = await self._sql_storage.query(
-                db_name=SPREADSHEET_DB,
-                sql_query=sql,
-                limit=request.max_sql_rows,
+            results = await self._sql_storage.query(
+                sql,
+                limit=self._max_sql_rows,
             )
-        except Exception as error:
-            # Keep the retrieved source context useful when generated SQL is invalid.
-            return [
-                *[self._chunk_evidence(item) for item in candidates],
-                RetrievedEvidence(
-                    id=f"{document.id}:sql-error",
-                    retriever=self.name,
-                    document=document,
-                    content="The spreadsheet SQL query could not be run; use the retrieved sheet context instead.",
-                    metadata={"sql": sql, "error": str(error)},
-                ),
-            ]
+        except Exception:
+            # Keep the original context if generated SQL cannot be executed.
+            return chunk
 
-        return [
-            RetrievedEvidence(
-                id=f"{document.id}:sql-result",
-                retriever=self.name,
-                document=document,
-                content=self._result_content(
-                    sql,
-                    result.columns,
-                    result.rows,
-                    self._workbook_context(candidates),
-                ),
-                metadata={"sql": sql, "columns": result.columns, "rows": result.rows},
-            )
-        ]
-
-    @staticmethod
-    def _context(candidate: RetrievalCandidate) -> str:
-        """Add the SQL table mapping to a candidate before giving it to the LLM."""
-        schema = {
-            "sql_table": candidate.metadata.get("sql_table"),
-            "sql_columns": candidate.metadata.get("sql_columns", []),
-        }
-        return f"{candidate.text}\nSQL mapping: {json.dumps(schema, default=str)}"
-
-    def _chunk_evidence(self, candidate: RetrievalCandidate) -> RetrievedEvidence:
-        """Turn one retrieved spreadsheet chunk into fallback text evidence."""
-        return RetrievedEvidence(
-            id=candidate.id,
-            retriever=self.name,
-            document=candidate.document,
-            content=candidate.text,
-            metadata=candidate.metadata,
-            score=candidate.score,
+        return replace(
+            chunk,
+            text=self._append_sql_evidence(
+                chunk.text,
+                sql,
+                results,
+            ),
         )
 
     @staticmethod
     def _clean_sql(response: str) -> str:
-        """Remove an optional Markdown code fence from LLM-produced SQL."""
+        """Remove optional Markdown fences from LLM-generated SQL."""
+
         value = response.strip()
+
+        if not value:
+            return ""
+
         if value.startswith("```"):
-            value = value.split("\n", 1)[-1]
-            if value.rstrip().endswith("```"):
-                value = value.rstrip()[:-3].rstrip()
+            lines = value.splitlines()
+
+            if lines:
+                lines = lines[1:]
+
+            if lines and lines[-1].strip() == "```":
+                lines.pop()
+
+            value = "\n".join(lines).strip()
+
         return value
 
     @staticmethod
-    def _workbook_context(candidates: Sequence[RetrievalCandidate]) -> str:
-        """Collect unique workbook descriptions for the final SQL evidence."""
-        descriptions = {
-            str(item.metadata["workbook_description"])
-            for item in candidates
-            if item.metadata.get("workbook_description")
-        }
-        return "\n".join(sorted(descriptions))
-
-    @staticmethod
-    def _result_content(
+    def _append_sql_evidence(
+        original_text: str,
         sql: str,
-        columns: list[str],
-        rows: list[tuple[object, ...]],
-        workbook_context: str,
+        results: object,
     ) -> str:
-        """Format SQL, rows, and workbook context as readable final evidence."""
-        content = (
-            "Spreadsheet SQL query:\n"
-            + sql
-            + "\nResults:\n"
-            + json.dumps([dict(zip(columns, row)) for row in rows], default=str)
+        """Append the generated query and its SQL results to chunk text."""
+
+        result_text = json.dumps(
+            results,
+            ensure_ascii=False,
+            default=str,
         )
+
         return (
-            f"Workbook description:\n{workbook_context}\n\n{content}"
-            if workbook_context
-            else content
+            f"{original_text}\n\n"
+            "Spreadsheet SQL query:\n"
+            f"{sql}\n\n"
+            "Spreadsheet SQL results:\n"
+            f"{result_text}"
         )

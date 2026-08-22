@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 import json
 from pathlib import Path
@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 from unstructured.documents.elements import Element, Table
 
-from app.models.document import DocumentChunk, DocumentCategory
+from app.models.chunk import IngestedChunk, ChunkCategory
 from app.models.ingestion import ProcessorPayload
 
 MAX_WORKBOOK_CONTEXT_CHARS = 30_000
@@ -80,7 +80,7 @@ class ExtractedTable:
     file_content_type: str
     file_bytes: bytes | None = None
     page_number: int | None = None
-    orig_elements: list[Element] = []
+    orig_elements: list[Element] = field(default_factory=list)
 
 
 def _text_context(elements: list[Element]) -> str:
@@ -344,10 +344,10 @@ def _extract_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
         Raw file bytes -> pandas -> DataFrame(s)
     """
 
-    if payload.category is DocumentCategory.DOCUMENT:
+    if payload.category is ChunkCategory.DOCUMENT:
         return _read_document_tables(payload)
 
-    if payload.category is DocumentCategory.SPREADSHEET:
+    if payload.category is ChunkCategory.SPREADSHEET:
         return _read_spreadsheet_tables(payload)
 
     return []
@@ -574,15 +574,60 @@ def _merge_schema_types(
     return merged
 
 
+def _related_table_schemas(
+    table_index: int,
+    analysis: dict[str, Any],
+    tables: list[ExtractedTable],
+    table_analyses: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build schema context for tables related to the current table."""
+
+    related_tables: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    for relationship in analysis["relationships"]:
+        if not isinstance(relationship, dict):
+            continue
+
+        related_index = relationship.get("table_index")
+
+        if not isinstance(related_index, int):
+            continue
+
+        if not 0 <= related_index < len(tables):
+            continue
+
+        # Prevent self-reference and duplicate related tables.
+        if related_index == table_index or related_index in seen:
+            continue
+
+        seen.add(related_index)
+
+        related_tables.append(
+            {
+                "table_name": tables[related_index].name,
+                "schema": table_analyses[related_index]["schema"],
+                "relationship": relationship.get(
+                    "relationship",
+                    "",
+                ),
+            }
+        )
+
+    return related_tables
+
+
 def _analysis_text(
     table_name: str,
     workbook_description: str,
     analysis: dict[str, Any],
+    dataframe: pd.DataFrame,
     context: str,
+    related_tables: list[dict[str, Any]],
 ) -> str:
     """
     Build searchable text containing workbook meaning, schema, relationships,
-    surrounding text context, and representative table values.
+    related table schemas, surrounding text context, and representative values.
     """
 
     parts = [f"Table: {table_name}"]
@@ -619,12 +664,49 @@ def _analysis_text(
             if isinstance(relationship, dict):
                 target = (
                     relationship.get("sheet_name")
-                    or f"table " f"{relationship.get('table_index', 'unknown')}"
+                    or f"table {relationship.get('table_index', 'unknown')}"
                 )
                 description = relationship.get("relationship", "")
-                parts.append(f"- {target}: " f"{description}")
+
+                parts.append(f"- {target}: {description}".rstrip())
+
             else:
                 parts.append(f"- {relationship}")
+
+    if related_tables:
+        parts.append("Related table schemas:")
+
+        for related in related_tables:
+            parts.append(f"Table: {related['table_name']}")
+            schema = related.get("schema", [])
+
+            if schema:
+                for column in schema:
+                    if not isinstance(column, dict):
+                        continue
+
+                    name = column.get("name", "Unknown column")
+                    sql_type = column.get("type", "TEXT")
+                    description = column.get("description", "")
+
+                    line = (f"- {name} " f"({sql_type}): " f"{description}").rstrip()
+
+                    parts.append(line)
+
+            relationship = related.get("relationship", "")
+
+            if relationship:
+                parts.append(f"Relationship: {relationship}")
+
+    parts.extend(
+        (
+            "Data:",
+            _sample_table_rows(
+                dataframe,
+                MAX_TABLE_CONTEXT_CHARS,
+            ),
+        )
+    )
 
     return "\n".join(parts)
 
@@ -658,7 +740,7 @@ def _add_related_table_names(
         analysis["relationships"] = enriched_relationships
 
 
-async def process_table(payload: ProcessorPayload) -> list[DocumentChunk]:
+async def process_table(payload: ProcessorPayload) -> list[IngestedChunk]:
     """Create chunks enriched by a single workbook-level LLM analysis."""
 
     tables = await asyncio.to_thread(
@@ -700,26 +782,41 @@ async def process_table(payload: ProcessorPayload) -> list[DocumentChunk]:
 
     _add_related_table_names(table_analyses, tables)
 
-    chunks: list[DocumentChunk] = []
+    # Pandas is the source of truth for schema types.
+    # Do this for every table before building any chunk text because a table
+    # may need to include another table's schema in its related-table context.
+    for index, table in enumerate(tables):
+        table_analyses[index]["schema"] = _merge_schema_types(
+            table.dataframe,
+            table_analyses[index]["schema"],
+        )
+
+    chunks: list[IngestedChunk] = []
 
     for index, table in enumerate(tables):
         analysis = table_analyses[index]
 
-        # Pandas is the source of truth for schema types.
-        analysis["schema"] = _merge_schema_types(table.dataframe, analysis["schema"])
+        related_tables = _related_table_schemas(
+            table_index=index,
+            analysis=analysis,
+            tables=tables,
+            table_analyses=table_analyses,
+        )
 
         table_name = table.name
 
         table_rows = table.dataframe.to_dict(orient="records")
 
         chunks.append(
-            DocumentChunk(
-                category=DocumentCategory.SPREADSHEET,
+            IngestedChunk(
+                category=ChunkCategory.SPREADSHEET,
                 text=_analysis_text(
                     table_name=table_name,
                     workbook_description=workbook_description,
                     analysis=analysis,
+                    dataframe=table.dataframe,
                     context=context,
+                    related_tables=related_tables,
                 ),
                 metadata={
                     # reference

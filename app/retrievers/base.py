@@ -1,10 +1,14 @@
 from abc import ABC, abstractmethod
-from app.models.document import RetrievedDocumentChunk
+from collections.abc import Sequence
+from app.models.chunk import RetrievedChunk
 
 
 class Retriever(ABC):
     @abstractmethod
-    async def retrieve(self, user_query: str) -> list[RetrievedDocumentChunk]:
+    async def retrieve(
+        self,
+        user_query: str,
+    ) -> Sequence[RetrievedChunk]:
         """
         Retrieve chunks using the user query provided.
         Returns results in descending order (best to worst).

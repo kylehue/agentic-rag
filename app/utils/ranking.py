@@ -4,7 +4,7 @@ from typing import TypeVar
 T = TypeVar("T")
 
 
-def reciprocal_rank_fusion(
+def rrf(
     results: Sequence[Sequence[T]],
     *,
     id_fn: Callable[[T], str],

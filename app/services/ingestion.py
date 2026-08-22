@@ -12,8 +12,8 @@ from app.processors.pipeline import process
 from app.embedders.base import Embedder
 from app.store_file.base import FileStorage
 from app.store_vector.base import VectorStorage
-from app.store_sql2.base import SqlStorage
-from app.models.document import DocumentChunk, DocumentCategory
+from app.store_sql.base import SqlStorage
+from app.models.chunk import IngestedChunk, ChunkCategory
 from app.llm.base import LLMProvider
 from unstructured.partition.auto import partition
 from pathlib import Path
@@ -43,8 +43,9 @@ class IngestionService:
             settings.CHUNK_TABLE_NAME,
             [
                 Column("id", Integer, primary_key=True, autoincrement=True),
-                Column("chunk_id", String, nullable=False),
+                Column("chunk_id", String, nullable=False, unique=True),
                 Column("source_id", String, nullable=False),
+                Column("category", String, nullable=False),
                 Column("text", Text, nullable=False),
                 Column("metadata", JSON),
             ],
@@ -54,9 +55,11 @@ class IngestionService:
             settings.DOCUMENT_METADATA_TABLE_NAME,
             [
                 Column("id", Integer, primary_key=True, autoincrement=True),
-                Column("source_id", String, nullable=False),
+                Column("source_id", String, nullable=False, unique=True),
                 Column("file_path", String, nullable=False),
-                Column("original_filename", String, nullable=False),
+                Column("file_content_type", String, nullable=False),
+                Column("file_filename", String, nullable=False),
+                Column("file_orig_filename", String, nullable=False),
             ],
         )
 
@@ -110,7 +113,9 @@ class IngestionService:
             source_filename=source_filename,
         )
 
-    async def _save_chunk_to_vector_db(self, chunks: list[DocumentChunk]):
+        return chunks
+
+    async def _save_chunk_to_vector_db(self, chunks: list[IngestedChunk]):
         """Embeds chunks and saves them to the vector database."""
         embeddings = await self._embedder.embed_documents(
             [chunk.text for chunk in chunks]
@@ -118,10 +123,10 @@ class IngestionService:
         chunk_ids = [c.id for c in chunks]
         await self._vector_storage.add(chunk_ids, embeddings)
 
-    async def _save_spreadsheet_chunk_to_sql_db(self, chunk: DocumentChunk) -> None:
+    async def _save_spreadsheet_chunk_to_sql_db(self, chunk: IngestedChunk) -> None:
         """Saves a spreadsheet chunk's table data to SQL database."""
 
-        if chunk.category is not DocumentCategory.SPREADSHEET:
+        if chunk.category is not ChunkCategory.SPREADSHEET:
             return
 
         metadata = chunk.metadata
@@ -150,7 +155,7 @@ class IngestionService:
             conflict_columns=[],
         )
 
-    async def _save_chunk_to_file_db(self, chunk: DocumentChunk):
+    async def _save_chunk_to_file_db(self, chunk: IngestedChunk):
         """Saves a chunk's `file_bytes` to the file database when provided."""
 
         # Only save the chunk as file if bytes exist
@@ -175,7 +180,7 @@ class IngestionService:
     async def _save_chunks_to_sql_db(
         self,
         source_id: str,
-        chunks: list[DocumentChunk],
+        chunks: list[IngestedChunk],
     ):
         """Saves chunks to the SQL database."""
 
@@ -192,6 +197,7 @@ class IngestionService:
                 {
                     "chunk_id": chunk.id,
                     "source_id": source_id,
+                    "category": chunk.category.value,
                     "text": chunk.text,
                     "metadata": cleaned_metadata,
                 }
@@ -211,10 +217,11 @@ class IngestionService:
         source_filename: str,
     ):
         source_extension = Path(source_filename).suffix
+        source_new_filename = f"{uuid4()}{source_extension}"
         file_path = await self._file_storage.upload(
             file=BytesIO(source_bytes),
             file_content_type=source_content_type,
-            file_filename=f"{uuid4()}{source_extension}",
+            file_filename=source_new_filename,
             file_dir="documents/",
         )
         await self._sql_storage.upsert(
@@ -223,7 +230,9 @@ class IngestionService:
                 {
                     "source_id": source_id,
                     "file_path": file_path,
-                    "original_filename": source_filename,
+                    "file_content_type": source_content_type,
+                    "file_filename": source_new_filename,
+                    "file_orig_filename": source_filename,
                 }
             ],
             ["id"],

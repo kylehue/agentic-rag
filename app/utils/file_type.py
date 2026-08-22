@@ -1,6 +1,6 @@
 from unstructured.file_utils.model import FileType
 
-from app.models.document import DocumentCategory
+from app.models.chunk import ChunkCategory
 
 DOCUMENT_TYPES = {
     "pdf",
@@ -25,11 +25,11 @@ IMAGE_TYPES = {
 }
 
 
-def detect_document_category(filename: str) -> DocumentCategory:
+def detect_document_category(filename: str) -> ChunkCategory:
     normalized = filename.split(".")[-1]
     if normalized in SPREADSHEET_TYPES:
-        return DocumentCategory.SPREADSHEET
+        return ChunkCategory.SPREADSHEET
     elif normalized in IMAGE_TYPES:
-        return DocumentCategory.IMAGE
+        return ChunkCategory.IMAGE
     else:
-        return DocumentCategory.DOCUMENT
+        return ChunkCategory.DOCUMENT

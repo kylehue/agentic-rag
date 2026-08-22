@@ -1,282 +1,352 @@
-import asyncio
-import json
-import re
-import sqlite3
-from contextlib import contextmanager
-from collections.abc import Sequence
-from datetime import date, datetime, time
-from numbers import Integral, Real
-from pathlib import Path
-from typing import Any, Generator
+from __future__ import annotations
 
-from app.core.config import settings
-from app.store_sql.base import SqlStorage
-from app.models.sql import (
-    SqlColumn,
-    SqlQueryResult,
-    SqlTableData,
-    StoredSqlTable,
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import (
+    Column,
+    ColumnElement,
+    Integer,
+    Float,
+    String,
+    Boolean,
+    DateTime,
+    MetaData,
+    Table,
+    delete,
+    select,
+    text,
 )
+from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.exc import NoSuchTableError
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from app.store_sql.base import SqlStorage
 
 
 class LocalSqlStorage(SqlStorage):
-    """Stores spreadsheet tables in local SQLite and safely runs read-only queries."""
+    """SQLite-backed SQL storage using one local database."""
 
-    def __init__(self, database_path: str | Path | None = None):
-        self._path = Path(database_path or settings.SQL_LOCAL_STORAGE_DIR)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+    DB_FILENAME = "database.db"
 
-    def _connect(self) -> sqlite3.Connection:
-        """Open a new SQLite connection to the local database file."""
-        return sqlite3.connect(self._path)
-
-    @contextmanager
-    def _connection(self) -> Generator[sqlite3.Connection, None, None]:
-        """Provide a connection that commits on success and rolls back on errors."""
-        connection = self._connect()
-        try:
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-
-    def _initialize(self) -> None:
-        """Create the table catalog and its lookup index when they do not exist."""
-        with self._connection() as connection:
-            connection.execute("""CREATE TABLE IF NOT EXISTS rag_sql_table_catalog (
-                document_id TEXT NOT NULL, source_name TEXT NOT NULL,
-                table_name TEXT PRIMARY KEY, columns_json TEXT NOT NULL)""")
-            connection.execute(
-                """CREATE INDEX IF NOT EXISTS idx_rag_sql_table_catalog_document
-                ON rag_sql_table_catalog(document_id)"""
-            )
-
-    async def replace_document_tables(
+    def __init__(
         self,
-        document_id: str,
-        tables: Sequence[SqlTableData],
-    ) -> list[StoredSqlTable]:
-        """Replace a document's tables without blocking the async event loop."""
-        return await asyncio.to_thread(
-            self._replace_document_tables, document_id, list(tables)
+        storage_dir: str | Path,
+    ) -> None:
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(
+            parents=True,
+            exist_ok=True,
         )
 
-    def _replace_document_tables(
+        database_path = self.storage_dir / self.DB_FILENAME
+
+        self._engine: AsyncEngine = create_async_engine(
+            f"sqlite+aiosqlite:///{database_path}",
+            connect_args={"timeout": 30},
+            pool_pre_ping=True,
+        )
+
+        self._session_factory = async_sessionmaker(
+            self._engine,
+            expire_on_commit=False,
+        )
+
+    @staticmethod
+    def _validate_identifier(
+        value: str,
+        *,
+        name: str,
+    ) -> None:
+        if not value:
+            raise ValueError(f"{name} cannot be empty.")
+
+        if len(value) > 255:
+            raise ValueError(f"{name} is too long.")
+
+        if not (value[0].isalpha() or value[0] == "_"):
+            raise ValueError(f"Invalid {name}: {value!r}")
+
+        if not all(char.isalnum() or char == "_" for char in value):
+            raise ValueError(f"Invalid {name}: {value!r}")
+
+    def _validate_table_name(self, table_name: str) -> None:
+        self._validate_identifier(
+            table_name,
+            name="table name",
+        )
+
+    async def _load_table(self, table_name: str) -> Table:
+        """Reflect an existing table from SQLite."""
+
+        self._validate_table_name(table_name)
+
+        metadata = MetaData()
+
+        async with self._engine.connect() as conn:
+
+            def load(sync_conn) -> Table:
+                return Table(
+                    table_name,
+                    metadata,
+                    autoload_with=sync_conn,
+                )
+
+            try:
+                return await conn.run_sync(load)
+            except NoSuchTableError as exc:
+                raise ValueError(f"Table {table_name!r} does not exist.") from exc
+
+    async def close(self) -> None:
+        await self._engine.dispose()
+
+    def get_sql_dialect(self) -> str:
+        return "SQLite"
+
+    async def get_table(self, table_name: str) -> Table:
+        return await self._load_table(table_name)
+
+    async def ensure_table(
         self,
-        document_id: str,
-        tables: list[SqlTableData],
-    ) -> list[StoredSqlTable]:
-        """Delete prior tables, create new SQLite tables, and record their mappings."""
-        with self._connection() as connection:
-            self._delete_document(connection, document_id)
-            stored: list[StoredSqlTable] = []
-            for i, table in enumerate(tables):
-                if not table.columns:
-                    continue
-                name = f"spreadsheet_{self._identifier(document_id)}_{i}"
-                columns = self._columns(table)
-                definition = ", ".join(
-                    f"{self._quote(column.name)} {column.type}" for column in columns
-                )
-                connection.execute(f"CREATE TABLE {self._quote(name)} ({definition})")
-                if table.rows:
-                    placeholders = ", ".join("?" for _ in columns)
-                    rows = [
-                        tuple(
-                            self._normalize(row[i]) if i < len(row) else None
-                            for i in range(len(columns))
-                        )
-                        for row in table.rows
-                    ]
-                    connection.executemany(
-                        f"INSERT INTO {self._quote(name)} VALUES ({placeholders})", rows
-                    )
-                descriptor = StoredSqlTable(
-                    document_id, table.source_name, name, columns
-                )
-                connection.execute(
-                    "INSERT INTO rag_sql_table_catalog VALUES (?, ?, ?, ?)",
-                    (
-                        document_id,
-                        table.source_name,
-                        name,
-                        json.dumps([column.__dict__ for column in columns]),
-                    ),
-                )
-                stored.append(descriptor)
-        return stored
+        table_name: str,
+        columns: Sequence[Column[Any]],
+    ) -> None:
+        self._validate_table_name(table_name)
 
-    async def list_document_tables(self, document_id: str) -> list[StoredSqlTable]:
-        """List generated SQL table and column names for one source document."""
-        return await asyncio.to_thread(self._list_document_tables, document_id)
+        if not columns:
+            raise ValueError("A table must contain at least one column.")
 
-    def _list_document_tables(self, document_id: str) -> list[StoredSqlTable]:
-        """Read one document's table mappings from the SQLite catalog."""
-        with self._connection() as connection:
-            rows = connection.execute(
-                """SELECT source_name, table_name, columns_json
-                FROM rag_sql_table_catalog WHERE document_id = ? ORDER BY table_name""",
-                (document_id,),
-            ).fetchall()
-        return [
-            StoredSqlTable(
-                document_id,
-                source,
-                table,
-                [SqlColumn(**item) for item in json.loads(columns)],
-            )
-            for source, table, columns in rows
-        ]
+        metadata = MetaData()
+
+        Table(
+            table_name,
+            metadata,
+            *columns,
+        )
+
+        async with self._engine.begin() as conn:
+            await conn.run_sync(metadata.create_all)
+
+    async def upsert(
+        self,
+        table_name: str,
+        rows: Sequence[dict[str, Any]],
+        conflict_columns: Sequence[str] = (),
+    ) -> None:
+        if not rows:
+            return
+
+        table = await self._load_table(table_name)
+
+        table_columns = {column.name for column in table.columns}
+
+        for column in conflict_columns:
+            if column not in table_columns:
+                raise ValueError(f"Unknown conflict column: {column!r}")
+
+        for row in rows:
+            unknown = set(row) - table_columns
+
+            if unknown:
+                raise ValueError(f"Unknown columns: {sorted(unknown)}")
+
+        statement = insert(table).values(list(rows))
+
+        if conflict_columns:
+            update_columns = {
+                column.name: statement.excluded[column.name]
+                for column in table.columns
+                if column.name not in conflict_columns
+            }
+
+            if update_columns:
+                statement = statement.on_conflict_do_update(
+                    index_elements=list(conflict_columns),
+                    set_=update_columns,
+                )
+            else:
+                statement = statement.on_conflict_do_nothing(
+                    index_elements=list(conflict_columns),
+                )
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(statement)
+
+    async def get(
+        self,
+        table_name: str,
+        conditions: Sequence[ColumnElement[bool]],
+    ) -> dict[str, Any] | None:
+        if not conditions:
+            raise ValueError("Get requires at least one condition.")
+
+        table = await self.get_table(table_name)
+
+        statement = select(table)
+
+        if conditions:
+            statement = statement.where(*conditions)
+
+        statement = statement.limit(1)
+
+        async with self._session_factory() as session:
+            result = await session.execute(statement)
+
+            row = result.mappings().first()
+
+            if row is None:
+                return None
+
+            return dict(row)
+
+    async def get_all(
+        self,
+        table_name: str,
+        conditions: Sequence[ColumnElement[bool]] = (),
+        limit: int | None = None,
+    ) -> Sequence[dict[str, Any]]:
+        table = await self.get_table(table_name)
+
+        statement = select(table)
+
+        if conditions:
+            statement = statement.where(*conditions)
+
+        if limit is not None:
+            if limit <= 0:
+                return []
+
+            statement = statement.limit(limit)
+
+        async with self._session_factory() as session:
+            result = await session.execute(statement)
+
+            return [dict(row) for row in result.mappings()]
+
+    async def delete(
+        self,
+        table_name: str,
+        conditions: Sequence[ColumnElement[bool]],
+    ) -> bool:
+        table = await self.get_table(table_name)
+
+        if not conditions:
+            raise ValueError("Delete requires at least one condition.")
+
+        if not table.c:
+            raise ValueError(f"Table {table_name!r} has no columns.")
+
+        statement = delete(table)
+
+        if conditions:
+            statement = statement.where(*conditions)
+
+        return_column = next(iter(table.c))
+
+        statement = statement.returning(return_column)
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(statement)
+
+                return result.first() is not None
 
     async def query(
-        self, document_id: str, sql: str, max_rows: int = 100
-    ) -> SqlQueryResult:
-        """Run a bounded, read-only SQL query against one document's tables."""
-        if not 1 <= max_rows <= 1_000:
-            raise ValueError("max_rows must be between 1 and 1000")
-        return await asyncio.to_thread(self._query, document_id, sql, max_rows)
+        self,
+        sql_query: str,
+        limit: int | None,
+    ) -> Sequence[dict[str, Any]]:
+        query = sql_query.strip()
 
-    def _query(self, document_id: str, sql: str, max_rows: int) -> SqlQueryResult:
-        """Validate SQL, restrict it to allowed tables, and normalize result values."""
-        statement = self._read_only_statement(sql)
-        with self._connection() as connection:
-            allowed = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT table_name FROM rag_sql_table_catalog WHERE document_id = ?",
-                    (document_id,),
-                )
-            }
-            connection.set_authorizer(self._authorizer(allowed))
-            try:
-                cursor = connection.execute(
-                    f"SELECT * FROM ({statement}) AS rag_query_result LIMIT ?",
-                    (max_rows,),
-                )
-                columns = [item[0] for item in cursor.description or []]
-                rows = [
-                    tuple(self._normalize(value) for value in row) for row in cursor
-                ]
-            finally:
-                connection.set_authorizer(None)
-        return SqlQueryResult(columns, rows)
+        if not query:
+            raise ValueError("SQL query cannot be empty.")
 
-    async def delete_document(self, document_id: str) -> None:
-        """Delete all SQLite tables and catalog entries owned by one document."""
-        await asyncio.to_thread(self._delete_document_by_id, document_id)
+        if not query.lower().startswith("select"):
+            raise ValueError("Only SELECT statements are allowed.")
 
-    def _delete_document_by_id(self, document_id: str) -> None:
-        """Open a transaction and delete one document's structured data."""
-        with self._connection() as connection:
-            self._delete_document(connection, document_id)
+        if ";" in query.rstrip(";"):
+            raise ValueError("Multiple SQL statements are not allowed.")
 
-    @classmethod
-    def _delete_document(cls, connection: sqlite3.Connection, document_id: str) -> None:
-        """Drop a document's generated tables and remove its catalog records."""
-        tables = connection.execute(
-            "SELECT table_name FROM rag_sql_table_catalog WHERE document_id = ?",
-            (document_id,),
-        ).fetchall()
-        for (table_name,) in tables:
-            connection.execute(f"DROP TABLE IF EXISTS {cls._quote(table_name)}")
-        connection.execute(
-            "DELETE FROM rag_sql_table_catalog WHERE document_id = ?", (document_id,)
-        )
+        statement = text(query)
 
-    @classmethod
-    def _columns(cls, table: SqlTableData) -> list[SqlColumn]:
-        """Create unique, safe SQL column names and infer simple SQLite types."""
-        used: set[str] = set()
-        result = []
-        for i, source in enumerate(table.columns):
-            base = cls._identifier(source) or f"column_{i + 1}"
-            name, suffix = base, 2
-            while name in used:
-                name, suffix = f"{base}_{suffix}", suffix + 1
-            used.add(name)
-            values = [row[i] for row in table.rows if len(row) > i]
-            result.append(SqlColumn(str(source), name, cls._column_type(values)))
-        return result
+        async with self._session_factory() as session:
+            result = await session.execute(statement)
 
-    @staticmethod
-    def _read_only_statement(sql: str) -> str:
-        """Accept exactly one SELECT or WITH statement and reject all other SQL."""
-        statement = sql.strip()
-        if statement.endswith(";"):
-            statement = statement[:-1].rstrip()
-        if not statement or ";" in statement:
-            raise ValueError("SQL must contain exactly one statement")
-        if not statement.casefold().startswith(("select", "with")):
-            raise ValueError("Only SELECT or WITH queries are allowed")
-        return statement
+            if limit is None:
+                rows = result.mappings().all()
+            else:
+                rows = result.mappings().fetchmany(limit)
 
-    @staticmethod
-    def _authorizer(allowed_tables: set[str]):
-        """Build SQLite's permission callback for the supplied document tables only."""
-        allowed_actions = {
-            sqlite3.SQLITE_SELECT,
-            sqlite3.SQLITE_FUNCTION,
-            sqlite3.SQLITE_RECURSIVE,
-        }
+            return [dict(row) for row in rows]
 
-        def authorize(
-            action: int,
-            parameter_1: str | None,
-            parameter_2: str | None,
-            database: str | None,
-            trigger: str | None,
-        ) -> int:
-            """Allow reads from approved tables and safe query operations only."""
-            if action == sqlite3.SQLITE_READ:
-                return (
-                    sqlite3.SQLITE_OK
-                    if parameter_1 in allowed_tables
-                    else sqlite3.SQLITE_DENY
-                )
-            return (
-                sqlite3.SQLITE_OK if action in allowed_actions else sqlite3.SQLITE_DENY
+    async def search(
+        self,
+        table_name: str,
+        search_query: str,
+        limit: int | None,
+    ) -> Sequence[dict[str, Any]]:
+        self._validate_table_name(table_name)
+
+        fts_table = f"{table_name}_fts"
+
+        statement = text(f"""
+            SELECT *
+            FROM "{fts_table}"
+            WHERE "{fts_table}" MATCH :query
+            LIMIT :limit
+            """)
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                statement,
+                {
+                    "query": search_query,
+                    "limit": limit,
+                },
             )
 
-        return authorize
-
-    @classmethod
-    def _column_type(cls, values: list[Any]) -> str:
-        """Infer INTEGER, REAL, or TEXT from a column's non-empty values."""
-        values = [cls._normalize(value) for value in values]
-        values = [value for value in values if value is not None]
-        if values and all(isinstance(value, int) for value in values):
-            return "INTEGER"
-        if values and all(isinstance(value, (int, float)) for value in values):
-            return "REAL"
-        return "TEXT"
+            return [dict(row) for row in result.mappings()]
 
     @staticmethod
-    def _normalize(value: Any) -> Any:
-        """Convert pandas, date, numeric, and null values into SQLite-safe values."""
-        if value is None or (isinstance(value, float) and value != value):
-            return None
-        if isinstance(value, (datetime, date, time)):
-            return value.isoformat()
-        if isinstance(value, bool):
-            return int(value)
-        if isinstance(value, Integral):
-            return int(value)
-        if isinstance(value, Real):
-            return float(value)
-        if hasattr(value, "item"):
-            return LocalSqlStorage._normalize(value.item())  # type: ignore
-        return str(value)
+    def create_sql_columns_from_schema(
+        schema: list[dict[str, Any]],
+    ) -> list[Column[Any]]:
+        type_map = {
+            "INTEGER": Integer,
+            "REAL": Float,
+            "TEXT": String,
+            "BOOLEAN": Boolean,
+            "DATETIME": DateTime,
+        }
 
-    @staticmethod
-    def _identifier(value: Any) -> str:
-        """Make a short, lowercase identifier safe for a generated SQL name."""
-        return re.sub(r"[^a-zA-Z0-9_]", "_", str(value)).strip("_").lower()[:50]
+        columns: list[Column[Any]] = []
 
-    @staticmethod
-    def _quote(identifier: str) -> str:
-        """Quote an SQLite identifier while escaping embedded quote characters."""
-        return '"' + identifier.replace('"', '""') + '"'
+        for column in schema:
+            if not isinstance(column, dict):
+                continue
+
+            name = column.get("name")
+            sql_type = column.get("type", "TEXT")
+
+            if not isinstance(name, str) or not name:
+                raise ValueError("Invalid column name.")
+
+            sqlalchemy_type = type_map.get(sql_type)
+
+            if sqlalchemy_type is None:
+                raise ValueError(
+                    f"Unsupported SQL type {sql_type!r} " f"for column {name!r}."
+                )
+
+            columns.append(Column(name, sqlalchemy_type, nullable=True))
+
+        if not columns:
+            raise ValueError("Schema has no valid columns.")
+
+        return columns

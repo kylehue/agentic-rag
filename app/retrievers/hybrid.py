@@ -2,9 +2,9 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import replace
 
-from app.models.document import RetrievedDocumentChunk
+from app.models.chunk import RetrievedChunk
 from app.retrievers.base import Retriever
-from app.utils.ranking import reciprocal_rank_fusion
+from app.utils.ranking import rrf
 
 
 class HybridRetriever(Retriever):
@@ -16,15 +16,12 @@ class HybridRetriever(Retriever):
         self._retrievers = retrievers
         self._top_k = top_k
 
-    async def retrieve(
-        self,
-        user_query: str,
-    ) -> list[RetrievedDocumentChunk]:
+    async def retrieve(self, user_query):
         tasks = [retriever.retrieve(user_query) for retriever in self._retrievers]
 
         results = await asyncio.gather(*tasks)
 
-        fused = reciprocal_rank_fusion(
+        fused = rrf(
             results,
             id_fn=lambda chunk: chunk.chunk_id,
         )

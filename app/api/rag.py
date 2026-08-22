@@ -1,22 +1,22 @@
 from fastapi import APIRouter, File, UploadFile
 
 from app.container import rag_service
-from app.models.document import DocumentChunk
-from app.models.rag import RagAnswer, RetrievalRequest, RetrievalResult
+from app.models.chunk import IngestedChunk, RetrievedChunk
+from app.services.rag import RagAnswer
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
 
 
-@router.post("/ingest", response_model=DocumentChunk)
+@router.post("/ingest")
 async def ingest_document(file: UploadFile = File(...)):
     return await rag_service.ingest(file)
 
 
-@router.post("/retrieve", response_model=RetrievalResult)
-async def retrieve(request: RetrievalRequest):
-    return await rag_service.retrieve(request)
+@router.post("/retrieve")
+async def retrieve(user_query: str):
+    return await rag_service.retrieve(user_query)
 
 
-@router.post("/answer", response_model=RagAnswer)
-async def answer(request: RetrievalRequest):
-    return await rag_service.answer(request)
+@router.post("/answer")
+async def answer(user_query: str):
+    return await rag_service.answer(user_query)

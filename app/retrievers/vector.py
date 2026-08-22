@@ -1,8 +1,8 @@
 from app.core.config import settings
 from app.embedders.base import Embedder
-from app.models.document import RetrievedDocumentChunk
+from app.models.chunk import RetrievedChunk
 from app.retrievers.base import Retriever
-from app.store_sql2.base import SqlStorage
+from app.store_sql.base import SqlStorage
 from app.store_vector.base import VectorStorage
 
 
@@ -19,10 +19,7 @@ class VectorRetriever(Retriever):
         self._sql_storage = sql_storage
         self._top_k = top_k
 
-    async def retrieve(
-        self,
-        user_query: str,
-    ) -> list[RetrievedDocumentChunk]:
+    async def retrieve(self, user_query: str):
         # Retrieve from vector database
         query_embedding = await self._embedder.embed_query(user_query)
         vector_results = await self._vector_storage.search(
@@ -44,7 +41,7 @@ class VectorRetriever(Retriever):
         chunks_by_id = {chunk["chunk_id"]: chunk for chunk in raw_chunks}
 
         # Restore vector-search order and attach scores
-        results: list[RetrievedDocumentChunk] = []
+        results: list[RetrievedChunk] = []
 
         for vector_result in vector_results:
             chunk = chunks_by_id.get(vector_result.id)
@@ -53,7 +50,7 @@ class VectorRetriever(Retriever):
                 continue
 
             results.append(
-                RetrievedDocumentChunk(
+                RetrievedChunk(
                     **chunk,
                     score=vector_result.score,
                 )

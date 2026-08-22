@@ -1,7 +1,7 @@
 from app.core.config import settings
-from app.models.document import RetrievedDocumentChunk
+from app.models.chunk import RetrievedChunk
 from app.retrievers.base import Retriever
-from app.store_sql2.base import SqlStorage
+from app.store_sql.base import SqlStorage
 
 
 class SparseRetriever(Retriever):
@@ -15,13 +15,15 @@ class SparseRetriever(Retriever):
 
     async def retrieve(self, user_query):
         raw_chunks = await self._sql_storage.search(
-            settings.CHUNK_TABLE_NAME, user_query, self._top_k
+            settings.CHUNK_TABLE_NAME,
+            user_query,
+            self._top_k,
         )
 
         result = []
         for i, raw_chunk in enumerate(raw_chunks, 1):
             result.append(
-                RetrievedDocumentChunk(
+                RetrievedChunk(
                     **raw_chunk,
                     score=0,  # doesn't matter for sparse search (as long as it's sorted)
                 )

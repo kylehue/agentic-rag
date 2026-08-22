@@ -1,18 +1,13 @@
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 
-from app.models.rag import RetrievalCandidate, RetrievedEvidence, RetrievalRequest
+from app.models.chunk import RetrievedChunk
 
 
-class Retriever(ABC):
-    """Interface for turning search candidates into answer-ready evidence."""
-
-    name: str
-
+class Finalizer(ABC):
     @abstractmethod
-    async def retrieve(
+    async def finalize(
         self,
-        request: RetrievalRequest,
-        candidates: Sequence[RetrievalCandidate],
-    ) -> list[RetrievedEvidence]:
-        """Return evidence. External retrievers may ignore vector candidates."""
+        user_query: str,
+        chunk: RetrievedChunk,
+    ) -> RetrievedChunk:
+        """Finalize the chunk content for the LLM."""

@@ -7,17 +7,20 @@ from app.core.config import settings
 from app.llm.gemini import GeminiProvider
 from app.embedders.gemini import GeminiEmbedder
 
+from app.retrievers.vector import VectorRetriever
+from app.retrievers.sparse import SparseRetriever
+from app.retrievers.hybrid import HybridRetriever
+
 from app.store_file.local import LocalFileStorage
 from app.store_vector.local import LocalVectorStorage
-from app.store_sql2.local import LocalSqlStorage
+from app.store_sql.local import LocalSqlStorage
 
 from app.services.ingestion import IngestionService
 from app.services.retrieval import RetrievalService
 from app.services.rag import RagService
 
-from app.retrievers.document import DocumentRetriever
-from app.retrievers.image import ImageRetriever
-from app.retrievers.spreadsheet import SpreadsheetRetriever
+from app.finalizers.hybrid import HybridFinalizer
+from app.finalizers.spreadsheet import SpreadsheetFinalizer
 
 # Providers
 llm = GeminiProvider()
@@ -25,45 +28,69 @@ embedder = GeminiEmbedder()
 
 # Storage
 file_storage = LocalFileStorage(
-    settings.FILE_LOCAL_STORAGE_DIR,
+    storage_dir=settings.FILE_LOCAL_STORAGE_DIR,
 )
 
 vector_storage = LocalVectorStorage(
-    settings.VECTOR_LOCAL_STORAGE_DIR,
-    settings.VECTOR_COLLECTION_NAME,
+    storage_dir=settings.VECTOR_LOCAL_STORAGE_DIR,
+    collection_name=settings.VECTOR_COLLECTION_NAME,
 )
 
 sql_storage = LocalSqlStorage(
-    settings.SQL_LOCAL_STORAGE_DIR,
+    storage_dir=settings.SQL_LOCAL_STORAGE_DIR,
+)
+
+# Retrievers
+vector_retriever = VectorRetriever(
+    embedder=embedder,
+    vector_storage=vector_storage,
+    sql_storage=sql_storage,
+    top_k=25,
+)
+
+sparse_retriever = SparseRetriever(
+    sql_storage=sql_storage,
+    top_k=25,
+)
+
+hybrid_retriever = HybridRetriever(
+    retrievers=[
+        vector_retriever,
+        sparse_retriever,
+    ],
+    top_k=5,
+)
+
+# Finalizers
+spreadsheet_finalizer = SpreadsheetFinalizer(
+    llm=llm,
+    sql_storage=sql_storage,
+)
+
+hybrid_finalizer = HybridFinalizer(
+    finalizers=[spreadsheet_finalizer],
 )
 
 # Services
 ingestion_service = IngestionService(
-    embedder,
-    llm,
-    file_storage,
-    vector_storage,
-    sql_storage,
+    embedder=embedder,
+    llm=llm,
+    file_storage=file_storage,
+    vector_storage=vector_storage,
+    sql_storage=sql_storage,
 )
 
 retrieval_service = RetrievalService(
-    embedder,
-    [
-        DocumentRetriever(),
-        SpreadsheetRetriever(
-            llm,
-            sql_storage,
-        ),
-        ImageRetriever(),
-    ],
-    vector_storage,
-    sql_storage,
+    retriever=hybrid_retriever,
+    finalizer=hybrid_finalizer,
 )
 
 rag_service = RagService(
-    ingestion_service,
-    retrieval_service,
-    llm,
+    llm=llm,
+    file_storage=file_storage,
+    sql_storage=sql_storage,
+    ingestion_service=ingestion_service,
+    retrieval_service=retrieval_service,
 )
 
 

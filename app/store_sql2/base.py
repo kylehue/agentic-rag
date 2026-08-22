@@ -1,17 +1,25 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, ClassVar
 from sqlalchemy import Column
 
 
 class SqlStorage(ABC):
+    @abstractmethod
+    def get_sql_dialect(self) -> str:
+        """Returns the SQL dialect used for queries. Used for LLM SQL query generation."""
+
+    @abstractmethod
+    async def close(self) -> None:
+        """Close the database connection pool."""
+
     @abstractmethod
     async def ensure_table(
         self,
         table_name: str,
         columns: Sequence[Column],
     ) -> None:
-        pass
+        """Creates a table if it doesn't exist."""
 
     @abstractmethod
     async def upsert(
@@ -67,4 +75,17 @@ class SqlStorage(ABC):
     def create_sql_columns_from_schema(
         schema: list[dict[str, Any]],
     ) -> list[Column[Any]]:
-        pass
+        """
+        Create SQLAlchemy columns from the schema.
+
+        The schema is expected to be in form of:
+        ```
+        [
+            {
+                name: "column name",
+                type: "INTEGER" | "BOOLEAN" | "REAL" | "TEXT" | "DATETIME"
+            }
+            ...
+        ]
+        ```
+        """

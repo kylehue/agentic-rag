@@ -4,6 +4,11 @@ from typing import Sequence
 
 class VectorStorage(ABC):
     @abstractmethod
+    async def close(self) -> None:
+        """Release resources held by the vector store."""
+        pass
+
+    @abstractmethod
     async def add(
         self,
         ids: Sequence[str],

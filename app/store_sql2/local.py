@@ -56,11 +56,6 @@ class LocalSqlStorage(SqlStorage):
             expire_on_commit=False,
         )
 
-    async def close(self) -> None:
-        """Close the database connection pool."""
-
-        await self._engine.dispose()
-
     @staticmethod
     def _validate_identifier(
         value: str,
@@ -106,13 +101,17 @@ class LocalSqlStorage(SqlStorage):
             except NoSuchTableError as exc:
                 raise ValueError(f"Table {table_name!r} does not exist.") from exc
 
+    async def close(self) -> None:
+        await self._engine.dispose()
+
+    def get_sql_dialect(self) -> str:
+        return "SQLite"
+
     async def ensure_table(
         self,
         table_name: str,
         columns: Sequence[Column[Any]],
     ) -> None:
-        """Create a table if it does not exist."""
-
         self._validate_table_name(table_name)
 
         if not columns:
@@ -135,8 +134,6 @@ class LocalSqlStorage(SqlStorage):
         rows: Sequence[dict[str, Any]],
         conflict_columns: Sequence[str],
     ) -> None:
-        """Insert or update rows in a table."""
-
         if not rows:
             return
 
@@ -183,8 +180,6 @@ class LocalSqlStorage(SqlStorage):
         table_name: str,
         row_id: str,
     ) -> dict[str, Any] | None:
-        """Get a row by its id."""
-
         table = await self._load_table(table_name)
 
         if "id" not in table.c:
@@ -206,8 +201,6 @@ class LocalSqlStorage(SqlStorage):
         self,
         table_name: str,
     ) -> Sequence[dict[str, Any]]:
-        """Get all rows from a table."""
-
         table = await self._load_table(table_name)
 
         statement = select(table)
@@ -222,8 +215,6 @@ class LocalSqlStorage(SqlStorage):
         table_name: str,
         row_id: str,
     ) -> bool:
-        """Delete a row by its id."""
-
         table = await self._load_table(table_name)
 
         if "id" not in table.c:
@@ -242,8 +233,6 @@ class LocalSqlStorage(SqlStorage):
         sql_query: str,
         limit: int,
     ) -> Sequence[dict[str, Any]]:
-        """Execute a read-only SQL query."""
-
         if limit <= 0:
             return []
 
@@ -273,8 +262,6 @@ class LocalSqlStorage(SqlStorage):
         search_query: str,
         limit: int,
     ) -> Sequence[dict[str, Any]]:
-        """Search a SQLite FTS5 table."""
-
         if limit <= 0:
             return []
 
@@ -304,8 +291,6 @@ class LocalSqlStorage(SqlStorage):
     def create_sql_columns_from_schema(
         schema: list[dict[str, Any]],
     ) -> list[Column[Any]]:
-        """Create SQLAlchemy columns from the schema."""
-
         type_map = {
             "INTEGER": Integer,
             "REAL": Float,
@@ -336,6 +321,6 @@ class LocalSqlStorage(SqlStorage):
             columns.append(Column(name, sqlalchemy_type))
 
         if not columns:
-            raise ValueError("Spreadsheet chunk has no valid columns.")
+            raise ValueError("Schema has no valid columns.")
 
         return columns

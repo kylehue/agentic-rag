@@ -4,6 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import UploadFile
+from sqlalchemy import JSON, Column, Integer, String, Text
 from app.errors.document import InvalidDocumentError
 from app.models.ingestion import ProcessorPayload
 from app.processors.pipeline import process
@@ -38,6 +39,28 @@ class IngestionService:
         self.vector_storage = vector_storage
         self.llm = llm
         self.sql_storage = sql_storage
+
+    async def initialize(self) -> None:
+        await self.sql_storage.ensure_table(
+            CHUNK_METADATA_COLLECTION,
+            [
+                Column("id", Integer, primary_key=True, autoincrement=True),
+                Column("chunk_id", String, nullable=False),
+                Column("source_id", String, nullable=False),
+                Column("text", Text, nullable=False),
+                Column("metadata", JSON),
+            ],
+        )
+
+        await self.sql_storage.ensure_table(
+            DOCUMENT_METADATA_COLLECTION,
+            [
+                Column("id", Integer, primary_key=True, autoincrement=True),
+                Column("source_id", String, nullable=False),
+                Column("file_path", String, nullable=False),
+                Column("original_filename", String, nullable=False),
+            ],
+        )
 
     async def ingest(self, file_upload: UploadFile):
         """Partition, process, embed, and save one uploaded document."""

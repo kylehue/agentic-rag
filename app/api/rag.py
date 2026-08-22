@@ -1,6 +1,6 @@
 from fastapi import APIRouter, File, UploadFile
 
-from app.dependencies import rag_service
+from app.container import rag_service
 from app.models.document import Document
 from app.models.rag import RagAnswer, RetrievalRequest, RetrievalResult
 

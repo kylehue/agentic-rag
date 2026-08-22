@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.dependencies import document_service
+from app.container import document_service
 from app.models.document import Document
 
 router = APIRouter(prefix="/documents", tags=["Documents"])

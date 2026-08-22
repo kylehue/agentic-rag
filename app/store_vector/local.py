@@ -23,12 +23,14 @@ class LocalVectorStorage(VectorStorage):
             metadata={"hnsw:space": "cosine"},
         )
 
+    async def close(self) -> None:
+        pass
+
     async def add(
         self,
         ids: Sequence[str],
         embeddings: Sequence[Sequence[float]],
     ) -> None:
-        """Upsert chunk IDs and their matching embeddings into Chroma."""
         if len(ids) != len(embeddings):
             raise ValueError("ids and embeddings must have the same length")
         if not ids:
@@ -44,7 +46,6 @@ class LocalVectorStorage(VectorStorage):
         )
 
     async def search(self, query_embedding: list[float], top_k: int = 5) -> list[str]:
-        """Return the IDs of the nearest chunks in ranked order."""
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
         collection_count = await asyncio.to_thread(self._collection.count)
@@ -60,6 +61,5 @@ class LocalVectorStorage(VectorStorage):
         return result["ids"][0]
 
     async def delete(self, ids: Sequence[str]) -> None:
-        """Remove vectors for the supplied chunk IDs."""
         if ids:
             await asyncio.to_thread(self._collection.delete, ids=list(ids))

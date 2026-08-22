@@ -1,4 +1,4 @@
-from app.models.document import Document, DocumentCategory
+from app.models.document import DocumentChunk, DocumentCategory
 
 from app.models.ingestion import ProcessorPayload
 from app.processors.table import process_table
@@ -6,7 +6,7 @@ from app.processors.text import process_text
 from app.processors.image import process_image
 
 
-async def process(payload: ProcessorPayload) -> list[Document]:
+async def process(payload: ProcessorPayload) -> list[DocumentChunk]:
     """Process document and return every searchable chunk."""
     chunks = []
 

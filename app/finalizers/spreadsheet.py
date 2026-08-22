@@ -8,11 +8,27 @@ from app.models.rag import RetrievalCandidate, RetrievedEvidence, RetrievalReque
 from app.retrievers.base import Retriever
 from app.store_sql2.base import SqlStorage
 
-SQL_PROMPT = """You create one SQLite read-only query for a retrieval system.
-Use only the generated table and column names in the supplied schema. Return SQL
-only, with no Markdown. Return an empty response when the retrieved spreadsheet
-context cannot answer the question more accurately with a SQL query. Never query
-tables not supplied below.
+SQL_PROMPT = """You generate exactly one read-only {dialect} SQL query
+for a retrieval system.
+
+Return SQL only. Do not use Markdown, code fences, explanations, or comments.
+
+Return an empty response if the retrieved spreadsheet context does not contain
+enough information to answer the question reliably with SQL.
+
+Use only the tables and columns provided in the schema.
+Never invent tables, columns, values, or relationships.
+
+ALL COLUMNS ARE NULLABLE.
+
+Generate valid {dialect} SQL and account for NULL values correctly:
+- Never use = NULL or != NULL.
+- Use IS NULL / IS NOT NULL for NULL checks.
+- Do not assume nullable columns contain values.
+- Use COALESCE only when a NULL replacement is semantically appropriate.
+- Preserve the meaning of missing data rather than silently converting it.
+- Avoid unsafe or destructive statements.
+- Generate exactly one read-only query.
 
 Question:
 {query}

@@ -15,7 +15,7 @@ class DocumentCategory(str, Enum):
 
 
 @dataclass
-class Document:
+class DocumentChunk:
     """The persistent record describing a document chunk."""
 
     id: str = str(uuid4())
@@ -30,3 +30,14 @@ class Document:
     text: str = ""
     metadata: dict[str, Any] = {}
     orig_elements: list[Element] | None = None  # original Unstructured.io elements
+
+
+@dataclass
+class RetrievedDocumentChunk:
+    """The retrieved document chunk during retrieval process."""
+
+    chunk_id: str
+    source_id: str
+    text: str
+    metadata: list[dict[str, Any]]
+    score: float

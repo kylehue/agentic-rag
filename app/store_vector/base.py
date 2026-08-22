@@ -1,5 +1,12 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Sequence
+
+
+@dataclass(frozen=True)
+class VectorSearchResult:
+    id: str
+    score: float
 
 
 class VectorStorage(ABC):
@@ -25,8 +32,12 @@ class VectorStorage(ABC):
         self,
         query_embedding: list[float],
         top_k: int = 5,
-    ) -> list[str]:
-        """Return nearest chunk IDs in ranked order."""
+    ) -> list[VectorSearchResult]:
+        """
+        Returns results in descending order (best to worst).
+
+        Note: Higher score is better.
+        """
 
     @abstractmethod
     async def delete(self, ids: Sequence[str]) -> None:

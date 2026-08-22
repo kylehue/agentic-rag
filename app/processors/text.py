@@ -4,7 +4,7 @@ from unstructured.chunking.basic import chunk_elements
 from unstructured.chunking.title import chunk_by_title
 from unstructured.documents.elements import Image, Table
 
-from app.models.document import Document, DocumentCategory
+from app.models.document import DocumentChunk, DocumentCategory
 from app.models.ingestion import ProcessorPayload
 from app.processors.image import process_image
 
@@ -31,7 +31,7 @@ def _chunk_elements(payload: ProcessorPayload):
 
 
 def _embedded_elements(
-    chunk: Document,
+    chunk: DocumentChunk,
 ) -> tuple[bool, bool]:
     """Check whether a document chunk contains an image or table."""
 
@@ -55,8 +55,8 @@ def _embedded_elements(
 
 async def _process_image_chunk(
     payload: ProcessorPayload,
-    chunk: Document,
-) -> list[Document]:
+    chunk: DocumentChunk,
+) -> list[DocumentChunk]:
     """Process the images contained in a document chunk."""
 
     if not chunk.orig_elements:
@@ -71,7 +71,7 @@ async def _process_image_chunk(
     return await process_image(processor_payload)
 
 
-async def process_text(payload: ProcessorPayload) -> list[Document]:
+async def process_text(payload: ProcessorPayload) -> list[DocumentChunk]:
     """Split extracted text into useful chunks while preserving source elements."""
 
     # Chunk
@@ -82,7 +82,7 @@ async def process_text(payload: ProcessorPayload) -> list[Document]:
 
     # Convert unstructured chunks into the app's chunk model
     document_chunks = [
-        Document(
+        DocumentChunk(
             category=DocumentCategory.DOCUMENT,
             text=chunk.text,
             metadata={
@@ -125,7 +125,7 @@ async def process_text(payload: ProcessorPayload) -> list[Document]:
         #     chunks.extend(table_chunks)
 
     # Process all embedded images concurrently.
-    embedded_chunks: list[Document] = []
+    embedded_chunks: list[DocumentChunk] = []
 
     if image_tasks:
         results = await asyncio.gather(*image_tasks)

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import Any, ClassVar
-from sqlalchemy import Column
+from sqlalchemy import Column, ColumnElement, Table
 
 
 class SqlStorage(ABC):
@@ -12,6 +12,10 @@ class SqlStorage(ABC):
     @abstractmethod
     async def close(self) -> None:
         """Close the database connection pool."""
+
+    @abstractmethod
+    async def get_table(self, table_name: str) -> Table:
+        """Load the existing table in SQL Alchemy format."""
 
     @abstractmethod
     async def ensure_table(
@@ -26,7 +30,7 @@ class SqlStorage(ABC):
         self,
         table_name: str,
         rows: Sequence[dict[str, Any]],
-        conflict_columns: Sequence[str],
+        conflict_columns: Sequence[str] = (),
     ) -> None:
         """Insert (or update) rows to a database table."""
 
@@ -34,30 +38,32 @@ class SqlStorage(ABC):
     async def get(
         self,
         table_name: str,
-        row_id: str,
+        conditions: Sequence[ColumnElement[bool]],
     ) -> dict[str, Any] | None:
-        """Get a particular row in a database table."""
+        """Get the first row matching all conditions."""
 
     @abstractmethod
     async def get_all(
         self,
         table_name: str,
+        conditions: Sequence[ColumnElement[bool]] = (),
+        limit: int | None = None,
     ) -> Sequence[dict[str, Any]]:
-        """Get all rows in a database table."""
+        """Get rows matching all conditions."""
 
     @abstractmethod
     async def delete(
         self,
         table_name: str,
-        row_id: str,
+        conditions: Sequence[ColumnElement[bool]],
     ) -> bool:
-        """Deletes a particular row in a database table."""
+        """Delete rows matching all conditions."""
 
     @abstractmethod
     async def query(
         self,
         sql_query: str,
-        limit: int,
+        limit: int | None,
     ) -> Sequence[dict[str, Any]]:
         """Read-only query to a database table. Returns row results."""
 
@@ -66,9 +72,12 @@ class SqlStorage(ABC):
         self,
         table_name: str,
         search_query: str,
-        limit: int,
+        limit: int | None,
     ) -> Sequence[dict[str, Any]]:
-        """Search a database table using FTS5. Returns row results sorted by most relevant to least relevant."""
+        """
+        Search a database table using FTS5
+        Returns row results sorted by most relevant to least relevant.
+        """
 
     @staticmethod
     @abstractmethod

@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from fastapi import UploadFile
 from sqlalchemy import JSON, Column, Integer, String, Text
+from app.core.config import settings
 from app.errors.document import InvalidDocumentError
 from app.models.ingestion import ProcessorPayload
 from app.processors.pipeline import process
@@ -12,15 +13,12 @@ from app.embedders.base import Embedder
 from app.store_file.base import FileStorage
 from app.store_vector.base import VectorStorage
 from app.store_sql2.base import SqlStorage
-from app.models.document import Document, DocumentCategory
+from app.models.document import DocumentChunk, DocumentCategory
 from app.llm.base import LLMProvider
 from unstructured.partition.auto import partition
 from pathlib import Path
 
 from app.utils.file_type import detect_document_category
-
-CHUNK_METADATA_COLLECTION = "__chunks__"
-DOCUMENT_METADATA_COLLECTION = "__documents__"
 
 
 class IngestionService:
@@ -34,15 +32,15 @@ class IngestionService:
         vector_storage: VectorStorage,
         sql_storage: SqlStorage,
     ):
-        self.file_storage = file_storage
-        self.embedder = embedder
-        self.vector_storage = vector_storage
-        self.llm = llm
-        self.sql_storage = sql_storage
+        self._file_storage = file_storage
+        self._embedder = embedder
+        self._vector_storage = vector_storage
+        self._llm = llm
+        self._sql_storage = sql_storage
 
     async def initialize(self) -> None:
-        await self.sql_storage.ensure_table(
-            CHUNK_METADATA_COLLECTION,
+        await self._sql_storage.ensure_table(
+            settings.CHUNK_TABLE_NAME,
             [
                 Column("id", Integer, primary_key=True, autoincrement=True),
                 Column("chunk_id", String, nullable=False),
@@ -52,8 +50,8 @@ class IngestionService:
             ],
         )
 
-        await self.sql_storage.ensure_table(
-            DOCUMENT_METADATA_COLLECTION,
+        await self._sql_storage.ensure_table(
+            settings.DOCUMENT_METADATA_TABLE_NAME,
             [
                 Column("id", Integer, primary_key=True, autoincrement=True),
                 Column("source_id", String, nullable=False),
@@ -94,7 +92,7 @@ class IngestionService:
             source_content_type=source_content_type,
             elements=elements,
             category=detect_document_category(source_filename),
-            llm=self.llm,
+            llm=self._llm,
         )
         chunks = await process(processor_payload)
 
@@ -112,15 +110,15 @@ class IngestionService:
             source_filename=source_filename,
         )
 
-    async def _save_chunk_to_vector_db(self, chunks: list[Document]):
+    async def _save_chunk_to_vector_db(self, chunks: list[DocumentChunk]):
         """Embeds chunks and saves them to the vector database."""
-        embeddings = await self.embedder.embed_documents(
+        embeddings = await self._embedder.embed_documents(
             [chunk.text for chunk in chunks]
         )
         chunk_ids = [c.id for c in chunks]
-        await self.vector_storage.add(chunk_ids, embeddings)
+        await self._vector_storage.add(chunk_ids, embeddings)
 
-    async def _save_spreadsheet_chunk_to_sql_db(self, chunk: Document) -> None:
+    async def _save_spreadsheet_chunk_to_sql_db(self, chunk: DocumentChunk) -> None:
         """Saves a spreadsheet chunk's table data to SQL database."""
 
         if chunk.category is not DocumentCategory.SPREADSHEET:
@@ -136,9 +134,9 @@ class IngestionService:
             return
 
         # Create the table if it doesn't already exist
-        await self.sql_storage.ensure_table(
+        await self._sql_storage.ensure_table(
             table_name,
-            self.sql_storage.create_sql_columns_from_schema(schema),
+            self._sql_storage.create_sql_columns_from_schema(schema),
         )
 
         # Nothing to insert
@@ -146,13 +144,13 @@ class IngestionService:
             return
 
         # Insert/update the table data
-        await self.sql_storage.upsert(
+        await self._sql_storage.upsert(
             table_name,
             rows,
             conflict_columns=[],
         )
 
-    async def _save_chunk_to_file_db(self, chunk: Document):
+    async def _save_chunk_to_file_db(self, chunk: DocumentChunk):
         """Saves a chunk's `file_bytes` to the file database when provided."""
 
         # Only save the chunk as file if bytes exist
@@ -165,7 +163,7 @@ class IngestionService:
 
         file_extension = Path(chunk.file_filename).suffix
 
-        file_path = await self.file_storage.upload(
+        file_path = await self._file_storage.upload(
             file=BytesIO(chunk.file_bytes),
             file_content_type=chunk.file_content_type,
             file_filename=f"{uuid4()}{file_extension}",
@@ -177,7 +175,7 @@ class IngestionService:
     async def _save_chunks_to_sql_db(
         self,
         source_id: str,
-        chunks: list[Document],
+        chunks: list[DocumentChunk],
     ):
         """Saves chunks to the SQL database."""
 
@@ -199,8 +197,8 @@ class IngestionService:
                 }
             )
 
-        await self.sql_storage.upsert(
-            CHUNK_METADATA_COLLECTION,
+        await self._sql_storage.upsert(
+            settings.CHUNK_TABLE_NAME,
             rows,
             ["id"],
         )
@@ -213,14 +211,14 @@ class IngestionService:
         source_filename: str,
     ):
         source_extension = Path(source_filename).suffix
-        file_path = await self.file_storage.upload(
+        file_path = await self._file_storage.upload(
             file=BytesIO(source_bytes),
             file_content_type=source_content_type,
             file_filename=f"{uuid4()}{source_extension}",
             file_dir="documents/",
         )
-        await self.sql_storage.upsert(
-            DOCUMENT_METADATA_COLLECTION,
+        await self._sql_storage.upsert(
+            settings.DOCUMENT_METADATA_TABLE_NAME,
             [
                 {
                     "source_id": source_id,

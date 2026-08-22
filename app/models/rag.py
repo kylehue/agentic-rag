@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.models.document import Document, DocumentCategory
+from app.models.document import DocumentChunk, DocumentCategory
 
 
 class RetrievalRequest(BaseModel):
@@ -19,7 +19,7 @@ class RetrievalCandidate(BaseModel):
 
     id: str
     text: str
-    document: Document
+    document: DocumentChunk
     metadata: dict[str, Any] = Field(default_factory=dict)
     score: float | None = None
     binary_content: bytes | None = Field(default=None, exclude=True)
@@ -31,7 +31,7 @@ class RetrievedEvidence(BaseModel):
 
     id: str
     retriever: str
-    document: Document
+    document: DocumentChunk
     content: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     score: float | None = None

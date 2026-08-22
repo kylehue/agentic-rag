@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 from unstructured.documents.elements import Element, Table
 
-from app.models.document import Document, DocumentCategory
+from app.models.document import DocumentChunk, DocumentCategory
 from app.models.ingestion import ProcessorPayload
 
 MAX_WORKBOOK_CONTEXT_CHARS = 30_000
@@ -658,7 +658,7 @@ def _add_related_table_names(
         analysis["relationships"] = enriched_relationships
 
 
-async def process_table(payload: ProcessorPayload) -> list[Document]:
+async def process_table(payload: ProcessorPayload) -> list[DocumentChunk]:
     """Create chunks enriched by a single workbook-level LLM analysis."""
 
     tables = await asyncio.to_thread(
@@ -700,7 +700,7 @@ async def process_table(payload: ProcessorPayload) -> list[Document]:
 
     _add_related_table_names(table_analyses, tables)
 
-    chunks: list[Document] = []
+    chunks: list[DocumentChunk] = []
 
     for index, table in enumerate(tables):
         analysis = table_analyses[index]
@@ -713,7 +713,7 @@ async def process_table(payload: ProcessorPayload) -> list[Document]:
         table_rows = table.dataframe.to_dict(orient="records")
 
         chunks.append(
-            Document(
+            DocumentChunk(
                 category=DocumentCategory.SPREADSHEET,
                 text=_analysis_text(
                     table_name=table_name,

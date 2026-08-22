@@ -2,7 +2,7 @@ from fastapi import UploadFile
 from pydantic import ValidationError
 
 from app.errors.document import DocumentNotFoundError
-from app.models.document import Document
+from app.models.document import DocumentChunk
 from app.store_file.base import FileStorage
 from app.store_sql2.base import SqlStorage
 from app.store_vector.base import VectorStorage

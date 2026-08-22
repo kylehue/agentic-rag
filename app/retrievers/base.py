@@ -1,18 +1,13 @@
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
-
-from app.models.rag import RetrievalCandidate, RetrievedEvidence, RetrievalRequest
+from app.models.document import RetrievedDocumentChunk
 
 
 class Retriever(ABC):
-    """Interface for turning search candidates into answer-ready evidence."""
-
-    name: str
-
     @abstractmethod
-    async def retrieve(
-        self,
-        request: RetrievalRequest,
-        candidates: Sequence[RetrievalCandidate],
-    ) -> list[RetrievedEvidence]:
-        """Return evidence. External retrievers may ignore vector candidates."""
+    async def retrieve(self, user_query: str) -> list[RetrievedDocumentChunk]:
+        """
+        Retrieve chunks using the user query provided.
+        Returns results in descending order (best to worst).
+
+        Note: Higher score is better.
+        """

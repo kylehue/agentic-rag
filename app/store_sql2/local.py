@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import (
     Column,
+    ColumnElement,
     Integer,
     Float,
     String,
@@ -107,6 +108,9 @@ class LocalSqlStorage(SqlStorage):
     def get_sql_dialect(self) -> str:
         return "SQLite"
 
+    async def get_table(self, table_name: str) -> Table:
+        return await self._load_table(table_name)
+
     async def ensure_table(
         self,
         table_name: str,
@@ -132,13 +136,10 @@ class LocalSqlStorage(SqlStorage):
         self,
         table_name: str,
         rows: Sequence[dict[str, Any]],
-        conflict_columns: Sequence[str],
+        conflict_columns: Sequence[str] = (),
     ) -> None:
         if not rows:
             return
-
-        if not conflict_columns:
-            raise ValueError("At least one conflict column is required.")
 
         table = await self._load_table(table_name)
 
@@ -150,26 +151,28 @@ class LocalSqlStorage(SqlStorage):
 
         for row in rows:
             unknown = set(row) - table_columns
+
             if unknown:
                 raise ValueError(f"Unknown columns: {sorted(unknown)}")
 
         statement = insert(table).values(list(rows))
 
-        update_columns = {
-            column.name: statement.excluded[column.name]
-            for column in table.columns
-            if column.name not in conflict_columns
-        }
+        if conflict_columns:
+            update_columns = {
+                column.name: statement.excluded[column.name]
+                for column in table.columns
+                if column.name not in conflict_columns
+            }
 
-        if update_columns:
-            statement = statement.on_conflict_do_update(
-                index_elements=list(conflict_columns),
-                set_=update_columns,
-            )
-        else:
-            statement = statement.on_conflict_do_nothing(
-                index_elements=list(conflict_columns)
-            )
+            if update_columns:
+                statement = statement.on_conflict_do_update(
+                    index_elements=list(conflict_columns),
+                    set_=update_columns,
+                )
+            else:
+                statement = statement.on_conflict_do_nothing(
+                    index_elements=list(conflict_columns),
+                )
 
         async with self._session_factory() as session:
             async with session.begin():
@@ -178,14 +181,19 @@ class LocalSqlStorage(SqlStorage):
     async def get(
         self,
         table_name: str,
-        row_id: str,
+        conditions: Sequence[ColumnElement[bool]],
     ) -> dict[str, Any] | None:
-        table = await self._load_table(table_name)
+        if not conditions:
+            raise ValueError("Get requires at least one condition.")
 
-        if "id" not in table.c:
-            raise ValueError(f"Table {table_name!r} has no 'id' column.")
+        table = await self.get_table(table_name)
 
-        statement = select(table).where(table.c.id == row_id).limit(1)
+        statement = select(table)
+
+        if conditions:
+            statement = statement.where(*conditions)
+
+        statement = statement.limit(1)
 
         async with self._session_factory() as session:
             result = await session.execute(statement)
@@ -200,10 +208,21 @@ class LocalSqlStorage(SqlStorage):
     async def get_all(
         self,
         table_name: str,
+        conditions: Sequence[ColumnElement[bool]] = (),
+        limit: int | None = None,
     ) -> Sequence[dict[str, Any]]:
-        table = await self._load_table(table_name)
+        table = await self.get_table(table_name)
 
         statement = select(table)
+
+        if conditions:
+            statement = statement.where(*conditions)
+
+        if limit is not None:
+            if limit <= 0:
+                return []
+
+            statement = statement.limit(limit)
 
         async with self._session_factory() as session:
             result = await session.execute(statement)
@@ -213,29 +232,36 @@ class LocalSqlStorage(SqlStorage):
     async def delete(
         self,
         table_name: str,
-        row_id: str,
+        conditions: Sequence[ColumnElement[bool]],
     ) -> bool:
-        table = await self._load_table(table_name)
+        table = await self.get_table(table_name)
 
-        if "id" not in table.c:
-            raise ValueError(f"Table {table_name!r} has no 'id' column.")
+        if not conditions:
+            raise ValueError("Delete requires at least one condition.")
 
-        statement = delete(table).where(table.c.id == row_id).returning(table.c.id)
+        if not table.c:
+            raise ValueError(f"Table {table_name!r} has no columns.")
+
+        statement = delete(table)
+
+        if conditions:
+            statement = statement.where(*conditions)
+
+        return_column = next(iter(table.c))
+
+        statement = statement.returning(return_column)
 
         async with self._session_factory() as session:
             async with session.begin():
                 result = await session.execute(statement)
 
-                return result.scalar_one_or_none() is not None
+                return result.first() is not None
 
     async def query(
         self,
         sql_query: str,
-        limit: int,
+        limit: int | None,
     ) -> Sequence[dict[str, Any]]:
-        if limit <= 0:
-            return []
-
         query = sql_query.strip()
 
         if not query:
@@ -252,7 +278,10 @@ class LocalSqlStorage(SqlStorage):
         async with self._session_factory() as session:
             result = await session.execute(statement)
 
-            rows = result.mappings().fetchmany(limit)
+            if limit is None:
+                rows = result.mappings().all()
+            else:
+                rows = result.mappings().fetchmany(limit)
 
             return [dict(row) for row in rows]
 
@@ -260,11 +289,8 @@ class LocalSqlStorage(SqlStorage):
         self,
         table_name: str,
         search_query: str,
-        limit: int,
+        limit: int | None,
     ) -> Sequence[dict[str, Any]]:
-        if limit <= 0:
-            return []
-
         self._validate_table_name(table_name)
 
         fts_table = f"{table_name}_fts"

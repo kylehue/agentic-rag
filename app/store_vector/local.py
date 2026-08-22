@@ -4,7 +4,7 @@ from typing import Sequence
 
 import chromadb
 
-from app.store_vector.base import VectorStorage
+from app.store_vector.base import VectorSearchResult, VectorStorage
 
 
 class LocalVectorStorage(VectorStorage):
@@ -45,7 +45,9 @@ class LocalVectorStorage(VectorStorage):
             embeddings=[list(embedding) for embedding in embeddings],
         )
 
-    async def search(self, query_embedding: list[float], top_k: int = 5) -> list[str]:
+    async def search(
+        self, query_embedding: list[float], top_k: int = 5
+    ) -> list[VectorSearchResult]:
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
         collection_count = await asyncio.to_thread(self._collection.count)
@@ -58,7 +60,15 @@ class LocalVectorStorage(VectorStorage):
             n_results=min(top_k, collection_count),
             include=[],
         )
-        return result["ids"][0]
+        ids = result["ids"][0]
+        distances = (result["distances"] or [])[0]
+        return [
+            VectorSearchResult(
+                id=chunk_id,
+                score=1 - distance,  # in cosine similarity, lower is better
+            )
+            for chunk_id, distance in zip(ids, distances)
+        ]
 
     async def delete(self, ids: Sequence[str]) -> None:
         if ids:

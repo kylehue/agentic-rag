@@ -3,6 +3,7 @@ import base64
 import binascii
 import mimetypes
 from typing import Any
+from uuid import uuid4
 
 from app.models.document import Document, DocumentCategory
 from app.models.ingestion import ProcessorPayload
@@ -63,14 +64,14 @@ def _image_bytes(
         return (
             embedded,
             mime_type,
-            payload.file_filename + extension,
+            f"{uuid4()}{extension}",
         )
 
     # For image documents
     return (
-        payload.file_bytes,
-        payload.file_content_type,
-        payload.file_filename,
+        payload.source_bytes,
+        payload.source_content_type,
+        payload.source_filename,
     )
 
 
@@ -115,21 +116,24 @@ async def _process_single_image(
 
     # Output chunk
     return Document(
-        file_filename=filename,
-        file_bytes=image_bytes,
-        file_content_type=mime_type,
+        # Avoid saving the chunk as file if it is not embedded because
+        # they'll be automatically saved at the end of ingestion
+        file_filename=filename if payload.is_embedded else None,
+        file_bytes=image_bytes if payload.is_embedded else None,
+        file_content_type=mime_type if payload.is_embedded else None,
         text=_description_text(
             description,
             context,
         ),
         category=DocumentCategory.IMAGE,
         metadata={
-            "file_id": payload.file_id,
-            "page_number": getattr(
+            "chunk_source_id": payload.source_id,
+            "chunk_source_page_number": getattr(
                 image.metadata,
                 "page_number",
                 None,
             ),
+            "chunk_attach_file_to_llm": True,
         },
         orig_elements=[image],
     )

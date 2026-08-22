@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 import json
@@ -121,8 +120,8 @@ def _table_html(table: Table) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _normalize_column_name(name: Any) -> str:
-    """Convert a column name into a safe SQL-friendly snake_case name."""
+def _normalize_name(name: Any) -> str:
+    """Convert a name into a safe SQL-friendly snake_case identifier."""
 
     name = str(name).strip()
 
@@ -130,30 +129,29 @@ def _normalize_column_name(name: Any) -> str:
     name = re.sub(r"[^a-zA-Z0-9]+", "_", name)
 
     # Remove leading/trailing underscores.
-    name = name.strip("_")
+    name = name.strip("_").lower()
 
-    # Lowercase.
-    name = name.lower()
-
-    # Avoid empty names.
+    # Avoid empty identifiers.
     if not name:
-        name = "column"
+        name = "value"
 
     # Avoid identifiers starting with a number.
     if name[0].isdigit():
-        name = f"column_{name}"
+        name = f"value_{name}"
 
     return name
 
 
-def _normalize_dataframe_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
-    """Normalize DataFrame columns into unique SQL-safe snake_case names."""
+def _normalize_unique_names(
+    names: list[Any],
+) -> list[str]:
+    """Normalize names and ensure every resulting name is unique."""
 
     used: set[str] = set()
     normalized: list[str] = []
 
-    for column in dataframe.columns:
-        base_name = _normalize_column_name(column)
+    for value in names:
+        base_name = _normalize_name(value)
 
         name = base_name
         suffix = 2
@@ -165,10 +163,28 @@ def _normalize_dataframe_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
         used.add(name)
         normalized.append(name)
 
+    return normalized
+
+
+def _normalize_dataframe_columns(
+    dataframe: pd.DataFrame,
+) -> pd.DataFrame:
+    """Normalize DataFrame columns into unique SQL-safe names."""
+
     dataframe = dataframe.copy()
-    dataframe.columns = normalized
+
+    dataframe.columns = _normalize_unique_names(list(dataframe.columns))
 
     return dataframe
+
+
+def _normalize_table_names(
+    names: list[Any],
+    file_id: str,
+) -> list[str]:
+    """Prefix table names with a file ID, then normalize and deduplicate them."""
+
+    return _normalize_unique_names([f"{file_id}_{name}" for name in names])
 
 
 def _dataframe_from_html(
@@ -189,28 +205,46 @@ def _dataframe_from_html(
     return tables[0]
 
 
-def _read_document_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
+def _read_document_tables(
+    payload: ProcessorPayload,
+) -> list[ExtractedTable]:
     """
     Extract PDF tables using Unstructured HTML, then immediately convert
     them into DataFrames.
     """
 
+    unstructured_tables = [
+        element for element in payload.elements if isinstance(element, Table)
+    ]
+
+    if not unstructured_tables:
+        return []
+
+    source_names = [
+        _table_label(table, index) for index, table in enumerate(unstructured_tables)
+    ]
+
+    table_names = _normalize_table_names(
+        source_names,
+        payload.source_id,
+    )
+
     tables: list[ExtractedTable] = []
 
-    unstructured_tables = [e for e in payload.elements if isinstance(e, Table)]
-
-    for index, table in enumerate(unstructured_tables):
+    for table, table_name, source_name in zip(
+        unstructured_tables,
+        table_names,
+        source_names,
+    ):
         dataframe = _dataframe_from_html(table)
         dataframe = _normalize_dataframe_columns(dataframe)
-        name = _table_label(table, index)
+
         tables.append(
             ExtractedTable(
                 dataframe=dataframe,
-                file_filename=f"{name}.csv",
-                # We don't really need to save these embedded tables as long as they're in SQL
-                # file_bytes=dataframe.to_csv(index=False).encode("utf-8"),
+                file_filename=f"{source_name}.csv",
                 file_content_type="text/csv",
-                name=name,
+                name=table_name,
                 page_number=getattr(
                     table.metadata,
                     "page_number",
@@ -223,7 +257,9 @@ def _read_document_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
     return tables
 
 
-def _read_spreadsheet_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
+def _read_spreadsheet_tables(
+    payload: ProcessorPayload,
+) -> list[ExtractedTable]:
     """
     Read spreadsheet data directly with pandas.
 
@@ -231,40 +267,68 @@ def _read_spreadsheet_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
     XLS/XLSX produces one table per sheet.
     """
 
-    extension = Path(payload.file_filename).suffix.lower()
+    extension = Path(payload.source_filename).suffix.lower()
 
-    source = BytesIO(payload.file_bytes)
+    source = BytesIO(payload.source_bytes)
 
     if extension == ".csv":
         dataframe = pd.read_csv(source)
         dataframe = _normalize_dataframe_columns(dataframe)
+
+        source_name = Path(payload.source_filename).stem
+
+        table_name = _normalize_table_names(
+            [source_name],
+            payload.source_id,
+        )[0]
+
         return [
             ExtractedTable(
                 dataframe=dataframe,
-                file_filename=payload.file_filename,
-                file_bytes=payload.file_bytes,
-                file_content_type=payload.file_content_type,
-                name=Path(payload.file_filename).stem,
+                file_filename=payload.source_filename,
+                file_bytes=payload.source_bytes,
+                file_content_type=payload.source_content_type,
+                name=table_name,
                 orig_elements=payload.elements,
             )
         ]
 
     if extension in {".xlsx", ".xls"}:
-        sheets = pd.read_excel(source, sheet_name=None)
-        res: list[ExtractedTable] = []
-        for sheet_name, dataframe in sheets.items():
-            dataframe = _normalize_dataframe_columns(dataframe)
-            res.append(
+        sheets = pd.read_excel(
+            source,
+            sheet_name=None,
+        )
+
+        source_names = list(sheets.keys())
+
+        table_names = _normalize_table_names(
+            source_names,
+            payload.source_id,
+        )
+
+        result: list[ExtractedTable] = []
+
+        for (
+            source_name,
+            table_name,
+        ) in zip(
+            source_names,
+            table_names,
+        ):
+            dataframe = _normalize_dataframe_columns(sheets[source_name])
+
+            result.append(
                 ExtractedTable(
                     dataframe=dataframe,
-                    file_filename=payload.file_filename,
-                    file_bytes=payload.file_bytes,
-                    file_content_type=payload.file_content_type,
-                    name=sheet_name,
+                    file_filename=payload.source_filename,
+                    file_bytes=payload.source_bytes,
+                    file_content_type=payload.source_content_type,
+                    name=table_name,
                     orig_elements=payload.elements,
                 )
             )
-        return res
+
+        return result
 
     return []
 
@@ -280,10 +344,10 @@ def _extract_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
         Raw file bytes -> pandas -> DataFrame(s)
     """
 
-    if payload.document_category is DocumentCategory.DOCUMENT:
+    if payload.category is DocumentCategory.DOCUMENT:
         return _read_document_tables(payload)
 
-    if payload.document_category is DocumentCategory.SPREADSHEET:
+    if payload.category is DocumentCategory.SPREADSHEET:
         return _read_spreadsheet_tables(payload)
 
     return []
@@ -650,9 +714,6 @@ async def process_table(payload: ProcessorPayload) -> list[Document]:
 
         chunks.append(
             Document(
-                file_filename=table.file_filename,
-                file_bytes=table.file_bytes,
-                file_content_type=table.file_content_type,
                 category=DocumentCategory.SPREADSHEET,
                 text=_analysis_text(
                     table_name=table_name,
@@ -661,17 +722,13 @@ async def process_table(payload: ProcessorPayload) -> list[Document]:
                     context=context,
                 ),
                 metadata={
-                    "file_id": payload.file_id,
-                    "page_number": table.page_number,
-                    "sheet_name": table_name,
-                    "row_count": len(table.dataframe),
-                    "column_count": len(table.dataframe.columns),
-                    "schema": analysis["schema"],
-                    "rows": table_rows,
-                    "workbook_description": workbook_description,
-                    "description": analysis["description"],
-                    "role": analysis["role"],
-                    "relationships": analysis["relationships"],
+                    # reference
+                    "chunk_source_id": payload.source_id,
+                    "chunk_source_page_number": table.page_number,
+                    # sql data
+                    "sql_table_name": table_name,
+                    "sql_schema": analysis["schema"],
+                    "sql_rows": table_rows,
                 },
                 orig_elements=table.orig_elements,
             )

@@ -18,15 +18,15 @@ class DocumentCategory(str, Enum):
 class Document:
     """The persistent record describing a document chunk."""
 
-    # --- file info ---
-    file_filename: str
-    file_content_type: str
+    id: str = str(uuid4())
+
+    # --- file info (used when saving a chunk as file) ---
+    file_filename: str | None = None
+    file_content_type: str | None = None
     file_bytes: bytes | None = None
 
     # --- chunk info ---
     category: DocumentCategory = DocumentCategory.DOCUMENT
     text: str = ""
     metadata: dict[str, Any] = {}
-    # chunk's original Unstructured.io elements, used for processing
-    orig_elements: list[Element] | None = None
-    id: str = str(uuid4())
+    orig_elements: list[Element] | None = None  # original Unstructured.io elements

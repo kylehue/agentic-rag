@@ -11,15 +11,15 @@ async def process(payload: ProcessorPayload) -> list[Document]:
     chunks = []
 
     # text documents
-    if payload.document_category is DocumentCategory.DOCUMENT:
+    if payload.category is DocumentCategory.DOCUMENT:
         chunks.extend(await process_text(payload))
 
     # spreadsheet documents
-    elif payload.document_category is DocumentCategory.SPREADSHEET:
+    elif payload.category is DocumentCategory.SPREADSHEET:
         chunks.extend(await process_table(payload))
 
     # image documents
-    elif payload.document_category is DocumentCategory.IMAGE:
+    elif payload.category is DocumentCategory.IMAGE:
         chunks.extend(await process_image(payload))
 
     return chunks

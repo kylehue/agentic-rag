@@ -8,10 +8,11 @@ from app.models.document import DocumentCategory
 
 @dataclass
 class ProcessorPayload:
-    file_id: str
-    file_filename: str
-    file_bytes: bytes
-    file_content_type: str
-    document_category: DocumentCategory
+    source_id: str
+    source_filename: str
+    source_bytes: bytes
+    source_content_type: str
+    category: DocumentCategory
     llm: LLMProvider
     elements: list[Element]
+    is_embedded: bool = False

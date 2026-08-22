@@ -64,6 +64,7 @@ async def _process_image_chunk(
 
     processor_payload = ProcessorPayload(
         **payload.__dict__,
+        is_embedded=True,
         elements=chunk.orig_elements,
     )
 
@@ -82,14 +83,11 @@ async def process_text(payload: ProcessorPayload) -> list[Document]:
     # Convert unstructured chunks into the app's chunk model
     document_chunks = [
         Document(
-            file_filename=payload.file_filename,
-            file_bytes=payload.file_bytes,
-            file_content_type=payload.file_content_type,
             category=DocumentCategory.DOCUMENT,
             text=chunk.text,
             metadata={
-                "file_id": payload.file_id,
-                "page_number": getattr(
+                "chunk_source_id": payload.source_id,
+                "chunk_source_page_number": getattr(
                     chunk.metadata,
                     "page_number",
                     None,

@@ -13,6 +13,7 @@ from unstructured.documents.elements import Element, Table
 
 from app.models.chunk import IngestedChunk, ChunkCategory
 from app.models.ingestion import ProcessorPayload
+from app.utils.string import render_template
 
 MAX_WORKBOOK_CONTEXT_CHARS = 30_000
 MAX_TABLE_CONTEXT_CHARS = 10_000
@@ -20,7 +21,7 @@ MAX_TEXT_CONTEXT_CHARS = 8_000
 SAMPLED_DATA_ROWS_PER_TABLE = 5
 
 
-WORKBOOK_ANALYSIS_PROMPT = """You are analyzing a workbook/document for a retrieval system.
+WORKBOOK_ANALYSIS_PROMPT_TEMPLATE = """You are analyzing a workbook/document for a retrieval system.
 
 The input is a catalog of tables extracted from one source. Tables may refer to,
 define, summarize, or join other tables. Analyze the catalog as a whole so each
@@ -763,12 +764,15 @@ async def process_table(payload: ProcessorPayload) -> list[IngestedChunk]:
     table_analyses = [_empty_analysis() for _ in tables]
 
     try:
-        response = await payload.llm.answer(
-            WORKBOOK_ANALYSIS_PROMPT.format(
-                context=context or "(none)",
-                catalog=catalog,
-            )
+        prompt = render_template(
+            WORKBOOK_ANALYSIS_PROMPT_TEMPLATE,
+            {
+                "context": context or "(none)",
+                "catalog": catalog,
+            },
         )
+
+        response = await payload.llm.answer(prompt)
 
         workbook_description, table_analyses = _parse_workbook_analysis(
             response,

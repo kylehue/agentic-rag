@@ -1,14 +1,7 @@
-from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
-
-@dataclass(frozen=True)
-class LLMAttachment:
-    """Binary material supplied with an LLM prompt."""
-
-    content: bytes
-    mime_type: str
+from app.models.llm import LLMAttachment
 
 
 class LLMProvider(ABC):

@@ -1,12 +1,7 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Sequence
 
-
-@dataclass(frozen=True)
-class VectorSearchResult:
-    id: str
-    score: float
+from app.models.vector import VectorSearchResult
 
 
 class VectorStorage(ABC):

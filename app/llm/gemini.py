@@ -4,7 +4,8 @@ from collections.abc import Sequence
 from google import genai
 from google.genai import types
 from app.core.config import Settings
-from app.llm.base import LLMProvider, LLMAttachment
+from app.models.llm import LLMAttachment
+from app.llm.base import LLMProvider
 
 
 class GeminiProvider(LLMProvider):

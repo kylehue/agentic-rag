@@ -1,18 +1,20 @@
 import asyncio
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 from fastapi import UploadFile
 
 from app.core.config import settings
-from app.llm.base import LLMProvider, LLMAttachment
+from app.models.llm import LLMAttachment
+from app.llm.base import LLMProvider
 from app.models.chunk import RetrievedChunk
+from app.models.rag import RagAnswer
 from app.services.ingestion import IngestionService
 from app.services.retrieval import RetrievalService
 from app.store_file.base import FileStorage
 from app.store_sql.base import SqlStorage
+from app.utils.string import render_template
 
-ANSWER_PROMPT = """Answer the question using only the retrieved evidence.
+ANSWER_PROMPT_TEMPLATE = """Answer the question using only the retrieved evidence.
 If the evidence is insufficient, say so. Cite factual claims using the source
 filename and evidence id in square brackets, for example [report.pdf:abc:0].
 
@@ -22,13 +24,6 @@ Question:
 Evidence:
 {evidence}
 """
-
-
-@dataclass(frozen=True)
-class RagAnswer:
-    query: str
-    answer: str
-    chunks: Sequence[RetrievedChunk]
 
 
 class RagService:
@@ -192,9 +187,12 @@ class RagService:
             or "(no evidence retrieved)"
         )
 
-        prompt = ANSWER_PROMPT.format(
-            query=user_query,
-            evidence=evidence,
+        prompt = render_template(
+            ANSWER_PROMPT_TEMPLATE,
+            {
+                "query": user_query,
+                "evidence": evidence,
+            },
         )
 
         attachments = await self._build_attachments(chunks)

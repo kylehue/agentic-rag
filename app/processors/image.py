@@ -7,10 +7,12 @@ from uuid import uuid4
 
 from app.models.chunk import IngestedChunk, ChunkCategory
 from app.models.ingestion import ProcessorPayload
-from app.llm.base import LLMAttachment
+from app.models.llm import LLMAttachment
 from unstructured.documents.elements import Element, Image
 
-IMAGE_PROMPT = """Describe the image for a retrieval system. Identify its subject,
+from app.utils.string import render_template
+
+IMAGE_PROMPT_TEMPLATE = """Describe the image for a retrieval system. Identify its subject,
 important objects, people, actions, layout, visible labels, and any useful chart,
 diagram, or document structure. Do not guess details that are not visible.
 
@@ -100,10 +102,13 @@ async def _process_single_image(
 
     # LLM: Generate image description
     try:
+        prompt = render_template(
+            IMAGE_PROMPT_TEMPLATE,
+            {"context": context or "(none)"},
+        )
+
         description = await payload.llm.answer(
-            IMAGE_PROMPT.format(
-                context=context or "(none)",
-            ),
+            prompt,
             attachments=(
                 LLMAttachment(
                     image_bytes,

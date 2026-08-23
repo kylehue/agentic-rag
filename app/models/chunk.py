@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
+from pydantic import BaseModel
 from unstructured.documents.elements import Element
 
 
@@ -18,7 +19,7 @@ class ChunkCategory(str, Enum):
 class IngestedChunk:
     """The persistent record describing a document chunk."""
 
-    id: str = field(default_factory=lambda: str(uuid4()))
+    chunk_id: str = field(default_factory=lambda: str(uuid4()))
 
     # --- file info (used when saving a chunk as file) ---
     file_filename: str | None = None

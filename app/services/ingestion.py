@@ -120,7 +120,7 @@ class IngestionService:
         embeddings = await self._embedder.embed_documents(
             [chunk.text for chunk in chunks]
         )
-        chunk_ids = [c.id for c in chunks]
+        chunk_ids = [c.chunk_id for c in chunks]
         await self._vector_storage.add(chunk_ids, embeddings)
 
     async def _save_spreadsheet_chunk_to_sql_db(self, chunk: IngestedChunk) -> None:
@@ -195,7 +195,7 @@ class IngestionService:
 
             rows.append(
                 {
-                    "chunk_id": chunk.id,
+                    "chunk_id": chunk.chunk_id,
                     "source_id": source_id,
                     "category": chunk.category.value,
                     "text": chunk.text,

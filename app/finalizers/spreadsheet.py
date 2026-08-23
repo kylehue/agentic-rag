@@ -5,8 +5,9 @@ from app.finalizers.base import Finalizer
 from app.llm.base import LLMProvider
 from app.models.chunk import ChunkCategory, RetrievedChunk
 from app.store_sql.base import SqlStorage
+from app.utils.string import render_template
 
-SQL_PROMPT = """You generate at most one read-only {dialect} SQL query
+SQL_PROMPT_TEMPLATE = """You generate at most one read-only {dialect} SQL query
 for a retrieval system.
 
 Return SQL only. Do not use Markdown, code fences, explanations, or comments.
@@ -81,13 +82,16 @@ class SpreadsheetFinalizer(Finalizer):
             return chunk
 
         try:
-            response = await self._llm.answer(
-                SQL_PROMPT.format(
-                    dialect=self._sql_storage.get_sql_dialect(),
-                    query=user_query,
-                    context=chunk.text,
-                )
+            prompt = render_template(
+                SQL_PROMPT_TEMPLATE,
+                {
+                    "dialect": self._sql_storage.get_sql_dialect(),
+                    "query": user_query,
+                    "context": chunk.text,
+                },
             )
+
+            response = await self._llm.answer(prompt)
         except Exception:
             # SQL generation is optional. Keep the original evidence usable.
             return chunk

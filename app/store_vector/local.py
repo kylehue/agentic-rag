@@ -4,7 +4,8 @@ from typing import Sequence
 
 import chromadb
 
-from app.store_vector.base import VectorSearchResult, VectorStorage
+from app.models.vector import VectorSearchResult
+from app.store_vector.base import VectorStorage
 
 
 class LocalVectorStorage(VectorStorage):

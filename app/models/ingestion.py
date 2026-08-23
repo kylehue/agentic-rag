@@ -13,6 +13,5 @@ class ProcessorPayload:
     source_bytes: bytes
     source_content_type: str
     category: ChunkCategory
-    llm: LLMProvider
     elements: list[Element]
     is_embedded: bool = False

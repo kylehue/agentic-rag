@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Sequence
 from io import BytesIO
 from typing import Any
 from uuid import uuid4
@@ -8,7 +9,7 @@ from sqlalchemy import JSON, Column, Integer, String, Text
 from app.core.config import settings
 from app.errors.document import InvalidDocumentError
 from app.models.ingestion import ProcessorPayload
-from app.processors.pipeline import process
+from app.processors.base import Processor
 from app.embedders.base import Embedder
 from app.store_file.base import FileStorage
 from app.store_vector.base import VectorStorage
@@ -26,16 +27,18 @@ class IngestionService:
 
     def __init__(
         self,
-        embedder: Embedder,
         llm: LLMProvider,
+        embedder: Embedder,
+        processor: Processor,
         file_storage: FileStorage,
         vector_storage: VectorStorage,
         sql_storage: SqlStorage,
     ):
-        self._file_storage = file_storage
-        self._embedder = embedder
-        self._vector_storage = vector_storage
         self._llm = llm
+        self._embedder = embedder
+        self._processor = processor
+        self._file_storage = file_storage
+        self._vector_storage = vector_storage
         self._sql_storage = sql_storage
 
     async def initialize(self) -> None:
@@ -95,9 +98,8 @@ class IngestionService:
             source_content_type=source_content_type,
             elements=elements,
             category=detect_document_category(source_filename),
-            llm=self._llm,
         )
-        chunks = await process(processor_payload)
+        chunks = await self._processor.process(processor_payload)
 
         # 3. Save to databases
         await self._save_chunk_to_vector_db(chunks)
@@ -115,7 +117,7 @@ class IngestionService:
 
         return chunks
 
-    async def _save_chunk_to_vector_db(self, chunks: list[IngestedChunk]):
+    async def _save_chunk_to_vector_db(self, chunks: Sequence[IngestedChunk]):
         """Embeds chunks and saves them to the vector database."""
         embeddings = await self._embedder.embed_documents(
             [chunk.text for chunk in chunks]
@@ -180,7 +182,7 @@ class IngestionService:
     async def _save_chunks_to_sql_db(
         self,
         source_id: str,
-        chunks: list[IngestedChunk],
+        chunks: Sequence[IngestedChunk],
     ):
         """Saves chunks to the SQL database."""
 

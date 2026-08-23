@@ -11,8 +11,10 @@ from typing import Any
 import pandas as pd
 from unstructured.documents.elements import Element, Table
 
+from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk, ChunkCategory
 from app.models.ingestion import ProcessorPayload
+from app.processors.base import Processor
 from app.utils.string import render_template
 
 MAX_WORKBOOK_CONTEXT_CHARS = 30_000
@@ -84,241 +86,218 @@ class ExtractedTable:
     orig_elements: list[Element] = field(default_factory=list)
 
 
-def _text_context(elements: list[Element]) -> str:
-    """Collect extracted text to help the LLM understand table meaning."""
+class TableProcessor(Processor):
+    def __init__(self, llm: LLMProvider):
+        self._llm = llm
 
-    texts: list[str] = []
+    @staticmethod
+    def _text_context(elements: list[Element]) -> str:
+        """Collect extracted text to help the LLM understand table meaning."""
 
-    for element in elements:
-        text = getattr(element, "text", None)
+        texts: list[str] = []
 
-        if isinstance(text, str) and text.strip():
-            texts.append(text.strip())
+        for element in elements:
+            text = getattr(element, "text", None)
 
-    context = "\n\n".join(texts)
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
 
-    return context[:MAX_TEXT_CONTEXT_CHARS]
+        context = "\n\n".join(texts)
 
+        return context[:MAX_TEXT_CONTEXT_CHARS]
 
-def _table_label(
-    table: Table,
-    index: int,
-) -> str:
-    """Return a stable human-readable label for a PDF table."""
+    @staticmethod
+    def _table_label(
+        table: Table,
+        index: int,
+    ) -> str:
+        """Return a stable human-readable label for a PDF table."""
 
-    return getattr(table.metadata, "page_name", None) or f"Table {index + 1}"
+        return getattr(table.metadata, "page_name", None) or f"Table {index + 1}"
 
+    @staticmethod
+    def _table_html(table: Table) -> str:
+        """Return Unstructured's reconstructed table HTML."""
 
-def _table_html(table: Table) -> str:
-    """Return Unstructured's reconstructed table HTML."""
-
-    value = getattr(
-        table.metadata,
-        "text_as_html",
-        None,
-    )
-
-    return value if isinstance(value, str) else ""
-
-
-def _normalize_name(name: Any) -> str:
-    """Convert a name into a safe SQL-friendly snake_case identifier."""
-
-    name = str(name).strip()
-
-    # Replace non-alphanumeric characters with underscores.
-    name = re.sub(r"[^a-zA-Z0-9]+", "_", name)
-
-    # Remove leading/trailing underscores.
-    name = name.strip("_").lower()
-
-    # Avoid empty identifiers.
-    if not name:
-        name = "value"
-
-    # Avoid identifiers starting with a number.
-    if name[0].isdigit():
-        name = f"value_{name}"
-
-    return name
-
-
-def _normalize_unique_names(
-    names: list[Any],
-) -> list[str]:
-    """Normalize names and ensure every resulting name is unique."""
-
-    used: set[str] = set()
-    normalized: list[str] = []
-
-    for value in names:
-        base_name = _normalize_name(value)
-
-        name = base_name
-        suffix = 2
-
-        while name in used:
-            name = f"{base_name}_{suffix}"
-            suffix += 1
-
-        used.add(name)
-        normalized.append(name)
-
-    return normalized
-
-
-def _normalize_dataframe_columns(
-    dataframe: pd.DataFrame,
-) -> pd.DataFrame:
-    """Normalize DataFrame columns into unique SQL-safe names."""
-
-    dataframe = dataframe.copy()
-
-    dataframe.columns = _normalize_unique_names(list(dataframe.columns))
-
-    return dataframe
-
-
-def _normalize_table_names(
-    names: list[Any],
-    file_id: str,
-) -> list[str]:
-    """Prefix table names with a file ID, then normalize and deduplicate them."""
-
-    return _normalize_unique_names([f"{file_id}_{name}" for name in names])
-
-
-def _dataframe_from_html(
-    table: Table,
-) -> pd.DataFrame:
-    """Convert an Unstructured PDF table into a DataFrame."""
-
-    html = _table_html(table)
-
-    if not html:
-        raise ValueError("Table does not contain text_as_html.")
-
-    tables = pd.read_html(html)
-
-    if not tables:
-        raise ValueError("No table could be parsed from text_as_html.")
-
-    return tables[0]
-
-
-def _read_document_tables(
-    payload: ProcessorPayload,
-) -> list[ExtractedTable]:
-    """
-    Extract PDF tables using Unstructured HTML, then immediately convert
-    them into DataFrames.
-    """
-
-    unstructured_tables = [
-        element for element in payload.elements if isinstance(element, Table)
-    ]
-
-    if not unstructured_tables:
-        return []
-
-    source_names = [
-        _table_label(table, index) for index, table in enumerate(unstructured_tables)
-    ]
-
-    table_names = _normalize_table_names(
-        source_names,
-        payload.source_id,
-    )
-
-    tables: list[ExtractedTable] = []
-
-    for table, table_name, source_name in zip(
-        unstructured_tables,
-        table_names,
-        source_names,
-    ):
-        dataframe = _dataframe_from_html(table)
-        dataframe = _normalize_dataframe_columns(dataframe)
-
-        tables.append(
-            ExtractedTable(
-                dataframe=dataframe,
-                file_filename=f"{source_name}.csv",
-                file_content_type="text/csv",
-                name=table_name,
-                page_number=getattr(
-                    table.metadata,
-                    "page_number",
-                    None,
-                ),
-                orig_elements=[table],
-            )
+        value = getattr(
+            table.metadata,
+            "text_as_html",
+            None,
         )
 
-    return tables
+        return value if isinstance(value, str) else ""
 
+    @staticmethod
+    def _normalize_name(name: Any) -> str:
+        """Convert a name into a safe SQL-friendly snake_case identifier."""
 
-def _read_spreadsheet_tables(
-    payload: ProcessorPayload,
-) -> list[ExtractedTable]:
-    """
-    Read spreadsheet data directly with pandas.
+        name = str(name).strip()
 
-    CSV produces one table.
-    XLS/XLSX produces one table per sheet.
-    """
+        # Replace non-alphanumeric characters with underscores.
+        name = re.sub(r"[^a-zA-Z0-9]+", "_", name)
 
-    extension = Path(payload.source_filename).suffix.lower()
+        # Remove leading/trailing underscores.
+        name = name.strip("_").lower()
 
-    source = BytesIO(payload.source_bytes)
+        # Avoid empty identifiers.
+        if not name:
+            name = "value"
 
-    if extension == ".csv":
-        dataframe = pd.read_csv(source)
-        dataframe = _normalize_dataframe_columns(dataframe)
+        # Avoid identifiers starting with a number.
+        if name[0].isdigit():
+            name = f"value_{name}"
 
-        source_name = Path(payload.source_filename).stem
+        return name
 
-        table_name = _normalize_table_names(
-            [source_name],
-            payload.source_id,
-        )[0]
+    @classmethod
+    def _normalize_unique_names(
+        cls,
+        names: list[Any],
+    ) -> list[str]:
+        """Normalize names and ensure every resulting name is unique."""
 
-        return [
-            ExtractedTable(
-                dataframe=dataframe,
-                file_filename=payload.source_filename,
-                file_bytes=payload.source_bytes,
-                file_content_type=payload.source_content_type,
-                name=table_name,
-                orig_elements=payload.elements,
-            )
+        used: set[str] = set()
+        normalized: list[str] = []
+
+        for value in names:
+            base_name = cls._normalize_name(value)
+
+            name = base_name
+            suffix = 2
+
+            while name in used:
+                name = f"{base_name}_{suffix}"
+                suffix += 1
+
+            used.add(name)
+            normalized.append(name)
+
+        return normalized
+
+    @classmethod
+    def _normalize_dataframe_columns(
+        cls,
+        dataframe: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Normalize DataFrame columns into unique SQL-safe names."""
+
+        dataframe = dataframe.copy()
+
+        dataframe.columns = cls._normalize_unique_names(list(dataframe.columns))
+
+        return dataframe
+
+    @classmethod
+    def _normalize_table_names(
+        cls,
+        names: list[Any],
+        file_id: str,
+    ) -> list[str]:
+        """Prefix table names with a file ID, then normalize and deduplicate them."""
+
+        return cls._normalize_unique_names([f"{file_id}_{name}" for name in names])
+
+    @classmethod
+    def _dataframe_from_html(
+        cls,
+        table: Table,
+    ) -> pd.DataFrame:
+        """Convert an Unstructured PDF table into a DataFrame."""
+
+        html = cls._table_html(table)
+
+        if not html:
+            raise ValueError("Table does not contain text_as_html.")
+
+        tables = pd.read_html(html)
+
+        if not tables:
+            raise ValueError("No table could be parsed from text_as_html.")
+
+        return tables[0]
+
+    @classmethod
+    def _read_document_tables(
+        cls,
+        payload: ProcessorPayload,
+    ) -> list[ExtractedTable]:
+        """
+        Extract PDF tables using Unstructured HTML, then immediately convert
+        them into DataFrames.
+        """
+
+        unstructured_tables = [
+            element for element in payload.elements if isinstance(element, Table)
         ]
 
-    if extension in {".xlsx", ".xls"}:
-        sheets = pd.read_excel(
-            source,
-            sheet_name=None,
-        )
+        if not unstructured_tables:
+            return []
 
-        source_names = list(sheets.keys())
+        source_names = [
+            cls._table_label(table, index)
+            for index, table in enumerate(unstructured_tables)
+        ]
 
-        table_names = _normalize_table_names(
+        table_names = cls._normalize_table_names(
             source_names,
             payload.source_id,
         )
 
-        result: list[ExtractedTable] = []
+        tables: list[ExtractedTable] = []
 
-        for (
-            source_name,
-            table_name,
-        ) in zip(
-            source_names,
+        for table, table_name, source_name in zip(
+            unstructured_tables,
             table_names,
+            source_names,
         ):
-            dataframe = _normalize_dataframe_columns(sheets[source_name])
+            dataframe = cls._dataframe_from_html(table)
+            dataframe = cls._normalize_dataframe_columns(dataframe)
 
-            result.append(
+            tables.append(
+                ExtractedTable(
+                    dataframe=dataframe,
+                    file_filename=f"{source_name}.csv",
+                    file_content_type="text/csv",
+                    name=table_name,
+                    page_number=getattr(
+                        table.metadata,
+                        "page_number",
+                        None,
+                    ),
+                    orig_elements=[table],
+                )
+            )
+
+        return tables
+
+    @classmethod
+    def _read_spreadsheet_tables(
+        cls,
+        payload: ProcessorPayload,
+    ) -> list[ExtractedTable]:
+        """
+        Read spreadsheet data directly with pandas.
+
+        CSV produces one table.
+        XLS/XLSX produces one table per sheet.
+        """
+
+        extension = Path(payload.source_filename).suffix.lower()
+
+        source = BytesIO(payload.source_bytes)
+
+        if extension == ".csv":
+            dataframe = pd.read_csv(source)
+            dataframe = cls._normalize_dataframe_columns(dataframe)
+
+            source_name = Path(payload.source_filename).stem
+
+            table_name = cls._normalize_table_names(
+                [source_name],
+                payload.source_id,
+            )[0]
+
+            return [
                 ExtractedTable(
                     dataframe=dataframe,
                     file_filename=payload.source_filename,
@@ -327,365 +306,395 @@ def _read_spreadsheet_tables(
                     name=table_name,
                     orig_elements=payload.elements,
                 )
+            ]
+
+        if extension in {".xlsx", ".xls"}:
+            sheets = pd.read_excel(
+                source,
+                sheet_name=None,
             )
 
-        return result
+            source_names = list(sheets.keys())
 
-    return []
+            table_names = cls._normalize_table_names(
+                source_names,
+                payload.source_id,
+            )
 
+            result: list[ExtractedTable] = []
 
-def _extract_tables(payload: ProcessorPayload) -> list[ExtractedTable]:
-    """
-    Extract tables according to the source category.
+            for source_name, table_name in zip(source_names, table_names):
+                dataframe = cls._normalize_dataframe_columns(sheets[source_name])
 
-    Documents:
-        Unstructured Table -> metadata.text_as_html -> DataFrame
+                result.append(
+                    ExtractedTable(
+                        dataframe=dataframe,
+                        file_filename=payload.source_filename,
+                        file_bytes=payload.source_bytes,
+                        file_content_type=payload.source_content_type,
+                        name=table_name,
+                        orig_elements=payload.elements,
+                    )
+                )
 
-    Spreadsheets:
-        Raw file bytes -> pandas -> DataFrame(s)
-    """
+            return result
 
-    if payload.category is ChunkCategory.DOCUMENT:
-        return _read_document_tables(payload)
+        return []
 
-    if payload.category is ChunkCategory.SPREADSHEET:
-        return _read_spreadsheet_tables(payload)
+    @classmethod
+    def _extract_tables(
+        cls,
+        payload: ProcessorPayload,
+    ) -> list[ExtractedTable]:
+        """
+        Extract tables according to the source category.
 
-    return []
+        Documents:
+            Unstructured Table -> metadata.text_as_html -> DataFrame
 
+        Spreadsheets:
+            Raw file bytes -> pandas -> DataFrame(s)
+        """
 
-def _pandas_dtype_to_sql_type(dtype: Any) -> str:
-    """
-    Convert a pandas dtype into the SQL type used by the application.
+        if payload.category is ChunkCategory.DOCUMENT:
+            return cls._read_document_tables(payload)
 
-    The types are intentionally conservative because the DataFrame is the
-    source of truth for what will actually be inserted into SQL.
-    """
+        if payload.category is ChunkCategory.SPREADSHEET:
+            return cls._read_spreadsheet_tables(payload)
 
-    if pd.api.types.is_bool_dtype(dtype):
-        return "BOOLEAN"
-    if pd.api.types.is_integer_dtype(dtype):
-        return "INTEGER"
-    if pd.api.types.is_float_dtype(dtype):
-        return "REAL"
-    if pd.api.types.is_datetime64_any_dtype(dtype):
-        return "DATETIME"
+        return []
 
-    return "TEXT"
+    @staticmethod
+    def _pandas_dtype_to_sql_type(
+        dtype: Any,
+    ) -> str:
+        """
+        Convert a pandas dtype into the SQL type used by the application.
 
+        The types are intentionally conservative because the DataFrame is the
+        source of truth for what will actually be inserted into SQL.
+        """
 
-def _schema_for_prompt(dataframe: pd.DataFrame) -> list[dict[str, str]]:
-    """
-    Build the schema representation sent to the LLM.
+        if pd.api.types.is_bool_dtype(dtype):
+            return "BOOLEAN"
 
-    The LLM receives the already-inferred SQL type and only needs to explain
-    the semantic meaning of the column.
-    """
+        if pd.api.types.is_integer_dtype(dtype):
+            return "INTEGER"
 
-    return [
-        {
-            "name": str(column),
-            "type": _pandas_dtype_to_sql_type(dataframe[column].dtype),
-            "description": "",
-        }
-        for column in dataframe.columns
-    ]
+        if pd.api.types.is_float_dtype(dtype):
+            return "REAL"
 
+        if pd.api.types.is_datetime64_any_dtype(dtype):
+            return "DATETIME"
 
-def _sample_table_rows(dataframe: pd.DataFrame, char_limit: int) -> str:
-    """
-    Produce a compact preview containing column names and a few representative
-    rows from the DataFrame.
-    """
+        return "TEXT"
 
-    if dataframe.empty:
-        return "[empty table]"
+    @staticmethod
+    def _schema_for_prompt(
+        dataframe: pd.DataFrame,
+    ) -> list[dict[str, str]]:
+        """
+        Build the schema representation sent to the LLM.
 
-    sample = dataframe.head(SAMPLED_DATA_ROWS_PER_TABLE)
+        The LLM receives the already-inferred SQL type and only needs to explain
+        the semantic meaning of the column.
+        """
 
-    headers = " | ".join(str(column) for column in dataframe.columns)
-
-    lines = [headers]
-
-    for row in sample.itertuples(index=False, name=None):
-        lines.append(" | ".join(str(value) for value in row))
-
-    preview = "\n".join(lines)
-
-    if len(preview) > char_limit:
-        return preview[:char_limit] + "\n[preview truncated]"
-
-    return preview
-
-
-def _build_catalog(tables: list[ExtractedTable]) -> str:
-    """
-    Create a row-sampled catalog containing each table's schema, data preview,
-    and location information.
-    """
-
-    if not tables:
-        return "[]"
-
-    per_table_limit = min(
-        MAX_TABLE_CONTEXT_CHARS,
-        max(1, MAX_WORKBOOK_CONTEXT_CHARS // len(tables)),
-    )
-
-    catalog: list[dict[str, Any]] = []
-
-    for index, table in enumerate(tables):
-        catalog.append(
+        return [
             {
-                "index": index,
-                "table_name": table.name,
-                "page_number": table.page_number,
-                "row_count": len(table.dataframe),
-                "column_count": len(table.dataframe.columns),
-                "schema": _schema_for_prompt(table.dataframe),
-                "data_preview": _sample_table_rows(
-                    table.dataframe,
-                    per_table_limit,
+                "name": str(column),
+                "type": TableProcessor._pandas_dtype_to_sql_type(
+                    dataframe[column].dtype
                 ),
+                "description": "",
             }
-        )
+            for column in dataframe.columns
+        ]
 
-    return json.dumps(
-        catalog,
-        ensure_ascii=False,
-    )
+    @staticmethod
+    def _sample_table_rows(
+        dataframe: pd.DataFrame,
+        char_limit: int,
+    ) -> str:
+        """
+        Produce a compact preview containing column names and a few representative
+        rows from the DataFrame.
+        """
 
+        if dataframe.empty:
+            return "[empty table]"
 
-def _parse_json(response: str) -> Any:
-    """Accept JSON wrapped in a Markdown code fence."""
+        sample = dataframe.head(SAMPLED_DATA_ROWS_PER_TABLE)
 
-    response = response.strip()
+        headers = " | ".join(str(column) for column in dataframe.columns)
 
-    if response.startswith("```"):
-        response = response.split("\n", 1)[-1]
+        lines = [headers]
 
-        if response.rstrip().endswith("```"):
-            response = response.rstrip()[:-3].rstrip()
+        for row in sample.itertuples(index=False, name=None):
+            lines.append(" | ".join(str(value) for value in row))
 
-    return json.loads(response)
+        preview = "\n".join(lines)
 
+        if len(preview) > char_limit:
+            return preview[:char_limit] + "\n[preview truncated]"
 
-def _empty_analysis() -> dict[str, Any]:
-    return {
-        "description": "",
-        "role": "",
-        "schema": [],
-        "relationships": [],
-    }
+        return preview
 
+    @classmethod
+    def _build_catalog(
+        cls,
+        tables: list[ExtractedTable],
+    ) -> str:
+        """
+        Create a row-sampled catalog containing each table's schema, data preview,
+        and location information.
+        """
 
-def _parse_workbook_analysis(
-    response: str,
-    table_count: int,
-) -> tuple[str, list[dict[str, Any]]]:
-    """Normalize model output and preserve missing table analyses."""
+        if not tables:
+            return "[]"
 
-    payload = _parse_json(response)
-
-    if not isinstance(payload, dict):
-        raise ValueError("Workbook analysis must be a JSON object.")
-
-    workbook_description = payload.get("workbook_description", "")
-
-    if not isinstance(workbook_description, str):
-        workbook_description = str(workbook_description)
-
-    analyses = [_empty_analysis() for _ in range(table_count)]
-
-    table_analyses = payload.get(
-        "tables",
-        [],
-    )
-
-    if not isinstance(table_analyses, list):
-        return workbook_description, analyses
-
-    for item in table_analyses:
-        if not isinstance(item, dict):
-            continue
-
-        index = item.get("index")
-
-        if not isinstance(index, int):
-            continue
-
-        if not 0 <= index < table_count:
-            continue
-
-        description = item.get("description", "")
-        role = item.get("role", "")
-        schema = item.get("schema", [])
-        relationships = item.get("relationships", [])
-        analyses[index] = {
-            "description": (
-                description if isinstance(description, str) else str(description)
+        per_table_limit = min(
+            MAX_TABLE_CONTEXT_CHARS,
+            max(
+                1,
+                MAX_WORKBOOK_CONTEXT_CHARS // len(tables),
             ),
-            "role": (role if isinstance(role, str) else str(role)),
-            "schema": (schema if isinstance(schema, list) else []),
-            "relationships": (relationships if isinstance(relationships, list) else []),
+        )
+
+        catalog: list[dict[str, Any]] = []
+
+        for index, table in enumerate(tables):
+            catalog.append(
+                {
+                    "index": index,
+                    "table_name": table.name,
+                    "page_number": table.page_number,
+                    "row_count": len(table.dataframe),
+                    "column_count": len(table.dataframe.columns),
+                    "schema": cls._schema_for_prompt(table.dataframe),
+                    "data_preview": cls._sample_table_rows(
+                        table.dataframe,
+                        per_table_limit,
+                    ),
+                }
+            )
+
+        return json.dumps(
+            catalog,
+            ensure_ascii=False,
+        )
+
+    @staticmethod
+    def _parse_json(
+        response: str,
+    ) -> Any:
+        """Accept JSON wrapped in a Markdown code fence."""
+
+        response = response.strip()
+
+        if response.startswith("```"):
+            response = response.split(
+                "\n",
+                1,
+            )[-1]
+
+            if response.rstrip().endswith("```"):
+                response = response.rstrip()[:-3].rstrip()
+
+        return json.loads(response)
+
+    @staticmethod
+    def _empty_analysis() -> dict[str, Any]:
+        return {
+            "description": "",
+            "role": "",
+            "schema": [],
+            "relationships": [],
         }
 
-    return workbook_description, analyses
+    @classmethod
+    def _parse_workbook_analysis(
+        cls,
+        response: str,
+        table_count: int,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Normalize model output and preserve missing table analyses."""
 
+        payload = cls._parse_json(response)
 
-def _merge_schema_types(
-    dataframe: pd.DataFrame,
-    analysis_schema: list[Any],
-) -> list[dict[str, str]]:
-    """
-    Merge LLM-generated column descriptions with authoritative pandas types.
+        if not isinstance(payload, dict):
+            raise ValueError("Workbook analysis must be a JSON object.")
 
-    Pandas determines the type.
-    LLM determines the semantic description.
-    """
+        workbook_description = payload.get("workbook_description", "")
 
-    descriptions: dict[str, str] = {}
+        if not isinstance(workbook_description, str):
+            workbook_description = str(workbook_description)
 
-    for column in analysis_schema:
-        if not isinstance(column, dict):
-            continue
+        analyses = [cls._empty_analysis() for _ in range(table_count)]
 
-        name = column.get("name")
+        table_analyses = payload.get("tables", [])
 
-        if not isinstance(name, str):
-            continue
+        if not isinstance(table_analyses, list):
+            return (workbook_description, analyses)
 
-        description = column.get("description", "")
-        descriptions[name] = (
-            description if isinstance(description, str) else str(description)
-        )
+        for item in table_analyses:
+            if not isinstance(item, dict):
+                continue
 
-    merged: list[dict[str, str]] = []
+            index = item.get("index")
 
-    for column in dataframe.columns:
-        name = str(column)
-        merged.append(
-            {
-                "name": name,
-                "type": _pandas_dtype_to_sql_type(dataframe[column].dtype),
-                "description": descriptions.get(name, ""),
-            }
-        )
+            if not isinstance(index, int):
+                continue
 
-    return merged
+            if not 0 <= index < table_count:
+                continue
 
+            description = item.get("description", "")
+            role = item.get("role", "")
+            schema = item.get("schema", [])
+            relationships = item.get("relationships", [])
 
-def _related_table_schemas(
-    table_index: int,
-    analysis: dict[str, Any],
-    tables: list[ExtractedTable],
-    table_analyses: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Build schema context for tables related to the current table."""
-
-    related_tables: list[dict[str, Any]] = []
-    seen: set[int] = set()
-
-    for relationship in analysis["relationships"]:
-        if not isinstance(relationship, dict):
-            continue
-
-        related_index = relationship.get("table_index")
-
-        if not isinstance(related_index, int):
-            continue
-
-        if not 0 <= related_index < len(tables):
-            continue
-
-        # Prevent self-reference and duplicate related tables.
-        if related_index == table_index or related_index in seen:
-            continue
-
-        seen.add(related_index)
-
-        related_tables.append(
-            {
-                "table_name": tables[related_index].name,
-                "schema": table_analyses[related_index]["schema"],
-                "relationship": relationship.get(
-                    "relationship",
-                    "",
+            analyses[index] = {
+                "description": (
+                    description if isinstance(description, str) else str(description)
+                ),
+                "role": (role if isinstance(role, str) else str(role)),
+                "schema": (schema if isinstance(schema, list) else []),
+                "relationships": (
+                    relationships if isinstance(relationships, list) else []
                 ),
             }
-        )
 
-    return related_tables
+        return (workbook_description, analyses)
 
+    @staticmethod
+    def _merge_schema_types(
+        dataframe: pd.DataFrame,
+        analysis_schema: list[Any],
+    ) -> list[dict[str, str]]:
+        """
+        Merge LLM-generated column descriptions with authoritative pandas types.
 
-def _analysis_text(
-    table_name: str,
-    workbook_description: str,
-    analysis: dict[str, Any],
-    dataframe: pd.DataFrame,
-    context: str,
-    related_tables: list[dict[str, Any]],
-) -> str:
-    """
-    Build searchable text containing workbook meaning, schema, relationships,
-    related table schemas, surrounding text context, and representative values.
-    """
+        Pandas determines the type.
+        LLM determines the semantic description.
+        """
 
-    parts = [f"Table: {table_name}"]
+        descriptions: dict[str, str] = {}
 
-    if workbook_description:
-        parts.extend(("Workbook context:", workbook_description))
+        for column in analysis_schema:
+            if not isinstance(column, dict):
+                continue
 
-    if context:
-        parts.extend(("Related document text:", context))
+            name = column.get("name")
 
-    if analysis["role"]:
-        parts.append(f"Role: {analysis['role']}")
+            if not isinstance(name, str):
+                continue
 
-    if analysis["description"]:
-        parts.extend(("Description:", analysis["description"]))
+            description = column.get("description", "")
 
-    if analysis["schema"]:
-        parts.append("Schema:")
+            descriptions[name] = (
+                description if isinstance(description, str) else str(description)
+            )
 
-        for column in analysis["schema"]:
-            if isinstance(column, dict):
-                name = column.get("name", "Unknown column")
-                sql_type = column.get("type", "TEXT")
-                description = column.get("description", "")
-                line = (f"- {name} " f"({sql_type}): " f"{description}").rstrip()
-                parts.append(line)
-            else:
-                parts.append(f"- {column}")
+        merged: list[dict[str, str]] = []
 
-    if analysis["relationships"]:
-        parts.append("Related tables:")
+        for column in dataframe.columns:
+            name = str(column)
+
+            merged.append(
+                {
+                    "name": name,
+                    "type": TableProcessor._pandas_dtype_to_sql_type(
+                        dataframe[column].dtype
+                    ),
+                    "description": descriptions.get(
+                        name,
+                        "",
+                    ),
+                }
+            )
+
+        return merged
+
+    @staticmethod
+    def _related_table_schemas(
+        table_index: int,
+        analysis: dict[str, Any],
+        tables: list[ExtractedTable],
+        table_analyses: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Build schema context for tables related to the current table."""
+
+        related_tables: list[dict[str, Any]] = []
+        seen: set[int] = set()
 
         for relationship in analysis["relationships"]:
-            if isinstance(relationship, dict):
-                target = (
-                    relationship.get("sheet_name")
-                    or f"table {relationship.get('table_index', 'unknown')}"
-                )
-                description = relationship.get("relationship", "")
+            if not isinstance(relationship, dict):
+                continue
 
-                parts.append(f"- {target}: {description}".rstrip())
+            related_index = relationship.get("table_index")
 
-            else:
-                parts.append(f"- {relationship}")
+            if not isinstance(related_index, int):
+                continue
 
-    if related_tables:
-        parts.append("Related table schemas:")
+            if not 0 <= related_index < len(tables):
+                continue
 
-        for related in related_tables:
-            parts.append(f"Table: {related['table_name']}")
-            schema = related.get("schema", [])
+            # Prevent self-reference and duplicate related tables.
+            if related_index == table_index or related_index in seen:
+                continue
 
-            if schema:
-                for column in schema:
-                    if not isinstance(column, dict):
-                        continue
+            seen.add(related_index)
 
+            related_tables.append(
+                {
+                    "table_name": tables[related_index].name,
+                    "schema": table_analyses[related_index]["schema"],
+                    "relationship": relationship.get(
+                        "relationship",
+                        "",
+                    ),
+                }
+            )
+
+        return related_tables
+
+    @staticmethod
+    def _analysis_text(
+        table_name: str,
+        workbook_description: str,
+        analysis: dict[str, Any],
+        dataframe: pd.DataFrame,
+        context: str,
+        related_tables: list[dict[str, Any]],
+    ) -> str:
+        """
+        Build searchable text containing workbook meaning, schema, relationships,
+        related table schemas, surrounding text context, and representative values.
+        """
+
+        parts = [f"Table: {table_name}"]
+
+        if workbook_description:
+            parts.extend(("Workbook context:", workbook_description))
+
+        if context:
+            parts.extend(("Related document text:", context))
+
+        if analysis["role"]:
+            parts.append(f"Role: {analysis['role']}")
+
+        if analysis["description"]:
+            parts.extend(("Description:", analysis["description"]))
+
+        if analysis["schema"]:
+            parts.append("Schema:")
+
+            for column in analysis["schema"]:
+                if isinstance(
+                    column,
+                    dict,
+                ):
                     name = column.get("name", "Unknown column")
                     sql_type = column.get("type", "TEXT")
                     description = column.get("description", "")
@@ -694,145 +703,187 @@ def _analysis_text(
 
                     parts.append(line)
 
-            relationship = related.get("relationship", "")
+                else:
+                    parts.append(f"- {column}")
 
-            if relationship:
-                parts.append(f"Relationship: {relationship}")
+        if analysis["relationships"]:
+            parts.append("Related tables:")
 
-    parts.extend(
-        (
-            "Data:",
-            _sample_table_rows(
-                dataframe,
-                MAX_TABLE_CONTEXT_CHARS,
-            ),
-        )
-    )
+            for relationship in analysis["relationships"]:
+                if isinstance(
+                    relationship,
+                    dict,
+                ):
+                    target = relationship.get("sheet_name") or (
+                        "table " f"{relationship.get('table_index', 'unknown')}"
+                    )
 
-    return "\n".join(parts)
+                    description = relationship.get("relationship", "")
 
+                    parts.append(f"- {target}: " f"{description}".rstrip())
 
-def _add_related_table_names(
-    table_analyses: list[dict[str, Any]],
-    tables: list[ExtractedTable],
-) -> None:
-    """Convert model-generated table indexes into stable table names."""
+                else:
+                    parts.append(f"- {relationship}")
 
-    for analysis in table_analyses:
-        enriched_relationships: list[Any] = []
+        if related_tables:
+            parts.append("Related table schemas:")
 
-        for relationship in analysis["relationships"]:
-            if not isinstance(
-                relationship,
-                dict,
-            ):
-                enriched_relationships.append(relationship)
-                continue
+            for related in related_tables:
+                parts.append(f"Table: {related['table_name']}")
 
-            enriched = relationship.copy()
+                schema = related.get("schema", [])
 
-            index = enriched.get("table_index")
+                if schema:
+                    for column in schema:
+                        if not isinstance(column, dict):
+                            continue
 
-            if isinstance(index, int) and 0 <= index < len(tables):
-                enriched["sheet_name"] = tables[index].name
+                        name = column.get("name", "Unknown column")
+                        sql_type = column.get("type", "TEXT")
+                        description = column.get("description", "")
 
-            enriched_relationships.append(enriched)
+                        line = (
+                            f"- {name} " f"({sql_type}): " f"{description}"
+                        ).rstrip()
 
-        analysis["relationships"] = enriched_relationships
+                        parts.append(line)
 
+                relationship = related.get("relationship", "")
 
-async def process_table(payload: ProcessorPayload) -> list[IngestedChunk]:
-    """Create chunks enriched by a single workbook-level LLM analysis."""
+                if relationship:
+                    parts.append(f"Relationship: {relationship}")
 
-    tables = await asyncio.to_thread(
-        _extract_tables,
-        payload,
-    )
-
-    if not tables:
-        return []
-
-    # Collect surrounding document text once.
-    context = _text_context(payload.elements)
-
-    # Build a compact catalog from DataFrames.
-    catalog = _build_catalog(tables)
-
-    # LLM generates semantic descriptions only.
-    # Pandas remains authoritative for data types.
-    workbook_description = ""
-    table_analyses = [_empty_analysis() for _ in tables]
-
-    try:
-        prompt = render_template(
-            WORKBOOK_ANALYSIS_PROMPT_TEMPLATE,
-            {
-                "context": context or "(none)",
-                "catalog": catalog,
-            },
-        )
-
-        response = await payload.llm.answer(prompt)
-
-        workbook_description, table_analyses = _parse_workbook_analysis(
-            response,
-            len(tables),
-        )
-
-    except Exception:
-        # The raw DataFrame data and pandas-derived schema are still indexed
-        # even if the LLM fails.
-        pass
-
-    _add_related_table_names(table_analyses, tables)
-
-    # Pandas is the source of truth for schema types.
-    # Do this for every table before building any chunk text because a table
-    # may need to include another table's schema in its related-table context.
-    for index, table in enumerate(tables):
-        table_analyses[index]["schema"] = _merge_schema_types(
-            table.dataframe,
-            table_analyses[index]["schema"],
-        )
-
-    chunks: list[IngestedChunk] = []
-
-    for index, table in enumerate(tables):
-        analysis = table_analyses[index]
-
-        related_tables = _related_table_schemas(
-            table_index=index,
-            analysis=analysis,
-            tables=tables,
-            table_analyses=table_analyses,
-        )
-
-        table_name = table.name
-
-        table_rows = table.dataframe.to_dict(orient="records")
-
-        chunks.append(
-            IngestedChunk(
-                category=ChunkCategory.SPREADSHEET,
-                text=_analysis_text(
-                    table_name=table_name,
-                    workbook_description=workbook_description,
-                    analysis=analysis,
-                    dataframe=table.dataframe,
-                    context=context,
-                    related_tables=related_tables,
+        parts.extend(
+            (
+                "Data:",
+                TableProcessor._sample_table_rows(
+                    dataframe,
+                    MAX_TABLE_CONTEXT_CHARS,
                 ),
-                metadata={
-                    # reference
-                    "chunk_source_id": payload.source_id,
-                    "chunk_source_page_number": table.page_number,
-                    # sql data
-                    "sql_table_name": table_name,
-                    "sql_schema": analysis["schema"],
-                    "sql_rows": table_rows,
-                },
-                orig_elements=table.orig_elements,
             )
         )
 
-    return chunks
+        return "\n".join(parts)
+
+    @staticmethod
+    def _add_related_table_names(
+        table_analyses: list[dict[str, Any]],
+        tables: list[ExtractedTable],
+    ) -> None:
+        """Convert model-generated table indexes into stable table names."""
+
+        for analysis in table_analyses:
+            enriched_relationships: list[Any] = []
+
+            for relationship in analysis["relationships"]:
+                if not isinstance(relationship, dict):
+                    enriched_relationships.append(relationship)
+                    continue
+
+                enriched = relationship.copy()
+
+                index = enriched.get("table_index")
+
+                if isinstance(index, int) and 0 <= index < len(tables):
+                    enriched["sheet_name"] = tables[index].name
+
+                enriched_relationships.append(enriched)
+
+            analysis["relationships"] = enriched_relationships
+
+    @property
+    def supported_categories(self):
+        return {ChunkCategory.SPREADSHEET}
+
+    async def process(self, payload):
+        """Create chunks enriched by a single workbook-level LLM analysis."""
+
+        tables = await asyncio.to_thread(self._extract_tables, payload)
+
+        if not tables:
+            return []
+
+        # Collect surrounding document text once.
+        context = self._text_context(payload.elements)
+
+        # Build a compact catalog from DataFrames.
+        catalog = self._build_catalog(tables)
+
+        # LLM generates semantic descriptions only.
+        # Pandas remains authoritative for data types.
+        workbook_description = ""
+        table_analyses = [self._empty_analysis() for _ in tables]
+
+        try:
+            prompt = render_template(
+                WORKBOOK_ANALYSIS_PROMPT_TEMPLATE,
+                {
+                    "context": context or "(none)",
+                    "catalog": catalog,
+                },
+            )
+
+            response = await self._llm.answer(prompt)
+
+            workbook_description, table_analyses = self._parse_workbook_analysis(
+                response,
+                len(tables),
+            )
+
+        except Exception:
+            # The raw DataFrame data and pandas-derived schema are still indexed
+            # even if the LLM fails.
+            pass
+
+        self._add_related_table_names(table_analyses, tables)
+
+        # Pandas is the source of truth for schema types.
+        # Do this for every table before building any chunk text because a table
+        # may need to include another table's schema in its related-table context.
+        for index, table in enumerate(tables):
+            table_analyses[index]["schema"] = self._merge_schema_types(
+                table.dataframe,
+                table_analyses[index]["schema"],
+            )
+
+        chunks: list[IngestedChunk] = []
+
+        for index, table in enumerate(tables):
+            analysis = table_analyses[index]
+
+            related_tables = self._related_table_schemas(
+                table_index=index,
+                analysis=analysis,
+                tables=tables,
+                table_analyses=table_analyses,
+            )
+
+            table_name = table.name
+
+            table_rows = table.dataframe.to_dict(orient="records")
+
+            chunks.append(
+                IngestedChunk(
+                    category=ChunkCategory.SPREADSHEET,
+                    text=self._analysis_text(
+                        table_name=table_name,
+                        workbook_description=workbook_description,
+                        analysis=analysis,
+                        dataframe=table.dataframe,
+                        context=context,
+                        related_tables=related_tables,
+                    ),
+                    metadata={
+                        # reference
+                        "chunk_source_id": payload.source_id,
+                        "chunk_source_page_number": table.page_number,
+                        # sql data
+                        "sql_table_name": table_name,
+                        "sql_schema": analysis["schema"],
+                        "sql_rows": table_rows,
+                    },
+                    orig_elements=table.orig_elements,
+                )
+            )
+
+        return chunks

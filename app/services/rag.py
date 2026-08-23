@@ -88,13 +88,9 @@ class RagService:
             # so fall through to the source-file lookup below.
 
         # Fall back to the original source file.
-        table = await self._sql_storage.get_table(settings.DOCUMENT_METADATA_TABLE_NAME)
-
         source_row = await self._sql_storage.get(
             settings.DOCUMENT_METADATA_TABLE_NAME,
-            conditions=[
-                table.c.source_id == chunk.source_id,
-            ],
+            lambda table: table.c.source_id == chunk.source_id,
         )
 
         if not source_row:

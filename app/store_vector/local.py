@@ -47,7 +47,9 @@ class LocalVectorStorage(VectorStorage):
         )
 
     async def search(
-        self, query_embedding: list[float], top_k: int = 5
+        self,
+        query_embedding: list[float],
+        top_k: int = 5,
     ) -> list[VectorSearchResult]:
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
@@ -59,13 +61,13 @@ class LocalVectorStorage(VectorStorage):
             self._collection.query,
             query_embeddings=[query_embedding],
             n_results=min(top_k, collection_count),
-            include=[],
+            include=["distances"],
         )
         ids = result["ids"][0]
         distances = (result["distances"] or [])[0]
         return [
             VectorSearchResult(
-                id=chunk_id,
+                chunk_id=chunk_id,
                 score=1 - distance,  # in cosine similarity, lower is better
             )
             for chunk_id, distance in zip(ids, distances)

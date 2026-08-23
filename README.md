@@ -17,4 +17,4 @@
 
 - Keys that are prefixed with **"chunk\_"** will be saved to the SQL database.
 - `sql_schema`, `sql_table_name`, and `sql_rows` is used to save spreadsheet chunks' table data into the SQL database.
-- The file in `chunk_file_path` is given to the LLM for the final answer if `chunk_attach_file_to_llm` is set to `True`.
+- If `chunk_attach_file_to_llm` is set to `True`, the file in `chunk_file_path` will be sent to LLM. If `chunk_file_path` is not found, it will fallback to the `file_path` of the source file.

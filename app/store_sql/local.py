@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+import re
 from typing import Any
 
 from sqlalchemy import (
@@ -26,7 +27,22 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from app.store_sql.base import SqlStorage
+from app.store_sql.base import ConditionBuilder, SqlStorage
+
+
+def _fts_query(value: str) -> str:
+    tokens = re.findall(r"\w+", value, flags=re.UNICODE)
+
+    if not tokens:
+        return ""
+
+    quoted_tokens = []
+
+    for token in tokens:
+        escaped = token.replace('"', '""')
+        quoted_tokens.append(f'"{escaped}"')
+
+    return " OR ".join(quoted_tokens)
 
 
 class LocalSqlStorage(SqlStorage):
@@ -101,6 +117,105 @@ class LocalSqlStorage(SqlStorage):
                 return await conn.run_sync(load)
             except NoSuchTableError as exc:
                 raise ValueError(f"Table {table_name!r} does not exist.") from exc
+
+    async def _ensure_fts_table(self, table_name: str) -> None:
+        """
+        Lazily create and synchronize an FTS5 table for a normal SQL table.
+
+        The source table must contain:
+            - id
+            - text
+
+        FTS5 uses the source table as external content, so the actual text
+        remains stored only in the source table.
+        """
+
+        self._validate_table_name(table_name)
+
+        table = await self._load_table(table_name)
+
+        if "id" not in table.c:
+            raise ValueError(
+                f"Table {table_name!r} must have an 'id' column " "to use FTS5."
+            )
+
+        if "text" not in table.c:
+            raise ValueError(
+                f"Table {table_name!r} must have a 'text' column " "to use FTS5."
+            )
+
+        fts_table = f"{table_name}_fts"
+        insert_trigger = f"{fts_table}_ai"
+        delete_trigger = f"{fts_table}_ad"
+        update_trigger = f"{fts_table}_au"
+
+        async with self._engine.begin() as conn:
+            await conn.execute(text(f"""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS "{fts_table}"
+                    USING fts5(
+                        text,
+                        content="{table_name}",
+                        content_rowid="id"
+                    )
+                    """))
+
+            await conn.execute(text(f"""
+                    CREATE TRIGGER IF NOT EXISTS "{insert_trigger}"
+                    AFTER INSERT ON "{table_name}"
+                    BEGIN
+                        INSERT INTO "{fts_table}"(rowid, text)
+                        VALUES (new.id, new.text);
+                    END
+                    """))
+
+            await conn.execute(text(f"""
+                    CREATE TRIGGER IF NOT EXISTS "{delete_trigger}"
+                    AFTER DELETE ON "{table_name}"
+                    BEGIN
+                        INSERT INTO "{fts_table}"(
+                            "{fts_table}",
+                            rowid,
+                            text
+                        )
+                        VALUES (
+                            'delete',
+                            old.id,
+                            old.text
+                        );
+                    END
+                    """))
+
+            await conn.execute(text(f"""
+                    CREATE TRIGGER IF NOT EXISTS "{update_trigger}"
+                    AFTER UPDATE OF text ON "{table_name}"
+                    BEGIN
+                        INSERT INTO "{fts_table}"(
+                            "{fts_table}",
+                            rowid,
+                            text
+                        )
+                        VALUES (
+                            'delete',
+                            old.id,
+                            old.text
+                        );
+
+                        INSERT INTO "{fts_table}"(
+                            rowid,
+                            text
+                        )
+                        VALUES (
+                            new.id,
+                            new.text
+                        );
+                    END
+                    """))
+
+            # Synchronize rows that existed before the FTS table was created.
+            await conn.execute(text(f"""
+                    INSERT INTO "{fts_table}"("{fts_table}")
+                    VALUES ('rebuild')
+                    """))
 
     async def close(self) -> None:
         await self._engine.dispose()
@@ -181,19 +296,14 @@ class LocalSqlStorage(SqlStorage):
     async def get(
         self,
         table_name: str,
-        conditions: Sequence[ColumnElement[bool]],
+        condition: ConditionBuilder,
     ) -> dict[str, Any] | None:
-        if not conditions:
-            raise ValueError("Get requires at least one condition.")
+        if condition is None:
+            raise ValueError("Get requires a condition.")
 
         table = await self.get_table(table_name)
 
-        statement = select(table)
-
-        if conditions:
-            statement = statement.where(*conditions)
-
-        statement = statement.limit(1)
+        statement = select(table).where(condition(table)).limit(1)
 
         async with self._session_factory() as session:
             result = await session.execute(statement)
@@ -208,20 +318,20 @@ class LocalSqlStorage(SqlStorage):
     async def get_all(
         self,
         table_name: str,
-        conditions: Sequence[ColumnElement[bool]] = (),
+        condition: ConditionBuilder | None = None,
         limit: int | None = None,
     ) -> Sequence[dict[str, Any]]:
         table = await self.get_table(table_name)
 
+        if limit is not None and limit <= 0:
+            return []
+
         statement = select(table)
 
-        if conditions:
-            statement = statement.where(*conditions)
+        if condition is not None:
+            statement = statement.where(condition(table))
 
         if limit is not None:
-            if limit <= 0:
-                return []
-
             statement = statement.limit(limit)
 
         async with self._session_factory() as session:
@@ -232,29 +342,15 @@ class LocalSqlStorage(SqlStorage):
     async def delete(
         self,
         table_name: str,
-        conditions: Sequence[ColumnElement[bool]],
+        condition: ConditionBuilder,
     ) -> bool:
         table = await self.get_table(table_name)
 
-        if not conditions:
-            raise ValueError("Delete requires at least one condition.")
-
-        if not table.c:
-            raise ValueError(f"Table {table_name!r} has no columns.")
-
-        statement = delete(table)
-
-        if conditions:
-            statement = statement.where(*conditions)
-
-        return_column = next(iter(table.c))
-
-        statement = statement.returning(return_column)
+        statement = delete(table).where(condition(table)).returning(next(iter(table.c)))
 
         async with self._session_factory() as session:
             async with session.begin():
                 result = await session.execute(statement)
-
                 return result.first() is not None
 
     async def query(
@@ -293,22 +389,43 @@ class LocalSqlStorage(SqlStorage):
     ) -> Sequence[dict[str, Any]]:
         self._validate_table_name(table_name)
 
+        if not search_query.strip():
+            return []
+
+        if limit is not None and limit <= 0:
+            return []
+
+        fts_query = _fts_query(search_query)
+
+        if not fts_query:
+            return []
+
+        await self._ensure_fts_table(table_name)
+
         fts_table = f"{table_name}_fts"
+        limit_clause = "" if limit is None else "LIMIT :limit"
 
         statement = text(f"""
-            SELECT *
-            FROM "{fts_table}"
+            SELECT source.*
+            FROM "{table_name}" AS source
+            JOIN "{fts_table}" AS fts
+                ON source.id = fts.rowid
             WHERE "{fts_table}" MATCH :query
-            LIMIT :limit
+            ORDER BY bm25("{fts_table}")
+            {limit_clause}
             """)
+
+        parameters: dict[str, Any] = {
+            "query": fts_query,
+        }
+
+        if limit is not None:
+            parameters["limit"] = limit
 
         async with self._session_factory() as session:
             result = await session.execute(
                 statement,
-                {
-                    "query": search_query,
-                    "limit": limit,
-                },
+                parameters,
             )
 
             return [dict(row) for row in result.mappings()]

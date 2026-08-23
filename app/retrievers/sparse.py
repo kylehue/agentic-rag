@@ -23,8 +23,8 @@ class SparseRetriever(Retriever):
         result = []
         for i, raw_chunk in enumerate(raw_chunks, 1):
             result.append(
-                RetrievedChunk(
-                    **raw_chunk,
+                RetrievedChunk.from_dict(
+                    raw_chunk,
                     score=0,  # doesn't matter for sparse search (as long as it's sorted)
                 )
             )

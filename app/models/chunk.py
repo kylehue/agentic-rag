@@ -47,3 +47,22 @@ class RetrievedChunk:
     def __post_init__(self) -> None:
         if not isinstance(self.category, ChunkCategory):
             self.category = ChunkCategory(self.category)
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        **overrides: Any,
+    ) -> "RetrievedChunk":
+        values = {
+            "chunk_id": data["chunk_id"],
+            "source_id": data["source_id"],
+            "category": data["category"],
+            "text": data["text"],
+            "metadata": data.get("metadata") or {},
+            "score": data.get("score", 0.0),
+        }
+
+        values.update(overrides)
+
+        return cls(**values)

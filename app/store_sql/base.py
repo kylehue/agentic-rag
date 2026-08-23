@@ -1,7 +1,9 @@
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
-from typing import Any, ClassVar
+from collections.abc import Callable, Sequence
+from typing import Any
 from sqlalchemy import Column, ColumnElement, Table
+
+ConditionBuilder = Callable[[Table], ColumnElement[bool]]
 
 
 class SqlStorage(ABC):
@@ -38,26 +40,26 @@ class SqlStorage(ABC):
     async def get(
         self,
         table_name: str,
-        conditions: Sequence[ColumnElement[bool]],
+        condition: ConditionBuilder,
     ) -> dict[str, Any] | None:
-        """Get the first row matching all conditions."""
+        """Get the first row matching the condition."""
 
     @abstractmethod
     async def get_all(
         self,
         table_name: str,
-        conditions: Sequence[ColumnElement[bool]] = (),
+        condition: ConditionBuilder | None = None,
         limit: int | None = None,
     ) -> Sequence[dict[str, Any]]:
-        """Get rows matching all conditions."""
+        """Get rows matching the condition."""
 
     @abstractmethod
     async def delete(
         self,
         table_name: str,
-        conditions: Sequence[ColumnElement[bool]],
+        condition: ConditionBuilder,
     ) -> bool:
-        """Delete rows matching all conditions."""
+        """Delete rows matching the condition."""
 
     @abstractmethod
     async def query(

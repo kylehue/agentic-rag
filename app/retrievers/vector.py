@@ -19,39 +19,45 @@ class VectorRetriever(Retriever):
         self._sql_storage = sql_storage
         self._top_k = top_k
 
-    async def retrieve(self, user_query: str):
-        # Retrieve from vector database
+    async def retrieve(
+        self,
+        user_query: str,
+    ) -> list[RetrievedChunk]:
+        # Retrieve from vector database.
         query_embedding = await self._embedder.embed_query(user_query)
+
         vector_results = await self._vector_storage.search(
             query_embedding,
             self._top_k,
         )
+
         if not vector_results:
             return []
 
-        chunk_ids = [result.id for result in vector_results]
+        # Chroma's order is authoritative for vector ranking.
+        chunk_ids = [result.chunk_id for result in vector_results]
 
-        # Map vector results to chunk data
-        table = await self._sql_storage.get_table(settings.CHUNK_TABLE_NAME)
+        # SQL IN (...) does NOT guarantee the same order.
         raw_chunks = await self._sql_storage.get_all(
             settings.CHUNK_TABLE_NAME,
-            [table.c.chunk_id.in_(chunk_ids)],
+            lambda table: table.c.chunk_id.in_(chunk_ids),
         )
 
-        chunks_by_id = {chunk["chunk_id"]: chunk for chunk in raw_chunks}
+        # Map database rows by application-level chunk ID.
+        chunks_by_id = {raw_chunk["chunk_id"]: raw_chunk for raw_chunk in raw_chunks}
 
-        # Restore vector-search order and attach scores
+        # Restore the original vector ranking order and attach scores.
         results: list[RetrievedChunk] = []
 
         for vector_result in vector_results:
-            chunk = chunks_by_id.get(vector_result.id)
+            raw_chunk = chunks_by_id.get(vector_result.chunk_id)
 
-            if chunk is None:
+            if raw_chunk is None:
                 continue
 
             results.append(
-                RetrievedChunk(
-                    **chunk,
+                RetrievedChunk.from_dict(
+                    raw_chunk,
                     score=vector_result.score,
                 )
             )

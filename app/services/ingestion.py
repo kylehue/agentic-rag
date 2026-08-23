@@ -19,7 +19,7 @@ from app.llm.base import LLMProvider
 from unstructured.partition.auto import partition
 from pathlib import Path
 
-from app.utils.file_type import detect_document_category
+from app.utils.conversion import filename_to_chunk_category
 
 
 class IngestionService:
@@ -97,7 +97,7 @@ class IngestionService:
             source_bytes=source_bytes,
             source_content_type=source_content_type,
             elements=elements,
-            category=detect_document_category(source_filename),
+            category=filename_to_chunk_category(source_filename),
         )
         chunks = await self._processor.process(processor_payload)
 

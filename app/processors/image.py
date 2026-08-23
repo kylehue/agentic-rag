@@ -12,6 +12,7 @@ from app.models.llm import LLMAttachment
 from app.processors.base import Processor
 from unstructured.documents.elements import Element, Image
 
+from app.utils.conversion import base64_to_bytes
 from app.utils.string import render_template
 
 IMAGE_PROMPT_TEMPLATE = """Describe the image for a retrieval system. Identify its subject,
@@ -41,22 +42,6 @@ class ImageProcessor(Processor):
         return "\n\n".join(texts)[:8_000]
 
     @staticmethod
-    def _decode_base64(value: Any) -> bytes | None:
-        """Decode a base64 image payload safely, returning None for invalid input."""
-
-        if isinstance(value, bytes):
-            return value
-        if not isinstance(value, str) or not value.strip():
-            return None
-        encoded = value.strip()
-        if encoded.startswith("data:") and "," in encoded:
-            encoded = encoded.split(",", 1)[1]
-        try:
-            return base64.b64decode(encoded, validate=True)
-        except (binascii.Error, ValueError):
-            return None
-
-    @staticmethod
     def _image_bytes(
         payload: ProcessorPayload,
         image: Image,
@@ -66,9 +51,7 @@ class ImageProcessor(Processor):
         metadata = image.metadata
 
         # For embedded images
-        embedded = ImageProcessor._decode_base64(
-            getattr(metadata, "image_base64", None)
-        )
+        embedded = base64_to_bytes(getattr(metadata, "image_base64", None))
         if embedded:
             mime_type = getattr(metadata, "image_mime_type", None) or "image/png"
             extension = mimetypes.guess_extension(mime_type) or ".jpg"

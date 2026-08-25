@@ -566,57 +566,27 @@ The intended extension points are the interfaces defined throughout the applicat
 
 ### Adding Another LLM Provider
 
-Implement:
-
-```text
-LLMProvider
-```
-
-and provide the new implementation to the application's dependency container.
+Implement `LLMProvider` and provide the new implementation to the application's dependency container.
 
 ### Adding Another Embedding Provider
 
-Implement:
-
-```text
-Embedder
-```
-
-without changing the retrieval or ingestion services.
+Implement `Embedder` without changing the retrieval or ingestion services.
 
 ### Adding Another Document Processor
 
-Implement:
-
-```text
-Processor
-```
-
-and declare the supported `ChunkCategory` values.
+Implement `Processor` and declare the supported `ChunkCategory` values.
 
 The `HybridProcessor` can then route the appropriate source type to it.
 
 ### Adding Another Retrieval Strategy
 
-Implement:
-
-```text
-Retriever
-```
-
-and include it in the `HybridRetriever`.
+Implement `Retriever` and include it in the `HybridRetriever`.
 
 The existing RRF implementation can combine its ranked results with other retrieval methods.
 
 ### Adding Another Finalizer
 
-Implement:
-
-```text
-Finalizer
-```
-
-and register it in the finalizer pipeline.
+Implement `Finalizer` and register it in the finalizer pipeline.
 
 This allows specialized post-retrieval behavior without changing the retrievers themselves.
 

@@ -9,8 +9,8 @@ from app.embedders.base import Embedder
 
 
 class GeminiEmbedder(Embedder):
-    def __init__(self):
-        settings = Settings()
+    def __init__(self, settings: Settings | None = None):
+        settings = settings or Settings()
         self._api_key = settings.GOOGLE_API_KEY
         self._model = settings.GEMINI_EMBEDDING_MODEL
         self._batch_size = settings.EMBEDDING_BATCH_SIZE

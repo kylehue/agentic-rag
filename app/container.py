@@ -4,13 +4,13 @@ from fastapi import FastAPI
 
 from app.core.config import settings
 
-from app.llm.gemini import GeminiProvider
+from app.llm.openai import OpenAIProvider
 from app.embedders.gemini import GeminiEmbedder
 
-from app.processors.image import ImageProcessor
-from app.processors.hybrid import HybridProcessor
-from app.processors.table import TableProcessor
-from app.processors.text import TextProcessor
+from app.plugin.hooks import HookBus
+from app.plugin.registry import PluginRegistry
+from app.plugin.runtime import FinalizeRuntime
+
 from app.retrievers.vector import VectorRetriever
 from app.retrievers.sparse import SparseRetriever
 from app.retrievers.hybrid import HybridRetriever
@@ -23,12 +23,12 @@ from app.services.ingestion import IngestionService
 from app.services.retrieval import RetrievalService
 from app.services.rag import RagService
 
-from app.finalizers.hybrid import HybridFinalizer
-from app.finalizers.spreadsheet import SpreadsheetFinalizer
+from app.plugins.text import TextPlugin
+from app.plugins.table import TablePlugin
 
 # Providers
-llm = GeminiProvider()
-embedder = GeminiEmbedder()
+llm = OpenAIProvider(settings)
+embedder = GeminiEmbedder(settings)
 
 # Storage
 file_storage = LocalFileStorage(storage_dir=settings.FILE_LOCAL_STORAGE_DIR)
@@ -40,17 +40,11 @@ vector_storage = LocalVectorStorage(
 
 sql_storage = LocalSqlStorage(storage_dir=settings.SQL_LOCAL_STORAGE_DIR)
 
-# Processors
-table_processor = TableProcessor(llm=llm)
-image_processor = ImageProcessor(llm=llm)
-text_processor = TextProcessor(image_processor=image_processor)
-hybrid_processor = HybridProcessor(
-    processors=[
-        table_processor,
-        image_processor,
-        text_processor,
-    ]
-)
+# Plugin system
+hooks = HookBus()
+plugin_registry = PluginRegistry(hooks)
+plugin_registry.register(TextPlugin())
+plugin_registry.register(TablePlugin())
 
 # Retrievers
 vector_retriever = VectorRetriever(
@@ -73,35 +67,31 @@ hybrid_retriever = HybridRetriever(
     top_k=5,
 )
 
-# Finalizers
-spreadsheet_finalizer = SpreadsheetFinalizer(
-    llm=llm,
-    sql_storage=sql_storage,
-)
-
-hybrid_finalizer = HybridFinalizer(
-    finalizers=[spreadsheet_finalizer],
-)
-
 # Services
 ingestion_service = IngestionService(
+    hooks=hooks,
+    registry=plugin_registry,
     llm=llm,
     embedder=embedder,
-    processor=hybrid_processor,
-    file_storage=file_storage,
     vector_storage=vector_storage,
     sql_storage=sql_storage,
+    file_storage=file_storage,
+)
+
+finalize_runtime = FinalizeRuntime(
+    llm=llm,
+    hooks=hooks,
 )
 
 retrieval_service = RetrievalService(
     retriever=hybrid_retriever,
-    finalizer=hybrid_finalizer,
+    registry=plugin_registry,
+    finalize_runtime=finalize_runtime,
+    hooks=hooks,
 )
 
 rag_service = RagService(
     llm=llm,
-    file_storage=file_storage,
-    sql_storage=sql_storage,
     ingestion_service=ingestion_service,
     retrieval_service=retrieval_service,
 )

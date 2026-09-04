@@ -9,25 +9,25 @@ import re
 from typing import Any
 
 import pandas as pd
-from unstructured.documents.elements import Element, Table
+from unstructured.documents.elements import Element
 
 from app.llm.base import LLMProvider
-from app.models.chunk import IngestedChunk, ChunkCategory
-from app.models.ingestion import ProcessorPayload
-from app.processors.base import Processor
+from app.models.chunk import IngestedChunk
+from app.plugin.base import Plugin
+from app.plugin.context import IngestionContext
+from app.plugin.runtime import IngestionRuntime
 from app.utils.string import render_template
 
 MAX_WORKBOOK_CONTEXT_CHARS = 30_000
 MAX_TABLE_CONTEXT_CHARS = 10_000
-MAX_TEXT_CONTEXT_CHARS = 8_000
 SAMPLED_DATA_ROWS_PER_TABLE = 5
 
 
-WORKBOOK_ANALYSIS_PROMPT_TEMPLATE = """You are analyzing a workbook/document for a retrieval system.
+WORKBOOK_ANALYSIS_PROMPT_TEMPLATE = """You are analyzing a set of tables extracted from one source for a retrieval system.
 
-The input is a catalog of tables extracted from one source. Tables may refer to,
-define, summarize, or join other tables. Analyze the catalog as a whole so each
-table's meaning is informed by the other tables.
+The input is a catalog of tables. Tables may refer to, define, summarize, or
+join other tables. Analyze the catalog as a whole so each table's meaning is
+informed by the other tables.
 
 Return valid JSON only in this exact shape:
 {
@@ -61,13 +61,6 @@ separately. Do not infer or modify data types.
 Use an empty relationships list when no relationship is supported by the data.
 Do not invent joins, formulas, or facts.
 
-Nearby extracted document text is additional context only. Distinguish it from
-the actual table data and do not assume that every statement in the context
-belongs to the table.
-
-Nearby text context:
-{context}
-
 Table catalog:
 {catalog}
 """
@@ -75,61 +68,186 @@ Table catalog:
 
 @dataclass(frozen=True)
 class ExtractedTable:
-    """A table represented independently of Unstructured's Table element."""
+    """A table represented independently of its source format."""
 
     dataframe: pd.DataFrame
     name: str
-    file_filename: str
-    file_content_type: str
-    file_bytes: bytes | None = None
-    page_number: int | None = None
     orig_elements: list[Element] = field(default_factory=list)
 
 
-class TableProcessor(Processor):
-    def __init__(self, llm: LLMProvider):
-        self._llm = llm
+class TablePlugin(Plugin):
+    """Handles spreadsheet documents (csv, xlsx, xls) and emitted table files.
 
-    @staticmethod
-    def _text_context(elements: list[Element]) -> str:
-        """Collect extracted text to help the LLM understand table meaning."""
+    Each table becomes one chunk carrying searchable semantic context and its
+    own CSV file. Table rows are not loaded into SQL for now; the saved file
+    is the source of truth for later agentic table querying.
+    """
 
-        texts: list[str] = []
+    SUPPORTED_EXTENSIONS = frozenset({"csv", "xlsx", "xls"})
 
-        for element in elements:
-            text = getattr(element, "text", None)
+    @property
+    def name(self) -> str:
+        return "table"
 
-            if isinstance(text, str) and text.strip():
-                texts.append(text.strip())
+    def accepts(self, context: IngestionContext) -> bool:
+        extension = Path(context.source_filename).suffix.lower().lstrip(".")
+        return extension in self.SUPPORTED_EXTENSIONS
 
-        context = "\n\n".join(texts)
-
-        return context[:MAX_TEXT_CONTEXT_CHARS]
-
-    @staticmethod
-    def _table_label(
-        table: Table,
-        index: int,
-    ) -> str:
-        """Return a stable human-readable label for a PDF table."""
-
-        return getattr(table.metadata, "page_name", None) or f"Table {index + 1}"
-
-    @staticmethod
-    def _table_html(table: Table) -> str:
-        """Return Unstructured's reconstructed table HTML."""
-
-        value = getattr(
-            table.metadata,
-            "text_as_html",
-            None,
+    async def process(
+        self,
+        context: IngestionContext,
+        runtime: IngestionRuntime,
+    ) -> list[IngestedChunk]:
+        tables = await asyncio.to_thread(
+            self._read_tables,
+            context,
         )
 
-        return value if isinstance(value, str) else ""
+        if not tables:
+            return []
+
+        # Build a compact catalog from DataFrames.
+        catalog = self._build_catalog(tables)
+
+        # LLM generates semantic descriptions only.
+        # Pandas remains authoritative for data types.
+        workbook_description, table_analyses = await self._analyze_workbook(
+            runtime.llm,
+            catalog,
+            len(tables),
+        )
+
+        self._add_related_table_names(table_analyses, tables)
+
+        # Pandas is the source of truth for schema types.
+        # Do this for every table before building any chunk text because a table
+        # may need to include another table's schema in its related-table context.
+        for index, table in enumerate(tables):
+            table_analyses[index]["schema"] = self._merge_schema_types(
+                table.dataframe,
+                table_analyses[index]["schema"],
+            )
+
+        chunks: list[IngestedChunk] = []
+
+        for index, table in enumerate(tables):
+            analysis = table_analyses[index]
+
+            related_tables = self._related_table_schemas(
+                table_index=index,
+                analysis=analysis,
+                tables=tables,
+                table_analyses=table_analyses,
+            )
+
+            chunks.append(
+                IngestedChunk(
+                    plugin=self.name,
+                    text=self._analysis_text(
+                        table_name=table.name,
+                        workbook_description=workbook_description,
+                        analysis=analysis,
+                        dataframe=table.dataframe,
+                        related_tables=related_tables,
+                    ),
+                    metadata={
+                        "chunk_table_name": table.name,
+                        "chunk_schema": analysis["schema"],
+                    },
+                    file_filename=f"{table.name}.csv",
+                    file_content_type="text/csv",
+                    file_bytes=table.dataframe.to_csv(index=False).encode(
+                        "utf-8"
+                    ),
+                    orig_elements=table.orig_elements,
+                )
+            )
+
+        await runtime.save_chunks(chunks)
+
+        return chunks
+
+    @classmethod
+    def _read_tables(
+        cls,
+        context: IngestionContext,
+    ) -> list[ExtractedTable]:
+        """
+        Read spreadsheet data directly with pandas.
+
+        CSV produces one table.
+        XLS/XLSX produces one table per sheet.
+        """
+
+        extension = Path(context.source_filename).suffix.lower()
+
+        source = BytesIO(context.source_bytes)
+
+        if extension == ".csv":
+            dataframe = pd.read_csv(source)
+            dataframe = cls._normalize_dataframe_columns(dataframe)
+
+            return [
+                ExtractedTable(
+                    dataframe=dataframe,
+                    name=cls._normalize_name(Path(context.source_filename).stem),
+                    orig_elements=context.elements,
+                )
+            ]
+
+        if extension in {".xlsx", ".xls"}:
+            sheets = pd.read_excel(
+                source,
+                sheet_name=None,
+            )
+
+            source_names = list(sheets.keys())
+            table_names = cls._normalize_unique_names(source_names)
+
+            return [
+                ExtractedTable(
+                    dataframe=cls._normalize_dataframe_columns(sheets[name]),
+                    name=table_name,
+                    orig_elements=context.elements,
+                )
+                for name, table_name in zip(source_names, table_names)
+            ]
+
+        return []
+
+    async def _analyze_workbook(
+        self,
+        llm: LLMProvider,
+        catalog: str,
+        table_count: int,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Generate the single workbook-level LLM analysis.
+
+        Returns a safe fallback when the LLM fails or answers invalidly;
+        the raw data and pandas-derived schema are still indexed.
+        """
+
+        try:
+            prompt = render_template(
+                WORKBOOK_ANALYSIS_PROMPT_TEMPLATE,
+                {
+                    "catalog": catalog,
+                },
+            )
+
+            response = await llm.answer(prompt)
+
+            return self._parse_workbook_analysis(
+                response,
+                table_count,
+            )
+
+        except Exception:
+            return "", [self._empty_analysis() for _ in range(table_count)]
 
     @staticmethod
     def _normalize_name(name: Any) -> str:
-        """Convert a name into a safe SQL-friendly snake_case identifier."""
+        """Convert a name into a safe snake_case identifier."""
 
         name = str(name).strip()
 
@@ -179,7 +297,7 @@ class TableProcessor(Processor):
         cls,
         dataframe: pd.DataFrame,
     ) -> pd.DataFrame:
-        """Normalize DataFrame columns into unique SQL-safe names."""
+        """Normalize DataFrame columns into unique safe names."""
 
         dataframe = dataframe.copy()
 
@@ -187,192 +305,15 @@ class TableProcessor(Processor):
 
         return dataframe
 
-    @classmethod
-    def _normalize_table_names(
-        cls,
-        names: list[Any],
-        file_id: str,
-    ) -> list[str]:
-        """Prefix table names with a file ID, then normalize and deduplicate them."""
-
-        return cls._normalize_unique_names([f"{file_id}_{name}" for name in names])
-
-    @classmethod
-    def _dataframe_from_html(
-        cls,
-        table: Table,
-    ) -> pd.DataFrame:
-        """Convert an Unstructured PDF table into a DataFrame."""
-
-        html = cls._table_html(table)
-
-        if not html:
-            raise ValueError("Table does not contain text_as_html.")
-
-        tables = pd.read_html(html)
-
-        if not tables:
-            raise ValueError("No table could be parsed from text_as_html.")
-
-        return tables[0]
-
-    @classmethod
-    def _read_document_tables(
-        cls,
-        payload: ProcessorPayload,
-    ) -> list[ExtractedTable]:
-        """
-        Extract PDF tables using Unstructured HTML, then immediately convert
-        them into DataFrames.
-        """
-
-        unstructured_tables = [
-            element for element in payload.elements if isinstance(element, Table)
-        ]
-
-        if not unstructured_tables:
-            return []
-
-        source_names = [
-            cls._table_label(table, index)
-            for index, table in enumerate(unstructured_tables)
-        ]
-
-        table_names = cls._normalize_table_names(
-            source_names,
-            payload.source_id,
-        )
-
-        tables: list[ExtractedTable] = []
-
-        for table, table_name, source_name in zip(
-            unstructured_tables,
-            table_names,
-            source_names,
-        ):
-            dataframe = cls._dataframe_from_html(table)
-            dataframe = cls._normalize_dataframe_columns(dataframe)
-
-            tables.append(
-                ExtractedTable(
-                    dataframe=dataframe,
-                    file_filename=f"{source_name}.csv",
-                    file_content_type="text/csv",
-                    name=table_name,
-                    page_number=getattr(
-                        table.metadata,
-                        "page_number",
-                        None,
-                    ),
-                    orig_elements=[table],
-                )
-            )
-
-        return tables
-
-    @classmethod
-    def _read_spreadsheet_tables(
-        cls,
-        payload: ProcessorPayload,
-    ) -> list[ExtractedTable]:
-        """
-        Read spreadsheet data directly with pandas.
-
-        CSV produces one table.
-        XLS/XLSX produces one table per sheet.
-        """
-
-        extension = Path(payload.source_filename).suffix.lower()
-
-        source = BytesIO(payload.source_bytes)
-
-        if extension == ".csv":
-            dataframe = pd.read_csv(source)
-            dataframe = cls._normalize_dataframe_columns(dataframe)
-
-            source_name = Path(payload.source_filename).stem
-
-            table_name = cls._normalize_table_names(
-                [source_name],
-                payload.source_id,
-            )[0]
-
-            return [
-                ExtractedTable(
-                    dataframe=dataframe,
-                    file_filename=payload.source_filename,
-                    file_bytes=payload.source_bytes,
-                    file_content_type=payload.source_content_type,
-                    name=table_name,
-                    orig_elements=payload.elements,
-                )
-            ]
-
-        if extension in {".xlsx", ".xls"}:
-            sheets = pd.read_excel(
-                source,
-                sheet_name=None,
-            )
-
-            source_names = list(sheets.keys())
-
-            table_names = cls._normalize_table_names(
-                source_names,
-                payload.source_id,
-            )
-
-            result: list[ExtractedTable] = []
-
-            for source_name, table_name in zip(source_names, table_names):
-                dataframe = cls._normalize_dataframe_columns(sheets[source_name])
-
-                result.append(
-                    ExtractedTable(
-                        dataframe=dataframe,
-                        file_filename=payload.source_filename,
-                        file_bytes=payload.source_bytes,
-                        file_content_type=payload.source_content_type,
-                        name=table_name,
-                        orig_elements=payload.elements,
-                    )
-                )
-
-            return result
-
-        return []
-
-    @classmethod
-    def _extract_tables(
-        cls,
-        payload: ProcessorPayload,
-    ) -> list[ExtractedTable]:
-        """
-        Extract tables according to the source category.
-
-        Documents:
-            Unstructured Table -> metadata.text_as_html -> DataFrame
-
-        Spreadsheets:
-            Raw file bytes -> pandas -> DataFrame(s)
-        """
-
-        if payload.category is ChunkCategory.DOCUMENT:
-            return cls._read_document_tables(payload)
-
-        if payload.category is ChunkCategory.SPREADSHEET:
-            return cls._read_spreadsheet_tables(payload)
-
-        return []
-
     @staticmethod
-    def _pandas_dtype_to_sql_type(
+    def _pandas_dtype_to_type(
         dtype: Any,
     ) -> str:
         """
-        Convert a pandas dtype into the SQL type used by the application.
+        Convert a pandas dtype into a descriptive column type.
 
         The types are intentionally conservative because the DataFrame is the
-        source of truth for what will actually be inserted into SQL.
+        source of truth for the data.
         """
 
         if pd.api.types.is_bool_dtype(dtype):
@@ -396,14 +337,14 @@ class TableProcessor(Processor):
         """
         Build the schema representation sent to the LLM.
 
-        The LLM receives the already-inferred SQL type and only needs to explain
+        The LLM receives the already-inferred type and only needs to explain
         the semantic meaning of the column.
         """
 
         return [
             {
                 "name": str(column),
-                "type": TableProcessor._pandas_dtype_to_sql_type(
+                "type": TablePlugin._pandas_dtype_to_type(
                     dataframe[column].dtype
                 ),
                 "description": "",
@@ -446,8 +387,7 @@ class TableProcessor(Processor):
         tables: list[ExtractedTable],
     ) -> str:
         """
-        Create a row-sampled catalog containing each table's schema, data preview,
-        and location information.
+        Create a row-sampled catalog containing each table's schema and data preview.
         """
 
         if not tables:
@@ -468,7 +408,6 @@ class TableProcessor(Processor):
                 {
                     "index": index,
                     "table_name": table.name,
-                    "page_number": table.page_number,
                     "row_count": len(table.dataframe),
                     "column_count": len(table.dataframe.columns),
                     "schema": cls._schema_for_prompt(table.dataframe),
@@ -604,7 +543,7 @@ class TableProcessor(Processor):
             merged.append(
                 {
                     "name": name,
-                    "type": TableProcessor._pandas_dtype_to_sql_type(
+                    "type": TablePlugin._pandas_dtype_to_type(
                         dataframe[column].dtype
                     ),
                     "description": descriptions.get(
@@ -665,21 +604,17 @@ class TableProcessor(Processor):
         workbook_description: str,
         analysis: dict[str, Any],
         dataframe: pd.DataFrame,
-        context: str,
         related_tables: list[dict[str, Any]],
     ) -> str:
         """
         Build searchable text containing workbook meaning, schema, relationships,
-        related table schemas, surrounding text context, and representative values.
+        related table schemas, and representative values.
         """
 
         parts = [f"Table: {table_name}"]
 
         if workbook_description:
             parts.extend(("Workbook context:", workbook_description))
-
-        if context:
-            parts.extend(("Related document text:", context))
 
         if analysis["role"]:
             parts.append(f"Role: {analysis['role']}")
@@ -696,10 +631,10 @@ class TableProcessor(Processor):
                     dict,
                 ):
                     name = column.get("name", "Unknown column")
-                    sql_type = column.get("type", "TEXT")
+                    column_type = column.get("type", "TEXT")
                     description = column.get("description", "")
 
-                    line = (f"- {name} " f"({sql_type}): " f"{description}").rstrip()
+                    line = (f"- {name} " f"({column_type}): " f"{description}").rstrip()
 
                     parts.append(line)
 
@@ -739,11 +674,11 @@ class TableProcessor(Processor):
                             continue
 
                         name = column.get("name", "Unknown column")
-                        sql_type = column.get("type", "TEXT")
+                        column_type = column.get("type", "TEXT")
                         description = column.get("description", "")
 
                         line = (
-                            f"- {name} " f"({sql_type}): " f"{description}"
+                            f"- {name} " f"({column_type}): " f"{description}"
                         ).rstrip()
 
                         parts.append(line)
@@ -756,7 +691,7 @@ class TableProcessor(Processor):
         parts.extend(
             (
                 "Data:",
-                TableProcessor._sample_table_rows(
+                TablePlugin._sample_table_rows(
                     dataframe,
                     MAX_TABLE_CONTEXT_CHARS,
                 ),
@@ -790,100 +725,3 @@ class TableProcessor(Processor):
                 enriched_relationships.append(enriched)
 
             analysis["relationships"] = enriched_relationships
-
-    @property
-    def supported_categories(self):
-        return {ChunkCategory.SPREADSHEET}
-
-    async def process(self, payload):
-        """Create chunks enriched by a single workbook-level LLM analysis."""
-
-        tables = await asyncio.to_thread(self._extract_tables, payload)
-
-        if not tables:
-            return []
-
-        # Collect surrounding document text once.
-        context = self._text_context(payload.elements)
-
-        # Build a compact catalog from DataFrames.
-        catalog = self._build_catalog(tables)
-
-        # LLM generates semantic descriptions only.
-        # Pandas remains authoritative for data types.
-        workbook_description = ""
-        table_analyses = [self._empty_analysis() for _ in tables]
-
-        try:
-            prompt = render_template(
-                WORKBOOK_ANALYSIS_PROMPT_TEMPLATE,
-                {
-                    "context": context or "(none)",
-                    "catalog": catalog,
-                },
-            )
-
-            response = await self._llm.answer(prompt)
-
-            workbook_description, table_analyses = self._parse_workbook_analysis(
-                response,
-                len(tables),
-            )
-
-        except Exception:
-            # The raw DataFrame data and pandas-derived schema are still indexed
-            # even if the LLM fails.
-            pass
-
-        self._add_related_table_names(table_analyses, tables)
-
-        # Pandas is the source of truth for schema types.
-        # Do this for every table before building any chunk text because a table
-        # may need to include another table's schema in its related-table context.
-        for index, table in enumerate(tables):
-            table_analyses[index]["schema"] = self._merge_schema_types(
-                table.dataframe,
-                table_analyses[index]["schema"],
-            )
-
-        chunks: list[IngestedChunk] = []
-
-        for index, table in enumerate(tables):
-            analysis = table_analyses[index]
-
-            related_tables = self._related_table_schemas(
-                table_index=index,
-                analysis=analysis,
-                tables=tables,
-                table_analyses=table_analyses,
-            )
-
-            table_name = table.name
-
-            table_rows = table.dataframe.to_dict(orient="records")
-
-            chunks.append(
-                IngestedChunk(
-                    category=ChunkCategory.SPREADSHEET,
-                    text=self._analysis_text(
-                        table_name=table_name,
-                        workbook_description=workbook_description,
-                        analysis=analysis,
-                        dataframe=table.dataframe,
-                        context=context,
-                        related_tables=related_tables,
-                    ),
-                    metadata={
-                        # reference
-                        "chunk_source_id": payload.source_id,
-                        "chunk_source_page_number": table.page_number,
-                        # sql data
-                        "sql_table_name": table_name,
-                        "sql_schema": analysis["schema"],
-                        "sql_rows": table_rows,
-                    },
-                    orig_elements=table.orig_elements,
-                )
-            )
-
-        return chunks

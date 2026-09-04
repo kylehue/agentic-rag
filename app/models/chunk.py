@@ -1,24 +1,15 @@
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel
 from unstructured.documents.elements import Element
-
-
-class ChunkCategory(str, Enum):
-    """The supported source types used to choose processing and retrieval behavior."""
-
-    DOCUMENT = "document"
-    SPREADSHEET = "spreadsheet"
-    IMAGE = "image"
 
 
 @dataclass
 class IngestedChunk:
-    """The persistent record describing a document chunk."""
+    """A chunk produced by a plugin during ingestion."""
 
+    plugin: str
     chunk_id: str = field(default_factory=lambda: str(uuid4()))
 
     # --- file info (used when saving a chunk as file) ---
@@ -27,7 +18,6 @@ class IngestedChunk:
     file_bytes: bytes | None = None
 
     # --- chunk info ---
-    category: ChunkCategory = ChunkCategory.DOCUMENT
     text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     orig_elements: list[Element] | None = None  # original Unstructured.io elements
@@ -39,14 +29,10 @@ class RetrievedChunk:
 
     chunk_id: str
     source_id: str
-    category: ChunkCategory
+    plugin: str
     text: str
     score: float
     metadata: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.category, ChunkCategory):
-            self.category = ChunkCategory(self.category)
 
     @classmethod
     def from_dict(
@@ -57,7 +43,7 @@ class RetrievedChunk:
         values = {
             "chunk_id": data["chunk_id"],
             "source_id": data["source_id"],
-            "category": data["category"],
+            "plugin": data["plugin"],
             "text": data["text"],
             "metadata": data.get("metadata") or {},
             "score": data.get("score", 0.0),

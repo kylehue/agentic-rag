@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from app.core.config import settings
 
 from app.llm.openai import OpenAIProvider
-from app.embedders.gemini import GeminiEmbedder
+from app.embedders.sentence_transformers import SentenceTransformerEmbedder
 
 from app.plugin.hooks import HookBus
 from app.plugin.registry import PluginRegistry
@@ -27,7 +27,7 @@ from app.plugins.table import TablePlugin
 
 # Providers
 llm = OpenAIProvider(settings)
-embedder = GeminiEmbedder(settings)
+embedder = SentenceTransformerEmbedder(settings)
 
 # Storage
 file_storage = LocalFileStorage(storage_dir=settings.FILE_LOCAL_STORAGE_DIR)

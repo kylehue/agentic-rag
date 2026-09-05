@@ -4,7 +4,9 @@ import json
 
 import pandas as pd
 
-from app.core.config import settings
+from app.plugin.context import IngestionContext
+from app.plugin.hooks import IngestionProcessPayload
+from app.plugin.registry import PluginRegistry
 
 from fakes import FakeLLM, build_runtime, make_context
 from app.plugins.table import TablePlugin
@@ -30,23 +32,45 @@ def make_analysis():
     }
 
 
-def csv_context(**kwargs):
-    defaults = dict(
-        filename="sales.csv",
-        content_type="text/csv",
-        source_bytes=CSV_BYTES,
+def csv_context(
+    filename: str = "sales.csv",
+    content_type: str = "text/csv",
+    source_bytes: bytes = CSV_BYTES,
+    parent_source_id: str | None = None,
+) -> IngestionContext:
+    return make_context(
+        filename=filename,
+        content_type=content_type,
+        source_bytes=source_bytes,
+        parent_source_id=parent_source_id,
     )
-    defaults.update(kwargs)
-    return make_context(**defaults)  # type: ignore
 
 
-def test_process_csv_creates_one_chunk_with_file():
+def run_process(context, runtime, plugin: TablePlugin):
+    """Register the plugin on the runtime's bus and fire the process hook."""
+    PluginRegistry(runtime.hooks).register(plugin)
+
+    async def flow():
+        results = await runtime.hooks.emit(
+            "ingestion_process",
+            IngestionProcessPayload(context=context, runtime=runtime),
+        )
+        chunks = []
+        for result in results:
+            if result:
+                chunks.extend(result)
+        return chunks
+
+    return asyncio.run(flow())
+
+
+def test_process_csv_returns_chunk_with_file():
     llm = FakeLLM(json.dumps(make_analysis()))
     plugin = TablePlugin()
     context = csv_context()
     parts = build_runtime(context, llm=llm)
 
-    chunks = asyncio.run(plugin.process(context, parts.runtime))
+    chunks = run_process(context, parts.runtime, plugin)
 
     assert len(chunks) == 1
     chunk = chunks[0]
@@ -61,6 +85,11 @@ def test_process_csv_creates_one_chunk_with_file():
 
     # No rows are loaded into SQL: no sql_* metadata keys.
     assert not any(key.startswith("sql_") for key in chunk.metadata)
+    assert chunk.metadata["table_name"] == "sales"
+    assert chunk.metadata["schema"] == [
+        {"name": "region", "type": "TEXT", "description": "sales region"},
+        {"name": "amount", "type": "INTEGER", "description": "total amount"},
+    ]
 
     # The chunk carries its own CSV file.
     assert chunk.file_filename == "sales.csv"
@@ -68,35 +97,13 @@ def test_process_csv_creates_one_chunk_with_file():
     assert chunk.file_bytes is not None
     assert b"north,10" in chunk.file_bytes
 
-    # The plugin persisted the chunk through the runtime.
-    chunk_rows = parts.sql_storage.tables[settings.CHUNK_TABLE_NAME]
-    assert len(chunk_rows) == 1
-    metadata = chunk_rows[0]["metadata"]
-    assert metadata["chunk_source_id"] == context.source_id
-    assert metadata["chunk_table_name"] == "sales"
-    assert metadata["chunk_schema"] == [
-        {"name": "region", "type": "TEXT", "description": "sales region"},
-        {"name": "amount", "type": "INTEGER", "description": "total amount"},
-    ]
-    assert metadata["chunk_file_path"].endswith(".csv")
-    assert metadata["chunk_file_content_type"] == "text/csv"
-
-    # The chunk file landed in file storage.
-    chunk_file_paths = [
-        path for path in parts.file_storage.files if path.startswith("chunk_files/")
-    ]
-    assert len(chunk_file_paths) == 1
-
-    # Vectors were stored.
-    assert parts.vector_storage.added[0][0] == [chunk.chunk_id]
-
     # A single workbook-level LLM call.
     assert len(llm.prompts) == 1
 
 
-def test_process_xlsx_creates_chunk_per_sheet():
+def test_process_xlsx_returns_chunk_per_sheet():
     buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer) as writer:
+    with pd.ExcelWriter(buffer) as writer:  # type: ignore[reportArgumentType]
         pd.DataFrame({"a": [1, 2]}).to_excel(
             writer,
             sheet_name="Alpha",
@@ -141,15 +148,15 @@ def test_process_xlsx_creates_chunk_per_sheet():
     )
     parts = build_runtime(context, llm=llm)
 
-    chunks = asyncio.run(plugin.process(context, parts.runtime))
+    chunks = run_process(context, parts.runtime, plugin)
 
     assert len(chunks) == 2
-    names = {chunk.metadata["chunk_table_name"] for chunk in chunks}
+    names = {chunk.metadata["table_name"] for chunk in chunks}
     assert names == {"alpha", "beta_2"}
 
     # Relationship indexes are rewritten to stable table names.
     beta = next(
-        chunk for chunk in chunks if chunk.metadata["chunk_table_name"] == "beta_2"
+        chunk for chunk in chunks if chunk.metadata["table_name"] == "beta_2"
     )
     assert "alpha" in beta.text
     assert "joins alpha" in beta.text
@@ -157,7 +164,7 @@ def test_process_xlsx_creates_chunk_per_sheet():
     # Each chunk carries its own CSV file.
     for chunk in chunks:
         assert chunk.file_bytes is not None
-        assert chunk.file_filename.endswith(".csv")  # type: ignore
+        assert chunk.file_filename.endswith(".csv")
 
 
 def test_llm_failure_falls_back_to_raw_data():
@@ -166,7 +173,7 @@ def test_llm_failure_falls_back_to_raw_data():
     context = csv_context()
     parts = build_runtime(context, llm=llm)
 
-    chunks = asyncio.run(plugin.process(context, parts.runtime))
+    chunks = run_process(context, parts.runtime, plugin)
 
     assert len(chunks) == 1
     assert "Table: sales" in chunks[0].text
@@ -174,25 +181,13 @@ def test_llm_failure_falls_back_to_raw_data():
     assert "region" in chunks[0].text
 
 
-def test_parent_source_id_recorded():
-    llm = FakeLLM(json.dumps(make_analysis()))
-    plugin = TablePlugin()
-    context = csv_context(parent_source_id="parent-1")
-    parts = build_runtime(context, llm=llm)
-
-    chunks = asyncio.run(plugin.process(context, parts.runtime))
-
-    chunk_rows = parts.sql_storage.tables[settings.CHUNK_TABLE_NAME]
-    assert chunk_rows[0]["metadata"]["chunk_parent_source_id"] == "parent-1"
-
-
-def test_unsupported_spreadsheet_extension_returns_no_chunks():
+def test_rejects_unsupported_spreadsheet_extension():
     llm = FakeLLM("")
     plugin = TablePlugin()
     context = csv_context(filename="data.tsv", source_bytes=b"a\tb\n1\t2")
     parts = build_runtime(context, llm=llm)
 
-    chunks = asyncio.run(plugin.process(context, parts.runtime))
+    chunks = run_process(context, parts.runtime, plugin)
 
     assert chunks == []
     assert llm.prompts == []

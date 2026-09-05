@@ -1,6 +1,4 @@
-from dataclasses import dataclass, field
-
-from unstructured.documents.elements import Element
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -11,8 +9,14 @@ class IngestionContext:
     source_filename: str
     source_content_type: str
     source_bytes: bytes
-    elements: list[Element] = field(default_factory=list)
     parent_source_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RetrievalContext:
+    """Read-only details about the retrieval request being processed."""
+
+    user_query: str
 
 
 @dataclass(frozen=True)

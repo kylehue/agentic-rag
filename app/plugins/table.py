@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from io import BytesIO
 import json
 from pathlib import Path
@@ -9,12 +9,12 @@ import re
 from typing import Any
 
 import pandas as pd
-from unstructured.documents.elements import Element
 
 from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionContext
+from app.plugin.hooks import IngestionProcessPayload, hook
 from app.plugin.runtime import IngestionRuntime
 from app.utils.string import render_template
 
@@ -31,7 +31,7 @@ informed by the other tables.
 
 Return valid JSON only in this exact shape:
 {
-  "workbook_description": "one concise description of the source",
+  "workbook_description": "One concise description optimized for RAG retrieval. Prioritize keyword density and explicit context over human readability. Just mention the possible use-cases or search queries in this workbook, no need to describe the schema.",
   "tables": [
     {
       "index": 0,
@@ -72,7 +72,6 @@ class ExtractedTable:
 
     dataframe: pd.DataFrame
     name: str
-    orig_elements: list[Element] = field(default_factory=list)
 
 
 class TablePlugin(Plugin):
@@ -93,11 +92,18 @@ class TablePlugin(Plugin):
         extension = Path(context.source_filename).suffix.lower().lstrip(".")
         return extension in self.SUPPORTED_EXTENSIONS
 
-    async def process(
+    @hook("ingestion_process")
+    async def _process(
         self,
-        context: IngestionContext,
-        runtime: IngestionRuntime,
+        payload: IngestionProcessPayload,
     ) -> list[IngestedChunk]:
+        """Generate one chunk per table, enriched by a workbook-level LLM analysis."""
+        context = payload["context"]
+        runtime = payload["runtime"]
+
+        if not self.accepts(context):
+            return []
+
         tables = await asyncio.to_thread(
             self._read_tables,
             context,
@@ -151,19 +157,14 @@ class TablePlugin(Plugin):
                         related_tables=related_tables,
                     ),
                     metadata={
-                        "chunk_table_name": table.name,
-                        "chunk_schema": analysis["schema"],
+                        "table_name": table.name,
+                        "schema": analysis["schema"],
                     },
                     file_filename=f"{table.name}.csv",
                     file_content_type="text/csv",
-                    file_bytes=table.dataframe.to_csv(index=False).encode(
-                        "utf-8"
-                    ),
-                    orig_elements=table.orig_elements,
+                    file_bytes=table.dataframe.to_csv(index=False).encode("utf-8"),
                 )
             )
-
-        await runtime.save_chunks(chunks)
 
         return chunks
 
@@ -191,7 +192,6 @@ class TablePlugin(Plugin):
                 ExtractedTable(
                     dataframe=dataframe,
                     name=cls._normalize_name(Path(context.source_filename).stem),
-                    orig_elements=context.elements,
                 )
             ]
 
@@ -208,7 +208,6 @@ class TablePlugin(Plugin):
                 ExtractedTable(
                     dataframe=cls._normalize_dataframe_columns(sheets[name]),
                     name=table_name,
-                    orig_elements=context.elements,
                 )
                 for name, table_name in zip(source_names, table_names)
             ]
@@ -344,9 +343,7 @@ class TablePlugin(Plugin):
         return [
             {
                 "name": str(column),
-                "type": TablePlugin._pandas_dtype_to_type(
-                    dataframe[column].dtype
-                ),
+                "type": TablePlugin._pandas_dtype_to_type(dataframe[column].dtype),
                 "description": "",
             }
             for column in dataframe.columns
@@ -543,9 +540,7 @@ class TablePlugin(Plugin):
             merged.append(
                 {
                     "name": name,
-                    "type": TablePlugin._pandas_dtype_to_type(
-                        dataframe[column].dtype
-                    ),
+                    "type": TablePlugin._pandas_dtype_to_type(dataframe[column].dtype),
                     "description": descriptions.get(
                         name,
                         "",
@@ -690,7 +685,7 @@ class TablePlugin(Plugin):
 
         parts.extend(
             (
-                "Data:",
+                "Sample Data:",
                 TablePlugin._sample_table_rows(
                     dataframe,
                     MAX_TABLE_CONTEXT_CHARS,

@@ -118,7 +118,6 @@ def make_context(
     filename: str = "report.txt",
     content_type: str = "text/plain",
     source_bytes: bytes = b"hello",
-    elements=None,
     source_id: str = "source-1",
     parent_source_id: str | None = None,
 ) -> IngestionContext:
@@ -127,7 +126,6 @@ def make_context(
         source_filename=filename,
         source_content_type=content_type,
         source_bytes=source_bytes,
-        elements=elements or [],
         parent_source_id=parent_source_id,
     )
 
@@ -137,10 +135,6 @@ def build_runtime(
     *,
     hooks: HookBus | None = None,
     llm: LLMProvider | None = None,
-    embedder: Embedder | None = None,
-    vector_storage: VectorStorage | None = None,
-    sql_storage: SqlStorage | None = None,
-    file_storage: FileStorage | None = None,
 ) -> SimpleNamespace:
     """Build an IngestionRuntime with inspectable fakes.
 
@@ -149,26 +143,12 @@ def build_runtime(
     parts = SimpleNamespace(
         hooks=hooks if hooks is not None else HookBus(),
         llm=llm if llm is not None else FakeLLM(),
-        embedder=embedder if embedder is not None else FakeEmbedder(),
-        vector_storage=vector_storage
-        if vector_storage is not None
-        else FakeVectorStorage(),
-        sql_storage=sql_storage
-        if sql_storage is not None
-        else FakeSqlStorage(),
-        file_storage=file_storage
-        if file_storage is not None
-        else FakeFileStorage(),
     )
 
     parts.runtime = IngestionRuntime(
         context=context,
         hooks=parts.hooks,
         llm=parts.llm,
-        embedder=parts.embedder,
-        vector_storage=parts.vector_storage,
-        sql_storage=parts.sql_storage,
-        file_storage=parts.file_storage,
     )
 
     return parts

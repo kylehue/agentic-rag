@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,11 +11,11 @@ from app.errors.document import InvalidDocumentError
 from app.plugin.base import Plugin
 from app.plugin.hooks import (
     HookBus,
-    HOOK_FILE_EMITTED,
-    HOOK_FILE_SUBPROCESSED,
+    IngestionProcessPayload,
+    hook,
 )
 from app.plugin.registry import PluginRegistry
-from app.services import ingestion as ingestion_module
+from app.plugins import text as text_module
 from app.services.ingestion import IngestionService
 from app.store_file.local import LocalFileStorage
 from app.store_sql.local import LocalSqlStorage
@@ -54,7 +55,7 @@ ANALYSIS = {
 
 
 class SidecarPlugin(Plugin):
-    """A plugin that accepts every CSV and saves one marker chunk."""
+    """A plugin that accepts every CSV and generates one marker chunk."""
 
     @property
     def name(self) -> str:
@@ -63,12 +64,32 @@ class SidecarPlugin(Plugin):
     def accepts(self, context) -> bool:
         return context.source_filename.endswith(".csv")
 
-    async def process(self, context, runtime):
+    @hook("ingestion_process")
+    async def _process(
+        self,
+        payload: IngestionProcessPayload,
+    ) -> list:
         from app.models.chunk import IngestedChunk
 
-        chunk = IngestedChunk(plugin=self.name, text="sidecar marker")
-        await runtime.save_chunk(chunk)
-        return [chunk]
+        if not self.accepts(payload["context"]):
+            return []
+
+        return [IngestedChunk(plugin=self.name, text="sidecar marker")]
+
+
+class EmptyPlugin(Plugin):
+    """A plugin that accepts everything but generates no chunks."""
+
+    @property
+    def name(self) -> str:
+        return "empty"
+
+    def accepts(self, context) -> bool:
+        return True
+
+    @hook("ingestion_process")
+    async def _process(self, payload: IngestionProcessPayload) -> list:
+        return []
 
 
 def build_service(tmp_path, *, llm=None, hooks=None, plugins=None):
@@ -78,11 +99,7 @@ def build_service(tmp_path, *, llm=None, hooks=None, plugins=None):
     vector_storage = FakeVectorStorage()
     hooks = hooks if hooks is not None else HookBus()
     registry = PluginRegistry(hooks)
-    for plugin in (
-        plugins
-        if plugins is not None
-        else [TextPlugin(), TablePlugin()]
-    ):
+    for plugin in (plugins if plugins is not None else [TextPlugin(), TablePlugin()]):
         registry.register(plugin)
 
     service = IngestionService(
@@ -112,9 +129,7 @@ def test_csv_ingest_end_to_end(tmp_path):
             "sales.csv",
             "text/csv",
         )
-        documents = await sql_storage.get_all(
-            settings.DOCUMENT_METADATA_TABLE_NAME
-        )
+        documents = await sql_storage.get_all(settings.DOCUMENT_METADATA_TABLE_NAME)
         chunk_rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
         db_tables = {
             row["name"]
@@ -137,14 +152,17 @@ def test_csv_ingest_end_to_end(tmp_path):
     assert documents[0]["file_orig_filename"] == "sales.csv"
     assert Path(documents[0]["file_path"]).is_file()
 
-    # Chunk metadata was persisted by the plugin, without SQL rows.
+    # Chunk record was persisted by the service, metadata as-is, without SQL rows.
     assert len(chunk_rows) == 1
-    metadata = chunk_rows[0]["metadata"]
-    assert metadata["chunk_source_id"] == chunks[0].metadata["chunk_source_id"]
-    assert metadata["chunk_table_name"] == "sales"
+    row = chunk_rows[0]
+    assert row["source_id"] is not None
+    metadata = row["metadata"]
+    assert metadata["table_name"] == "sales"
+    assert metadata["schema"]
     assert "sql_rows" not in metadata
-    assert Path(metadata["chunk_file_path"]).is_file()
-    assert b"north" in Path(metadata["chunk_file_path"]).read_bytes()
+    assert "parent_source_id" not in metadata
+    assert Path(metadata["file_path"]).is_file()
+    assert b"north" in Path(metadata["file_path"]).read_bytes()
 
     # No per-table data tables were created; only the system tables exist.
     assert db_tables == {
@@ -156,7 +174,9 @@ def test_csv_ingest_end_to_end(tmp_path):
     assert vector_storage.added[0][0] == [chunks[0].chunk_id]
 
 
-def test_text_ingest_emits_table_subprocess(tmp_path):
+def test_text_ingest_indexes_text_only(tmp_path):
+    # Table emission is disabled for now: a text document yields text chunks
+    # only, with no emitted files and no subprocess.
     llm = FakeLLM(json.dumps(ANALYSIS))
     service, sql_storage, file_storage, vector_storage, hooks = build_service(
         tmp_path,
@@ -166,14 +186,14 @@ def test_text_ingest_emits_table_subprocess(tmp_path):
     emitted_events: list[dict] = []
     subprocessed_events: list[dict] = []
 
-    async def on_emitted(**payload):
+    async def on_emitted(payload):
         emitted_events.append(payload)
 
-    async def on_subprocessed(**payload):
+    async def on_subprocessed(payload):
         subprocessed_events.append(payload)
 
-    hooks.register(HOOK_FILE_EMITTED, on_emitted)
-    hooks.register(HOOK_FILE_SUBPROCESSED, on_subprocessed)
+    hooks.register("file_emitted", on_emitted)
+    hooks.register("file_subprocessed", on_subprocessed)
 
     elements = [
         make_text_element("Quarterly report body.", page_number=1),
@@ -183,7 +203,7 @@ def test_text_ingest_emits_table_subprocess(tmp_path):
     async def flow():
         await service.initialize()
         with patch.object(
-            ingestion_module,
+            text_module,
             "partition",
             return_value=elements,
         ):
@@ -192,45 +212,29 @@ def test_text_ingest_emits_table_subprocess(tmp_path):
                 "report.pdf",
                 "application/pdf",
             )
-        documents = await sql_storage.get_all(
-            settings.DOCUMENT_METADATA_TABLE_NAME
-        )
+        documents = await sql_storage.get_all(settings.DOCUMENT_METADATA_TABLE_NAME)
         chunk_rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
         await sql_storage.close()
         return chunks, documents, chunk_rows
 
     chunks, documents, chunk_rows = asyncio.run(flow())
 
-    # Two source documents: the original file and the emitted table file.
-    assert len(documents) == 2
-    by_filename = {
-        document["file_orig_filename"]: document for document in documents
-    }
-    original = by_filename["report.pdf"]
-    emitted = by_filename["report_table_1.csv"]
+    # One source document: the original file only.
+    assert len(documents) == 1
+    original = documents[0]
+    assert original["file_orig_filename"] == "report.pdf"
 
-    # Text chunks plus the subprocessed table chunk.
-    text_chunks = [chunk for chunk in chunks if chunk.plugin == "text"]
-    table_chunks = [chunk for chunk in chunks if chunk.plugin == "table"]
-    assert len(text_chunks) == 1
-    assert len(table_chunks) == 1
+    # Only a text chunk; the embedded table is ignored for now.
+    assert [chunk.plugin for chunk in chunks] == ["text"]
+    assert len(chunk_rows) == 1
+    text_row = chunk_rows[0]
+    assert text_row["plugin"] == "text"
+    assert text_row["source_id"] == original["source_id"]
+    assert "parent_source_id" not in text_row["metadata"]
 
-    # The table chunk references the text document as its parent.
-    table_metadata = next(
-        row["metadata"] for row in chunk_rows if row["plugin"] == "table"
-    )
-    assert table_metadata["chunk_parent_source_id"] == original["source_id"]
-    assert table_metadata["chunk_source_id"] == emitted["source_id"]
-    assert Path(table_metadata["chunk_file_path"]).is_file()
-
-    # Hooks fired for the emission and its subprocess.
-    assert len(emitted_events) == 1
-    assert emitted_events[0]["emitted_file"].filename == "report_table_1.csv"
-    assert emitted_events[0]["context"].source_id == original["source_id"]
-    assert len(subprocessed_events) == 1
-    assert [chunk.chunk_id for chunk in subprocessed_events[0]["chunks"]] == [
-        table_chunks[0].chunk_id
-    ]
+    # No emission or subprocess happened.
+    assert emitted_events == []
+    assert subprocessed_events == []
 
 
 def test_multiple_accepting_plugins_all_run(tmp_path):
@@ -255,7 +259,7 @@ def test_multiple_accepting_plugins_all_run(tmp_path):
     chunks, chunk_rows = asyncio.run(flow())
 
     # TablePlugin and SidecarPlugin both accepted the CSV and both ran.
-    table_chunks = [c for c in chunks if c.metadata.get("chunk_table_name")]
+    table_chunks = [c for c in chunks if c.plugin == "table"]
     sidecar_chunks = [c for c in chunks if c.text == "sidecar marker"]
     assert len(table_chunks) == 1
     assert len(sidecar_chunks) == 1
@@ -267,6 +271,26 @@ def test_multiple_accepting_plugins_all_run(tmp_path):
     assert len(non_table_rows) == 1
     assert non_table_rows[0]["plugin"] == "sidecar"
     assert non_table_rows[0]["text"] == "sidecar marker"
+
+
+def test_ingest_without_chunks_warns(tmp_path, caplog):
+    service, sql_storage, *_ = build_service(tmp_path, plugins=[EmptyPlugin()])
+
+    async def flow():
+        await service.initialize()
+        with caplog.at_level(logging.WARNING, logger="app.services.ingestion"):
+            chunks = await service.ingest_bytes(
+                b"some content",
+                "anything.txt",
+                "text/plain",
+            )
+        await sql_storage.close()
+        return chunks
+
+    chunks = asyncio.run(flow())
+
+    assert chunks == []
+    assert any("produced no chunks" in record.message for record in caplog.records)
 
 
 def test_file_no_plugin_accepts_raises(tmp_path):

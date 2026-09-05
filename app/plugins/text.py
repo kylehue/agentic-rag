@@ -1,5 +1,5 @@
 import asyncio
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Sequence
 
@@ -7,18 +7,22 @@ import pandas as pd
 from unstructured.chunking.basic import chunk_elements
 from unstructured.chunking.title import chunk_by_title
 from unstructured.documents.elements import Element, Table
+from unstructured.partition.auto import partition
 
 from app.models.chunk import IngestedChunk
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionContext
+from app.plugin.hooks import IngestionProcessPayload, hook
 from app.plugin.runtime import IngestionRuntime
 
 
 class TextPlugin(Plugin):
     """Handles text documents (pdf, docx, txt, md, ...).
 
-    Chunks the parsed text and emits embedded tables as CSV files so they
-    are ingested as a subprocess by the TablePlugin.
+    Chunks the parsed text. Emitting embedded tables as CSV files is
+    disabled for now (tables may be split across chunks; see the TODO in
+    `_process`) — the emission mechanism itself remains available on the
+    runtime for plugins that need it.
     """
 
     SUPPORTED_EXTENSIONS = frozenset(
@@ -43,29 +47,40 @@ class TextPlugin(Plugin):
     def name(self) -> str:
         return "text"
 
-    @property
-    def uses_elements(self) -> bool:
-        return True
-
     def accepts(self, context: IngestionContext) -> bool:
         extension = Path(context.source_filename).suffix.lower().lstrip(".")
         return extension in self.SUPPORTED_EXTENSIONS
 
-    async def process(
+    @hook("ingestion_process")
+    async def _process(
         self,
-        context: IngestionContext,
-        runtime: IngestionRuntime,
+        payload: IngestionProcessPayload,
     ) -> list[IngestedChunk]:
+        """Generate text chunks for the document; emit embedded tables as files."""
+        context = payload["context"]
+
+        if not self.accepts(context):
+            return []
+
+        elements = await asyncio.to_thread(
+            partition,
+            file=BytesIO(context.source_bytes),
+            file_filename=context.source_filename,
+            content_type=context.source_content_type,
+            strategy="hi_res",
+            infer_table_structure=False,  # Keep tables as structured HTML (Ignore for now)
+        )
+
         text_elements: list[Element] = []
         table_elements: list[Table] = []
 
-        for element in context.elements:
+        for element in elements:
             if isinstance(element, Table):
                 table_elements.append(element)
             else:
                 text_elements.append(element)
 
-        # TODO:
+        # TODO: (IGNORING FOR NOW)
         # We shouldn't blindly emit files for tables because they could
         # be split into different chunks. If we want better chunking for tables
         # in PDFs, we must collect all tables in one piece.
@@ -73,6 +88,7 @@ class TextPlugin(Plugin):
         # they should use spreadsheet formats.
 
         # stem = Path(context.source_filename).stem
+        # runtime = payload["runtime"]
 
         # for index, table in enumerate(table_elements, start=1):
         #     csv_bytes = await asyncio.to_thread(
@@ -99,25 +115,20 @@ class TextPlugin(Plugin):
             text_elements,
         )
 
-        chunks = [
+        return [
             IngestedChunk(
                 plugin=self.name,
                 text=chunk.text,
                 metadata={
-                    "chunk_source_page_number": getattr(
+                    "source_page_number": getattr(
                         chunk.metadata,
                         "page_number",
                         None,
                     ),
                 },
-                orig_elements=chunk.metadata.orig_elements or [],
             )
             for chunk in raw_chunks
         ]
-
-        await runtime.save_chunks(chunks)
-
-        return chunks
 
     @staticmethod
     def _chunk_elements(elements: Sequence[Element]) -> list[Element]:

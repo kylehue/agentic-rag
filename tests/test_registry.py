@@ -1,15 +1,12 @@
 import asyncio
-from dataclasses import replace
 
 import pytest
 
-from app.models.chunk import RetrievedChunk
 from app.plugin.base import Plugin
-from app.plugin.hooks import HookBus, HOOK_CHUNK_FINALIZED
+from app.plugin.hooks import HookBus, IngestionStartedPayload, hook
 from app.plugin.registry import PluginRegistry
-from app.plugin.runtime import FinalizeRuntime
 
-from fakes import FakeLLM, make_context
+from fakes import build_runtime, make_context
 
 
 class NoopPlugin(Plugin):
@@ -24,8 +21,15 @@ class NoopPlugin(Plugin):
     def accepts(self, context) -> bool:
         return self._accepts_all
 
-    async def process(self, context, runtime):
-        return []
+
+def emit_started(hooks: HookBus, context) -> None:
+    parts = build_runtime(context, hooks=hooks)
+    asyncio.run(
+        hooks.emit(
+            "ingestion_started",
+            IngestionStartedPayload(context=context, runtime=parts.runtime),
+        )
+    )
 
 
 def test_accepting_plugins_returns_willing_plugins_in_order():
@@ -49,76 +53,46 @@ def test_duplicate_plugin_name_rejected():
         registry.register(NoopPlugin("a"))
 
 
-def test_plugin_hooks_are_wired_on_register():
+def test_decorated_hook_handlers_are_wired_on_register():
     hooks = HookBus()
     registry = PluginRegistry(hooks)
-    events: list[str] = []
+    events: list = []
 
     class TappingPlugin(NoopPlugin):
-        @property
-        def hooks(self):
-            async def on_started(context):
-                events.append(str(context))
+        @hook("ingestion_started")
+        async def on_started(self, payload: IngestionStartedPayload) -> None:
+            events.append(payload["context"])
 
-            return {"ingestion.started": on_started}
-
+    context = make_context()
     registry.register(TappingPlugin("t"))
+    emit_started(hooks, context)
 
-    asyncio.run(hooks.emit("ingestion.started", context="ctx-1"))
-
-    assert events == ["ctx-1"]
-
-
-def make_chunk(plugin: str = "table") -> RetrievedChunk:
-    return RetrievedChunk(
-        chunk_id="chunk-1",
-        source_id="source-1",
-        plugin=plugin,
-        text="original text",
-        score=0.9,
-    )
+    assert events == [context]
 
 
-def test_finalize_routes_to_producing_plugin():
+def test_decorated_handlers_receieve_runtime():
     hooks = HookBus()
     registry = PluginRegistry(hooks)
-    finalized_events: list[RetrievedChunk] = []
+    seen: list = []
 
-    class MarkingPlugin(NoopPlugin):
-        async def finalize(self, query, chunk, runtime):
-            return replace(chunk, text=f"{chunk.text} [finalized]")
+    class RuntimeSpyPlugin(NoopPlugin):
 
-    registry.register(MarkingPlugin("m"))
+        @hook("ingestion_started")
+        async def on_started(self, payload: IngestionStartedPayload) -> None:
+            seen.append(payload["runtime"])
 
-    async def on_finalized(query, chunk):
-        finalized_events.append(chunk)
+    registry.register(RuntimeSpyPlugin("spy"))
+    context = make_context()
+    emit_started(hooks, context)
 
-    hooks.register(HOOK_CHUNK_FINALIZED, on_finalized)
-
-    runtime = FinalizeRuntime(llm=FakeLLM(), hooks=hooks)
-
-    result = asyncio.run(registry.finalize("q", make_chunk("m"), runtime))
-
-    assert result.text == "original text [finalized]"
-    assert len(finalized_events) == 1
-    assert finalized_events[0].text == "original text [finalized]"
+    assert len(seen) == 1
+    assert seen[0].context is context
 
 
-def test_finalize_unknown_plugin_is_passthrough():
-    hooks = HookBus()
-    registry = PluginRegistry(hooks)
-    registry.register(NoopPlugin("t"))
-    emitted: list[dict] = []
+def test_plugin_for_returns_registered_plugin():
+    registry = PluginRegistry(HookBus())
+    plugin = NoopPlugin("a")
+    registry.register(plugin)
 
-    async def on_finalized(**payload):
-        emitted.append(payload)
-
-    hooks.register(HOOK_CHUNK_FINALIZED, on_finalized)
-
-    runtime = FinalizeRuntime(llm=FakeLLM(), hooks=hooks)
-    chunk = make_chunk("unknown")
-
-    result = asyncio.run(registry.finalize("q", chunk, runtime))
-
-    assert result is chunk
-    assert emitted == []
+    assert registry.plugin_for("a") is plugin
+    assert registry.plugin_for("missing") is None

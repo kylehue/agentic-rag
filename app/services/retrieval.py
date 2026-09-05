@@ -1,48 +1,80 @@
-import asyncio
+import logging
 
+from app.llm.base import LLMProvider
 from app.models.chunk import RetrievedChunk
-from app.plugin.hooks import HookBus, HOOK_RETRIEVAL_COMPLETED
-from app.plugin.registry import PluginRegistry
-from app.plugin.runtime import FinalizeRuntime
+from app.plugin.context import RetrievalContext
+from app.plugin.hooks import (
+    HookBus,
+    RetrievalCompletedPayload,
+    RetrievalFinalizePayload,
+)
+from app.plugin.runtime import RetrievalRuntime
 from app.retrievers.base import Retriever
+
+logger = logging.getLogger(__name__)
 
 
 class RetrievalService:
-    """Retrieves chunks and routes them to their plugin's finalizer."""
+    """Retrieves chunks and finalizes them through the retrieval hooks.
+
+    Each retrieved chunk is offered to the `retrieval_finalize` hook.
+    Plugins that want query-aware enrichment handle this hook, recognize
+    their own chunks via `chunk.plugin`, and return an enriched
+    replacement (or None to leave the chunk unchanged).
+    """
 
     def __init__(
         self,
         *,
         retriever: Retriever,
-        registry: PluginRegistry,
-        finalize_runtime: FinalizeRuntime,
+        llm: LLMProvider,
         hooks: HookBus,
     ) -> None:
         self._retriever = retriever
-        self._registry = registry
-        self._finalize_runtime = finalize_runtime
+        self._llm = llm
         self._hooks = hooks
 
     async def retrieve(self, user_query: str) -> list[RetrievedChunk]:
         """Retrieves chunks given a user query."""
 
+        context = RetrievalContext(user_query=user_query)
+
+        runtime = RetrievalRuntime(
+            context=context,
+            hooks=self._hooks,
+            llm=self._llm,
+        )
+
         chunks = await self._retriever.retrieve(user_query)
 
-        results = await asyncio.gather(
-            *(
-                self._registry.finalize(
-                    user_query,
-                    chunk,
-                    self._finalize_runtime,
-                )
-                for chunk in chunks
+        finalized: list[RetrievedChunk] = []
+
+        for chunk in chunks:
+            replacements = await self._hooks.emit(
+                "retrieval_finalize",
+                RetrievalFinalizePayload(
+                    context=context,
+                    chunk=chunk,
+                    runtime=runtime,
+                ),
             )
-        )
+
+            replacement = next(
+                (result for result in reversed(replacements) if result is not None),
+                None,
+            )
+
+            finalized.append(
+                replacement if replacement is not None else chunk
+            )
 
         await self._hooks.emit(
-            HOOK_RETRIEVAL_COMPLETED,
-            query=user_query,
-            chunks=list(results),
+            "retrieval_completed",
+            RetrievalCompletedPayload(
+                context=context,
+                chunks=finalized,
+                runtime=runtime,
+            ),
         )
 
-        return list(results)
+        return finalized

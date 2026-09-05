@@ -9,7 +9,6 @@ from app.embedders.gemini import GeminiEmbedder
 
 from app.plugin.hooks import HookBus
 from app.plugin.registry import PluginRegistry
-from app.plugin.runtime import FinalizeRuntime
 
 from app.retrievers.vector import VectorRetriever
 from app.retrievers.sparse import SparseRetriever
@@ -78,15 +77,9 @@ ingestion_service = IngestionService(
     file_storage=file_storage,
 )
 
-finalize_runtime = FinalizeRuntime(
-    llm=llm,
-    hooks=hooks,
-)
-
 retrieval_service = RetrievalService(
     retriever=hybrid_retriever,
-    registry=plugin_registry,
-    finalize_runtime=finalize_runtime,
+    llm=llm,
     hooks=hooks,
 )
 

@@ -2,8 +2,6 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from unstructured.documents.elements import Element
-
 
 @dataclass
 class IngestedChunk:
@@ -20,7 +18,6 @@ class IngestedChunk:
     # --- chunk info ---
     text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
-    orig_elements: list[Element] | None = None  # original Unstructured.io elements
 
 
 @dataclass

@@ -1,57 +1,90 @@
 import asyncio
 
-from app.plugin.hooks import HookBus, HOOK_CHUNK_SAVED, HOOK_FILE_EMITTED
+from app.models.chunk import IngestedChunk
+from app.plugin.hooks import (
+    HookBus,
+    IngestionCompletedPayload,
+    IngestionProcessPayload,
+)
+
+from fakes import build_runtime, make_context
 
 
 def test_emit_without_handlers_returns_empty():
     bus = HookBus()
-    assert asyncio.run(bus.emit(HOOK_CHUNK_SAVED, chunk="x")) == []
+    context = make_context()
+    parts = build_runtime(context)
+    payload = IngestionCompletedPayload(
+        context=context,
+        chunks=[],
+        runtime=parts.runtime,
+    )
+    assert asyncio.run(bus.emit("ingestion_completed", payload)) == []
 
 
 def test_emit_passes_payload_to_handler():
     bus = HookBus()
-    seen: dict = {}
+    seen: list = []
 
-    async def handler(context=None, chunk=None):
-        seen["context"] = context
-        seen["chunk"] = chunk
+    async def handler(payload):
+        seen.append(payload)
 
-    bus.register(HOOK_CHUNK_SAVED, handler)
+    bus.register("ingestion_completed", handler)
 
-    asyncio.run(bus.emit(HOOK_CHUNK_SAVED, context="ctx", chunk="chunk-1"))
+    context = make_context()
+    parts = build_runtime(context)
+    chunk = IngestedChunk(plugin="text", text="c1")
+    payload = IngestionCompletedPayload(
+        context=context,
+        chunks=[chunk],
+        runtime=parts.runtime,
+    )
+    asyncio.run(bus.emit("ingestion_completed", payload))
 
-    assert seen == {"context": "ctx", "chunk": "chunk-1"}
+    assert seen == [payload]
+    assert seen[0]["context"] is context
+    assert seen[0]["chunks"] == [chunk]
 
 
-def test_emit_runs_all_handlers():
+def test_emit_returns_handler_results_in_registration_order():
     bus = HookBus()
-    events: list[str] = []
 
-    async def first(**payload):
-        events.append("first")
+    async def first(payload):
+        return ["chunk-a"]
 
-    async def second(**payload):
-        events.append("second")
+    async def second(payload):
+        return ["chunk-b", "chunk-c"]
 
-    bus.register(HOOK_FILE_EMITTED, first)
-    bus.register(HOOK_FILE_EMITTED, second)
+    bus.register("ingestion_process", first)
+    bus.register("ingestion_process", second)
 
-    asyncio.run(bus.emit(HOOK_FILE_EMITTED, emitted_file="f"))
+    context = make_context()
+    parts = build_runtime(context)
+    payload = IngestionProcessPayload(context=context, runtime=parts.runtime)
 
-    assert set(events) == {"first", "second"}
+    results = asyncio.run(bus.emit("ingestion_process", payload))
+
+    assert results == [["chunk-a"], ["chunk-b", "chunk-c"]]
 
 
 def test_unregister_removes_handler():
     bus = HookBus()
-    events: list[str] = []
+    events: list = []
 
-    async def handler(**payload):
+    async def handler(payload):
         events.append("hit")
 
-    bus.register(HOOK_CHUNK_SAVED, handler)
-    bus.unregister(HOOK_CHUNK_SAVED, handler)
+    bus.register("file_emitted", handler)
+    bus.unregister("file_emitted", handler)
 
-    asyncio.run(bus.emit(HOOK_CHUNK_SAVED, chunk="x"))
+    context = make_context()
+    parts = build_runtime(context)
+    asyncio.run(
+        bus.emit(
+            "file_emitted",
+            {"context": context, "emitted_file": object(), "runtime": parts.runtime},
+        )
+    )
 
     assert events == []
 
@@ -59,10 +92,10 @@ def test_unregister_removes_handler():
 def test_handlers_lists_registered_handlers():
     bus = HookBus()
 
-    async def handler(**payload):
+    async def handler(payload):
         pass
 
-    bus.register(HOOK_CHUNK_SAVED, handler)
+    bus.register("ingestion_completed", handler)
 
-    assert bus.handlers(HOOK_CHUNK_SAVED) == [handler]
+    assert bus.handlers("ingestion_completed") == [handler]
     assert bus.handlers("unknown.hook") == []

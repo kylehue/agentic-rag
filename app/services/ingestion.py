@@ -15,7 +15,6 @@ from app.plugin.context import IngestionContext, IngestionFile
 from app.plugin.hooks import (
     FileCompletedPayload,
     FileSubprocessedPayload,
-    HookBus,
     IngestionCompletedPayload,
     IngestionProcessPayload,
     IngestionStartedPayload,
@@ -37,7 +36,6 @@ class IngestionService:
     def __init__(
         self,
         *,
-        hooks: HookBus,
         registry: PluginRegistry,
         llm: LLMProvider,
         embedder: Embedder,
@@ -45,8 +43,8 @@ class IngestionService:
         sql_storage: SqlStorage,
         file_storage: FileStorage,
     ) -> None:
-        self._hooks = hooks
         self._registry = registry
+        self._hooks = registry.hooks
         self._llm = llm
         self._embedder = embedder
         self._vector_storage = vector_storage

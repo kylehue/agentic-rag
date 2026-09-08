@@ -10,7 +10,6 @@ from app.core.config import settings
 from app.errors.document import InvalidDocumentError
 from app.plugin.base import Plugin
 from app.plugin.hooks import (
-    HookBus,
     IngestionProcessPayload,
     hook,
 )
@@ -177,18 +176,17 @@ class ChainEmitterPlugin(Plugin):
         return [IngestedChunk(plugin=self.name, text=f"level {level}")]
 
 
-def build_service(tmp_path, *, llm=None, hooks=None, plugins=None):
+def build_service(tmp_path, *, llm=None, plugins=None):
     llm = llm if llm is not None else FakeLLM()
     sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
     file_storage = LocalFileStorage(storage_dir=tmp_path / "file")
     vector_storage = FakeVectorStorage()
-    hooks = hooks if hooks is not None else HookBus()
-    registry = PluginRegistry(hooks)
+    registry = PluginRegistry()
+    hooks = registry.hooks
     for plugin in (plugins if plugins is not None else [TextPlugin(), TablePlugin()]):
         registry.register(plugin)
 
     service = IngestionService(
-        hooks=hooks,
         registry=registry,
         llm=llm,
         embedder=FakeEmbedder(),

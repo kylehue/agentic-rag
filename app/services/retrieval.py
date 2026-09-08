@@ -2,10 +2,10 @@ from app.llm.base import LLMProvider
 from app.models.chunk import RetrievedChunk
 from app.plugin.context import RetrievalContext
 from app.plugin.hooks import (
-    HookBus,
     RetrievalCompletedPayload,
     RetrievalFinalizePayload,
 )
+from app.plugin.registry import PluginRegistry
 from app.plugin.runtime import RetrievalRuntime
 from app.retrievers.base import Retriever
 
@@ -18,11 +18,11 @@ class RetrievalService:
         *,
         retriever: Retriever,
         llm: LLMProvider,
-        hooks: HookBus,
+        registry: PluginRegistry,
     ) -> None:
         self._retriever = retriever
         self._llm = llm
-        self._hooks = hooks
+        self._hooks = registry.hooks
 
     async def retrieve(self, user_query: str) -> list[RetrievedChunk]:
         """Retrieves chunks given a user query."""

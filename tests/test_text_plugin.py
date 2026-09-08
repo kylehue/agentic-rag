@@ -52,9 +52,14 @@ TABLE_B_NO_HEADER = (
 )
 
 
-def run_process(context, runtime, plugin: TextPlugin, partition_result):
-    """Register the plugin on the runtime's bus and fire the process hook."""
-    PluginRegistry(runtime.hooks).register(plugin)
+def run_process(context, plugin: TextPlugin, partition_result, **runtime_kwargs):
+    """Wire the plugin through a registry and fire the process hook.
+
+    Returns (chunks, parts); parts carries the runtime and the fakes.
+    """
+    registry = PluginRegistry()
+    registry.register(plugin)
+    parts = build_runtime(context, hooks=registry.hooks, **runtime_kwargs)
 
     async def flow():
         with patch.object(
@@ -62,9 +67,9 @@ def run_process(context, runtime, plugin: TextPlugin, partition_result):
             "partition",
             return_value=partition_result,
         ):
-            results = await runtime.hooks.trigger(
+            results = await parts.runtime.hooks.trigger(
                 "ingestion_process",
-                IngestionProcessPayload(context=context, runtime=runtime),
+                IngestionProcessPayload(context=context, runtime=parts.runtime),
             )
         chunks = []
         for result in results:
@@ -72,7 +77,7 @@ def run_process(context, runtime, plugin: TextPlugin, partition_result):
                 chunks.extend(result)
         return chunks
 
-    return asyncio.run(flow())
+    return asyncio.run(flow()), parts
 
 
 def read_csv(csv_bytes):
@@ -87,10 +92,8 @@ def emitted_csvs(runtime):
 def test_text_only_produces_chunks():
     elements = [make_text_element("Just plain text.", page_number=1)]
     context = make_context()
-    parts = build_runtime(context)
-
-    chunks = run_process(
-        context, parts.runtime, TextPlugin(), partition_result=elements
+    chunks, parts = run_process(
+        context, TextPlugin(), partition_result=elements
     )
 
     assert len(chunks) == 1
@@ -108,10 +111,8 @@ def test_title_strategy_still_used():
         make_text_element("Body under the section."),
     ]
     context = make_context()
-    parts = build_runtime(context)
-
-    chunks = run_process(
-        context, parts.runtime, TextPlugin(), partition_result=elements
+    chunks, parts = run_process(
+        context, TextPlugin(), partition_result=elements
     )
 
     assert len(chunks) == 1
@@ -125,10 +126,8 @@ def test_consecutive_tables_with_page_break_merge_into_one_csv():
         make_table_element(TABLE_A_REPEAT_HEADER, page_number=2),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
-
-    chunks = run_process(
-        context, parts.runtime, TextPlugin(), partition_result=elements
+    chunks, parts = run_process(
+        context, TextPlugin(), partition_result=elements
     )
 
     assert chunks == []
@@ -156,9 +155,8 @@ def test_content_between_tables_breaks_the_run():
         make_table_element(TABLE_A, page_number=2),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    run_process(context, parts.runtime, TextPlugin(), partition_result=elements)
+    _, parts = run_process(context, TextPlugin(), partition_result=elements)
 
     csvs = emitted_csvs(parts.runtime)
     assert len(csvs) == 2
@@ -176,9 +174,8 @@ def test_different_schema_tables_stay_separate():
         make_table_element(TABLE_B, page_number=2),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    run_process(context, parts.runtime, TextPlugin(), partition_result=elements)
+    _, parts = run_process(context, TextPlugin(), partition_result=elements)
 
     csvs = emitted_csvs(parts.runtime)
     assert len(csvs) == 2
@@ -196,9 +193,8 @@ def test_missing_header_continuation_with_same_types_merges():
         make_table_element(TABLE_A_NO_HEADER, page_number=2),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    run_process(context, parts.runtime, TextPlugin(), partition_result=elements)
+    _, parts = run_process(context, TextPlugin(), partition_result=elements)
 
     csvs = emitted_csvs(parts.runtime)
     assert len(csvs) == 1
@@ -219,9 +215,8 @@ def test_missing_header_continuation_with_conflicting_types_stays_separate():
         make_table_element(TABLE_B_NO_HEADER, page_number=2),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    run_process(context, parts.runtime, TextPlugin(), partition_result=elements)
+    _, parts = run_process(context, TextPlugin(), partition_result=elements)
 
     csvs = emitted_csvs(parts.runtime)
     assert len(csvs) == 2
@@ -236,9 +231,8 @@ def test_page_furniture_between_tables_does_not_break_the_run():
         make_table_element(TABLE_A_REPEAT_HEADER, page_number=2),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    run_process(context, parts.runtime, TextPlugin(), partition_result=elements)
+    _, parts = run_process(context, TextPlugin(), partition_result=elements)
 
     csvs = emitted_csvs(parts.runtime)
     assert len(csvs) == 1
@@ -261,10 +255,8 @@ def test_image_is_emitted_as_a_file_and_indexed_by_a_text_chunk():
         make_text_element("The image is followed by more text.", page_number=1),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
-
-    chunks = run_process(
-        context, parts.runtime, TextPlugin(), partition_result=elements
+    chunks, parts = run_process(
+        context, TextPlugin(), partition_result=elements
     )
 
     image_chunks = [c for c in chunks if "A chart of sales." in c.text]
@@ -296,10 +288,8 @@ def test_image_without_extracted_bytes_emits_and_indexes_nothing():
     elements[1].metadata.image_base64 = None
 
     context = make_context(filename="report.docx")
-    parts = build_runtime(context)
-
-    chunks = run_process(
-        context, parts.runtime, TextPlugin(), partition_result=elements
+    chunks, parts = run_process(
+        context, TextPlugin(), partition_result=elements
     )
 
     # Only the two text chunks remain; no image chunk, no emitted image file.
@@ -310,10 +300,8 @@ def test_image_without_extracted_bytes_emits_and_indexes_nothing():
 def test_table_only_document_emits_csv_without_description():
     elements = [make_table_element(TABLE_A, page_number=1)]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
-
-    chunks = run_process(
-        context, parts.runtime, TextPlugin(), partition_result=elements
+    chunks, parts = run_process(
+        context, TextPlugin(), partition_result=elements
     )
 
     assert chunks == []
@@ -331,9 +319,8 @@ def test_emitted_csv_description_carries_nearby_text():
         make_text_element("The figures include all departments.", page_number=1),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    run_process(context, parts.runtime, TextPlugin(), partition_result=elements)
+    _, parts = run_process(context, TextPlugin(), partition_result=elements)
 
     emitted = parts.runtime.pop_emitted_files()
     assert len(emitted) == 1
@@ -349,9 +336,8 @@ def test_emitted_csv_description_includes_source_description():
         filename="report.pdf",
         source_description="Q3 sales report for the Nordics region.",
     )
-    parts = build_runtime(context)
 
-    run_process(context, parts.runtime, TextPlugin(), partition_result=elements)
+    _, parts = run_process(context, TextPlugin(), partition_result=elements)
 
     emitted = parts.runtime.pop_emitted_files()
     assert len(emitted) == 1
@@ -366,9 +352,8 @@ def test_description_is_bounded_by_neighbouring_tables():
         make_text_element("Closing note after everything.", page_number=1),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    run_process(context, parts.runtime, TextPlugin(), partition_result=elements)
+    _, parts = run_process(context, TextPlugin(), partition_result=elements)
 
     emitted = parts.runtime.pop_emitted_files()
     assert len(emitted) == 2
@@ -396,11 +381,9 @@ def test_ignore_images_skips_image_files_and_chunks():
         make_text_element("The image is followed by more text.", page_number=1),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    chunks = run_process(
+    chunks, parts = run_process(
         context,
-        parts.runtime,
         TextPlugin(ignore_images=True),
         partition_result=elements,
     )
@@ -423,11 +406,9 @@ def test_ignore_images_still_separates_table_runs():
         make_table_element(TABLE_A, page_number=2),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    run_process(
+    _, parts = run_process(
         context,
-        parts.runtime,
         TextPlugin(ignore_images=True),
         partition_result=elements,
     )
@@ -447,11 +428,9 @@ def test_ignore_tables_skips_csv_emission():
         make_table_element(TABLE_A, page_number=1),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    chunks = run_process(
+    chunks, parts = run_process(
         context,
-        parts.runtime,
         TextPlugin(ignore_tables=True),
         partition_result=elements,
     )
@@ -469,8 +448,9 @@ def test_ignore_tables_skips_csv_emission():
 def partition_kwargs_for(plugin: TextPlugin, elements) -> dict:
     """Run the plugin on a stubbed partition and return the kwargs it used."""
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
-    PluginRegistry(parts.runtime.hooks).register(plugin)
+    registry = PluginRegistry()
+    registry.register(plugin)
+    parts = build_runtime(context, hooks=registry.hooks)
 
     async def flow():
         with patch.object(text_module, "partition") as mock_partition:
@@ -511,11 +491,9 @@ def test_defaults_manage_images_and_tables():
         make_image_element(b"image bytes", page_number=1),
     ]
     context = make_context(filename="report.pdf")
-    parts = build_runtime(context)
 
-    run_process(
+    _, parts = run_process(
         context,
-        parts.runtime,
         TextPlugin(),
         partition_result=elements,
     )
@@ -526,8 +504,9 @@ def test_defaults_manage_images_and_tables():
 
 def test_rejects_files_it_does_not_accept():
     context = make_context(filename="sales.xlsx")
-    parts = build_runtime(context)
-    plugin = TextPlugin()
+    registry = PluginRegistry()
+    registry.register(TextPlugin())
+    parts = build_runtime(context, hooks=registry.hooks)
 
     def boom(*args, **kwargs):
         raise AssertionError("partition should not be called for rejected files")

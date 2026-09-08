@@ -33,7 +33,7 @@ def emit_started(hooks: HookBus, context) -> None:
 
 
 def test_accepting_plugins_returns_willing_plugins_in_order():
-    registry = PluginRegistry(HookBus())
+    registry = PluginRegistry()
     first = NoopPlugin("first")
     second = NoopPlugin("second", accepts_all=False)
     third = NoopPlugin("third")
@@ -46,7 +46,7 @@ def test_accepting_plugins_returns_willing_plugins_in_order():
 
 
 def test_duplicate_plugin_name_rejected():
-    registry = PluginRegistry(HookBus())
+    registry = PluginRegistry()
     registry.register(NoopPlugin("a"))
 
     with pytest.raises(ValueError):
@@ -54,8 +54,7 @@ def test_duplicate_plugin_name_rejected():
 
 
 def test_decorated_hook_handlers_are_wired_on_register():
-    hooks = HookBus()
-    registry = PluginRegistry(hooks)
+    registry = PluginRegistry()
     events: list = []
 
     class TappingPlugin(NoopPlugin):
@@ -65,14 +64,13 @@ def test_decorated_hook_handlers_are_wired_on_register():
 
     context = make_context()
     registry.register(TappingPlugin("t"))
-    emit_started(hooks, context)
+    emit_started(registry.hooks, context)
 
     assert events == [context]
 
 
 def test_decorated_handlers_receieve_runtime():
-    hooks = HookBus()
-    registry = PluginRegistry(hooks)
+    registry = PluginRegistry()
     seen: list = []
 
     class RuntimeSpyPlugin(NoopPlugin):
@@ -83,14 +81,14 @@ def test_decorated_handlers_receieve_runtime():
 
     registry.register(RuntimeSpyPlugin("spy"))
     context = make_context()
-    emit_started(hooks, context)
+    emit_started(registry.hooks, context)
 
     assert len(seen) == 1
     assert seen[0].context is context
 
 
 def test_plugin_for_returns_registered_plugin():
-    registry = PluginRegistry(HookBus())
+    registry = PluginRegistry()
     plugin = NoopPlugin("a")
     registry.register(plugin)
 

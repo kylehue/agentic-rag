@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from app.api_schemas.chunk import RetrievedChunkSchema
 from app.models.chunk import RetrievedChunk
 from app.plugin.base import Plugin
-from app.plugin.hooks import HookBus, RetrievalFinalizePayload, hook
+from app.plugin.hooks import RetrievalFinalizePayload, hook
 from app.plugin.registry import PluginRegistry
 from app.retrievers.base import Retriever
 from app.services.retrieval import RetrievalService
@@ -57,21 +57,20 @@ def make_chunk(plugin: str, chunk_id: str = "c1") -> RetrievedChunk:
     )
 
 
-def build_service(hooks, retriever):
+def build_service(registry, retriever):
     return RetrievalService(
         retriever=retriever,
         llm=FakeLLM(),
-        hooks=hooks,
+        registry=registry,
     )
 
 
 def test_finalize_hook_enriches_only_owning_chunks():
-    hooks = HookBus()
-    registry = PluginRegistry(hooks)
+    registry = PluginRegistry()
     registry.register(EnrichingPlugin("enricher"))
 
     service = build_service(
-        hooks,
+        registry,
         FakeRetriever([make_chunk("enricher", "c1"), make_chunk("text", "c2")]),
     )
 
@@ -82,8 +81,10 @@ def test_finalize_hook_enriches_only_owning_chunks():
 
 
 def test_chunk_without_finalizing_plugin_passes_through():
-    hooks = HookBus()
-    service = build_service(hooks, FakeRetriever([make_chunk("unknown")]))
+    service = build_service(
+        PluginRegistry(),
+        FakeRetriever([make_chunk("unknown")]),
+    )
 
     results = asyncio.run(service.retrieve("q"))
 
@@ -123,15 +124,15 @@ def test_retrieved_chunk_schema_rejects_missing_origin():
 
 
 def test_retrieval_completed_hook_fires_with_finalized_chunks():
-    hooks = HookBus()
+    registry = PluginRegistry()
     events: list[dict] = []
 
     async def on_completed(payload):
         events.append(payload)
 
-    hooks.register("retrieval_completed", on_completed)
+    registry.hooks.register("retrieval_completed", on_completed)
 
-    service = build_service(hooks, FakeRetriever([make_chunk("text")]))
+    service = build_service(registry, FakeRetriever([make_chunk("text")]))
 
     asyncio.run(service.retrieve("q"))
 

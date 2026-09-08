@@ -48,14 +48,19 @@ def csv_context(
     )
 
 
-def run_process(context, runtime, plugin: TablePlugin):
-    """Register the plugin on the runtime's bus and fire the process hook."""
-    PluginRegistry(runtime.hooks).register(plugin)
+def run_process(context, plugin: TablePlugin, **runtime_kwargs):
+    """Wire the plugin through a registry and fire the process hook.
+
+    Returns (chunks, parts); parts carries the runtime and the fakes.
+    """
+    registry = PluginRegistry()
+    registry.register(plugin)
+    parts = build_runtime(context, hooks=registry.hooks, **runtime_kwargs)
 
     async def flow():
-        results = await runtime.hooks.trigger(
+        results = await parts.runtime.hooks.trigger(
             "ingestion_process",
-            IngestionProcessPayload(context=context, runtime=runtime),
+            IngestionProcessPayload(context=context, runtime=parts.runtime),
         )
         chunks = []
         for result in results:
@@ -63,16 +68,14 @@ def run_process(context, runtime, plugin: TablePlugin):
                 chunks.extend(result)
         return chunks
 
-    return asyncio.run(flow())
+    return asyncio.run(flow()), parts
 
 
 def test_process_csv_returns_chunk_preserving_the_original_schema():
     llm = FakeLLM(json.dumps(make_analysis()))
-    plugin = TablePlugin()
     context = csv_context()
-    parts = build_runtime(context, llm=llm)
 
-    chunks = run_process(context, parts.runtime, plugin)
+    chunks, parts = run_process(context, TablePlugin(), llm=llm)
 
     assert len(chunks) == 1
     chunk = chunks[0]
@@ -141,15 +144,13 @@ def test_process_xlsx_returns_chunk_per_sheet():
             }
         )
     )
-    plugin = TablePlugin()
     context = csv_context(
         filename="book.xlsx",
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         source_bytes=buffer.getvalue(),
     )
-    parts = build_runtime(context, llm=llm)
 
-    chunks = run_process(context, parts.runtime, plugin)
+    chunks, parts = run_process(context, TablePlugin(), llm=llm)
 
     assert len(chunks) == 2
     # Sheet names are preserved verbatim from the workbook.
@@ -167,11 +168,9 @@ def test_process_xlsx_returns_chunk_per_sheet():
 
 def test_llm_failure_falls_back_to_raw_data():
     llm = FakeLLM("this is not json")
-    plugin = TablePlugin()
     context = csv_context()
-    parts = build_runtime(context, llm=llm)
 
-    chunks = run_process(context, parts.runtime, plugin)
+    chunks, parts = run_process(context, TablePlugin(), llm=llm)
 
     assert len(chunks) == 1
     assert "Table: sales" in chunks[0].text
@@ -181,13 +180,11 @@ def test_llm_failure_falls_back_to_raw_data():
 
 def test_source_description_is_passed_to_the_llm():
     llm = FakeLLM(json.dumps(make_analysis()))
-    plugin = TablePlugin()
     context = csv_context(
         source_description="This table was extracted from a PDF about Q3 sales.",
     )
-    parts = build_runtime(context, llm=llm)
 
-    run_process(context, parts.runtime, plugin)
+    run_process(context, TablePlugin(), llm=llm)
 
     assert len(llm.prompts) == 1
     assert "This table was extracted from a PDF about Q3 sales." in llm.prompts[0]
@@ -195,11 +192,9 @@ def test_source_description_is_passed_to_the_llm():
 
 def test_no_source_description_leaves_prompt_unchanged():
     llm = FakeLLM(json.dumps(make_analysis()))
-    plugin = TablePlugin()
     context = csv_context()
-    parts = build_runtime(context, llm=llm)
 
-    run_process(context, parts.runtime, plugin)
+    run_process(context, TablePlugin(), llm=llm)
 
     assert len(llm.prompts) == 1
     assert "Additional context about the source document" not in llm.prompts[0]
@@ -207,22 +202,18 @@ def test_no_source_description_leaves_prompt_unchanged():
 
 def test_blank_source_description_is_ignored():
     llm = FakeLLM(json.dumps(make_analysis()))
-    plugin = TablePlugin()
     context = csv_context(source_description="   ")
-    parts = build_runtime(context, llm=llm)
 
-    run_process(context, parts.runtime, plugin)
+    run_process(context, TablePlugin(), llm=llm)
 
     assert "Additional context about the source document" not in llm.prompts[0]
 
 
 def test_rejects_unsupported_spreadsheet_extension():
     llm = FakeLLM("")
-    plugin = TablePlugin()
     context = csv_context(filename="data.tsv", source_bytes=b"a\tb\n1\t2")
-    parts = build_runtime(context, llm=llm)
 
-    chunks = run_process(context, parts.runtime, plugin)
+    chunks, parts = run_process(context, TablePlugin(), llm=llm)
 
     assert chunks == []
     assert llm.prompts == []

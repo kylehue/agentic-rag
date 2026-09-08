@@ -4,12 +4,20 @@ from app.plugin.hooks import HookBus
 
 
 class PluginRegistry:
-    """Holds registered plugins and wires their decorated hook handlers into the bus."""
+    """Holds registered plugins and wires their decorated hook handlers into the bus.
 
-    def __init__(self, hooks: HookBus) -> None:
-        self._hooks = hooks
+    The registry owns the pipeline's shared `HookBus`; services take the
+    registry and reach the bus through it (`registry.hooks`).
+    """
+
+    def __init__(self) -> None:
+        self._hooks = HookBus()
         self._plugins: list[Plugin] = []
         self._plugins_by_name: dict[str, Plugin] = {}
+
+    @property
+    def hooks(self) -> HookBus:
+        return self._hooks
 
     def register(self, plugin: Plugin) -> None:
         if plugin.name in self._plugins_by_name:

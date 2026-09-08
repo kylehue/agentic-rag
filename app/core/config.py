@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "auto"
     OPENAI_BASE_URL: str = "https://llmrouter.boyemma.com/v1"
     EMBEDDING_BATCH_SIZE: int = 100
-    SQL_LOCAL_STORAGE_DIR: str = ".storage/sql/data.sqlite3"
+    SQL_LOCAL_STORAGE_DIR: str = "./.storage/sql"
     FILE_LOCAL_STORAGE_DIR: str = "./.storage/file"
     VECTOR_LOCAL_STORAGE_DIR: str = "./.storage/vector"
     VECTOR_COLLECTION_NAME: str = "document_chunks"

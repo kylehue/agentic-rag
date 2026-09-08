@@ -1,6 +1,10 @@
+from app.embedders.base import Embedder
 from app.llm.base import LLMProvider
-from app.plugin.context import EmittedFile, IngestionContext, RetrievalContext
+from app.plugin.context import IngestionContext, IngestionFile, RetrievalContext
 from app.plugin.hooks import FileEmittedPayload, HookBus
+from app.store_file.base import FileStorage
+from app.store_sql.base import SqlStorage
+from app.store_vector.base import VectorStorage
 
 
 class IngestionRuntime:
@@ -8,8 +12,10 @@ class IngestionRuntime:
 
     Created by the IngestionService for each ingestion (including
     subprocessed files). Plugins use it to reach the shared services
-    (`llm`, `hooks`) and to emit files for subprocess. It has no storage
-    capabilities: the ingestion service persists everything.
+    (`llm`, `embedder`, the storages, `hooks`) and to emit files for
+    subprocess. Chunk and source persistence stays with the ingestion
+    service; the storages are exposed for plugins that need to read or
+    write other content.
     """
 
     def __init__(
@@ -18,11 +24,19 @@ class IngestionRuntime:
         context: IngestionContext,
         hooks: HookBus,
         llm: LLMProvider,
+        embedder: Embedder,
+        vector_storage: VectorStorage,
+        sql_storage: SqlStorage,
+        file_storage: FileStorage,
     ) -> None:
         self._context = context
         self._hooks = hooks
         self._llm = llm
-        self._emitted: list[EmittedFile] = []
+        self._embedder = embedder
+        self._vector_storage = vector_storage
+        self._sql_storage = sql_storage
+        self._file_storage = file_storage
+        self._emitted: list[IngestionFile] = []
 
     @property
     def context(self) -> IngestionContext:
@@ -36,21 +50,44 @@ class IngestionRuntime:
     def llm(self) -> LLMProvider:
         return self._llm
 
+    @property
+    def embedder(self) -> Embedder:
+        return self._embedder
+
+    @property
+    def vector_storage(self) -> VectorStorage:
+        return self._vector_storage
+
+    @property
+    def sql_storage(self) -> SqlStorage:
+        return self._sql_storage
+
+    @property
+    def file_storage(self) -> FileStorage:
+        return self._file_storage
+
     async def emit_file(
         self,
         filename: str,
         content_type: str,
         file_bytes: bytes,
-    ) -> EmittedFile:
-        """Emit a file so it is ingested as a subprocess by the plugins that accept it."""
-        emitted = EmittedFile(
+        description: str | None = None,
+    ) -> IngestionFile:
+        """Emit a file so it is ingested as a subprocess by the plugins that accept it.
+
+        ``description`` is optional context about the emitted file; plugins
+        handling it read it back as ``context.file.description``.
+        """
+        # The emitted file gets its own auto-generated source_id; its
+        # lineage to this run is established by the service (parent_file).
+        emitted = IngestionFile(
             filename=filename,
             content_type=content_type,
             file_bytes=file_bytes,
-            source_id=self._context.source_id,
+            description=description,
         )
         self._emitted.append(emitted)
-        await self._hooks.emit(
+        await self._hooks.trigger(
             "file_emitted",
             FileEmittedPayload(
                 context=self._context,
@@ -60,7 +97,7 @@ class IngestionRuntime:
         )
         return emitted
 
-    def take_emitted_files(self) -> list[EmittedFile]:
+    def pop_emitted_files(self) -> list[IngestionFile]:
         """Pop all emitted files. Called by the ingestion service."""
         emitted = self._emitted
         self._emitted = []

@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, TypedDict, overload
 
 from app.models.chunk import IngestedChunk, RetrievedChunk
-from app.plugin.context import EmittedFile, IngestionContext, RetrievalContext
+from app.plugin.context import IngestionContext, IngestionFile, RetrievalContext
 
 if TYPE_CHECKING:
     from app.plugin.runtime import IngestionRuntime, RetrievalRuntime
@@ -16,6 +16,7 @@ INGESTION_STARTED = Literal["ingestion_started"]
 INGESTION_PROCESS = Literal["ingestion_process"]
 FILE_EMITTED = Literal["file_emitted"]
 FILE_SUBPROCESSED = Literal["file_subprocessed"]
+FILE_COMPLETED = Literal["file_completed"]
 INGESTION_COMPLETED = Literal["ingestion_completed"]
 RETRIEVAL_FINALIZE = Literal["retrieval_finalize"]
 RETRIEVAL_COMPLETED = Literal["retrieval_completed"]
@@ -35,17 +36,32 @@ class IngestionProcessPayload(TypedDict):
 
 class FileEmittedPayload(TypedDict):
     context: IngestionContext
-    emitted_file: EmittedFile
+    emitted_file: IngestionFile
     runtime: IngestionRuntime
 
 
 class FileSubprocessedPayload(TypedDict):
-    emitted_file: EmittedFile
+    emitted_file: IngestionFile
+    chunks: Sequence[IngestedChunk]
+    runtime: IngestionRuntime
+
+
+class FileCompletedPayload(TypedDict):
+    """One file (and its emitted subtree) finished processing.
+
+    Fired for every file the pipeline walks, before anything is committed.
+    ``chunks`` is the whole subtree: the file's own chunks plus every
+    descendant's.
+    """
+
+    context: IngestionContext
     chunks: Sequence[IngestedChunk]
     runtime: IngestionRuntime
 
 
 class IngestionCompletedPayload(TypedDict):
+    """The whole ingestion finished: every file processed and everything committed."""
+
     context: IngestionContext
     chunks: Sequence[IngestedChunk]
     runtime: IngestionRuntime
@@ -72,6 +88,7 @@ IngestionProcessHandler = Callable[
 ]
 FileEmittedHandler = Callable[[FileEmittedPayload], Awaitable[None]]
 FileSubprocessedHandler = Callable[[FileSubprocessedPayload], Awaitable[None]]
+FileCompletedHandler = Callable[[FileCompletedPayload], Awaitable[None]]
 IngestionCompletedHandler = Callable[[IngestionCompletedPayload], Awaitable[None]]
 RetrievalFinalizeHandler = Callable[
     [RetrievalFinalizePayload], Awaitable[RetrievedChunk | None]
@@ -125,6 +142,15 @@ def hook(
 ) -> Callable[
     [Callable[[_S, FileSubprocessedPayload], Awaitable[None]]],
     Callable[[_S, FileSubprocessedPayload], Awaitable[None]],
+]: ...
+
+
+@overload
+def hook(
+    name: FILE_COMPLETED,
+) -> Callable[
+    [Callable[[_S, FileCompletedPayload], Awaitable[None]]],
+    Callable[[_S, FileCompletedPayload], Awaitable[None]],
 ]: ...
 
 
@@ -205,58 +231,65 @@ class HookBus:
         return list(self._handlers.get(name, []))
 
     @overload
-    async def emit(
+    async def trigger(
         self,
         name: INGESTION_STARTED,
         payload: IngestionStartedPayload,
     ) -> list[None]: ...
 
     @overload
-    async def emit(
+    async def trigger(
         self,
         name: INGESTION_PROCESS,
         payload: IngestionProcessPayload,
     ) -> list[Sequence[IngestedChunk] | None]: ...
 
     @overload
-    async def emit(
+    async def trigger(
         self,
         name: FILE_EMITTED,
         payload: FileEmittedPayload,
     ) -> list[None]: ...
 
     @overload
-    async def emit(
+    async def trigger(
         self,
         name: FILE_SUBPROCESSED,
         payload: FileSubprocessedPayload,
     ) -> list[None]: ...
 
     @overload
-    async def emit(
+    async def trigger(
+        self,
+        name: FILE_COMPLETED,
+        payload: FileCompletedPayload,
+    ) -> list[None]: ...
+
+    @overload
+    async def trigger(
         self,
         name: INGESTION_COMPLETED,
         payload: IngestionCompletedPayload,
     ) -> list[None]: ...
 
     @overload
-    async def emit(
+    async def trigger(
         self,
         name: RETRIEVAL_FINALIZE,
         payload: RetrievalFinalizePayload,
     ) -> list[RetrievedChunk | None]: ...
 
     @overload
-    async def emit(
+    async def trigger(
         self,
         name: RETRIEVAL_COMPLETED,
         payload: RetrievalCompletedPayload,
     ) -> list[None]: ...
 
     @overload
-    async def emit(self, name: str, payload: Mapping[str, Any]) -> list[Any]: ...
+    async def trigger(self, name: str, payload: Mapping[str, Any]) -> list[Any]: ...
 
-    async def emit(self, name: str, payload: Mapping[str, Any]) -> list[Any]:
+    async def trigger(self, name: str, payload: Mapping[str, Any]) -> list[Any]:
         """Fire a hook and return the results of all handlers."""
         handlers = self._handlers.get(name)
         if not handlers:

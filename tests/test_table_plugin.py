@@ -23,8 +23,8 @@ def make_analysis():
                 "description": "Sales per region.",
                 "role": "fact data",
                 "schema": [
-                    {"name": "region", "description": "sales region"},
-                    {"name": "amount", "description": "total amount"},
+                    {"name": "Region", "description": "sales region"},
+                    {"name": "Amount", "description": "total amount"},
                 ],
                 "relationships": [],
             }
@@ -37,12 +37,14 @@ def csv_context(
     content_type: str = "text/csv",
     source_bytes: bytes = CSV_BYTES,
     parent_source_id: str | None = None,
+    source_description: str | None = None,
 ) -> IngestionContext:
     return make_context(
         filename=filename,
         content_type=content_type,
         source_bytes=source_bytes,
         parent_source_id=parent_source_id,
+        source_description=source_description,
     )
 
 
@@ -51,7 +53,7 @@ def run_process(context, runtime, plugin: TablePlugin):
     PluginRegistry(runtime.hooks).register(plugin)
 
     async def flow():
-        results = await runtime.hooks.emit(
+        results = await runtime.hooks.trigger(
             "ingestion_process",
             IngestionProcessPayload(context=context, runtime=runtime),
         )
@@ -64,7 +66,7 @@ def run_process(context, runtime, plugin: TablePlugin):
     return asyncio.run(flow())
 
 
-def test_process_csv_returns_chunk_with_file():
+def test_process_csv_returns_chunk_preserving_the_original_schema():
     llm = FakeLLM(json.dumps(make_analysis()))
     plugin = TablePlugin()
     context = csv_context()
@@ -79,23 +81,22 @@ def test_process_csv_returns_chunk_with_file():
     # Searchable text carries the LLM analysis and a data preview.
     assert "Table: sales" in chunk.text
     assert "Regional sales figures." in chunk.text
-    assert "- region (TEXT): sales region" in chunk.text
+    assert "- Region (TEXT): sales region" in chunk.text
     assert "Data:" in chunk.text
     assert "north" in chunk.text
 
-    # No rows are loaded into SQL: no sql_* metadata keys.
-    assert not any(key.startswith("sql_") for key in chunk.metadata)
+    # The original file schema is preserved: column names are kept verbatim
+    # (not normalized/safe-stringed), types come from pandas.
     assert chunk.metadata["table_name"] == "sales"
     assert chunk.metadata["schema"] == [
-        {"name": "region", "type": "TEXT", "description": "sales region"},
-        {"name": "amount", "type": "INTEGER", "description": "total amount"},
+        {"name": "Region", "type": "TEXT", "description": "sales region"},
+        {"name": "Amount", "type": "INTEGER", "description": "total amount"},
     ]
 
-    # The chunk carries its own CSV file.
-    assert chunk.file_filename == "sales.csv"
-    assert chunk.file_content_type == "text/csv"
-    assert chunk.file_bytes is not None
-    assert b"north,10" in chunk.file_bytes
+    # No rows are loaded into SQL and no file is emitted: the chunk is
+    # text + metadata only.
+    assert not any(key.startswith("sql_") for key in chunk.metadata)
+    assert parts.runtime.pop_emitted_files() == []
 
     # A single workbook-level LLM call.
     assert len(llm.prompts) == 1
@@ -151,20 +152,17 @@ def test_process_xlsx_returns_chunk_per_sheet():
     chunks = run_process(context, parts.runtime, plugin)
 
     assert len(chunks) == 2
+    # Sheet names are preserved verbatim from the workbook.
     names = {chunk.metadata["table_name"] for chunk in chunks}
-    assert names == {"alpha", "beta_2"}
+    assert names == {"Alpha", "Beta 2"}
 
     # Relationship indexes are rewritten to stable table names.
-    beta = next(
-        chunk for chunk in chunks if chunk.metadata["table_name"] == "beta_2"
-    )
-    assert "alpha" in beta.text
+    beta = next(chunk for chunk in chunks if chunk.metadata["table_name"] == "Beta 2")
+    assert "Alpha" in beta.text
     assert "joins alpha" in beta.text
 
-    # Each chunk carries its own CSV file.
-    for chunk in chunks:
-        assert chunk.file_bytes is not None
-        assert chunk.file_filename.endswith(".csv")
+    # No files are emitted: the table plugin produces text + metadata only.
+    assert parts.runtime.pop_emitted_files() == []
 
 
 def test_llm_failure_falls_back_to_raw_data():
@@ -178,7 +176,44 @@ def test_llm_failure_falls_back_to_raw_data():
     assert len(chunks) == 1
     assert "Table: sales" in chunks[0].text
     assert "Data:" in chunks[0].text
-    assert "region" in chunks[0].text
+    assert "Region" in chunks[0].text
+
+
+def test_source_description_is_passed_to_the_llm():
+    llm = FakeLLM(json.dumps(make_analysis()))
+    plugin = TablePlugin()
+    context = csv_context(
+        source_description="This table was extracted from a PDF about Q3 sales.",
+    )
+    parts = build_runtime(context, llm=llm)
+
+    run_process(context, parts.runtime, plugin)
+
+    assert len(llm.prompts) == 1
+    assert "This table was extracted from a PDF about Q3 sales." in llm.prompts[0]
+
+
+def test_no_source_description_leaves_prompt_unchanged():
+    llm = FakeLLM(json.dumps(make_analysis()))
+    plugin = TablePlugin()
+    context = csv_context()
+    parts = build_runtime(context, llm=llm)
+
+    run_process(context, parts.runtime, plugin)
+
+    assert len(llm.prompts) == 1
+    assert "Additional context about the source document" not in llm.prompts[0]
+
+
+def test_blank_source_description_is_ignored():
+    llm = FakeLLM(json.dumps(make_analysis()))
+    plugin = TablePlugin()
+    context = csv_context(source_description="   ")
+    parts = build_runtime(context, llm=llm)
+
+    run_process(context, parts.runtime, plugin)
+
+    assert "Additional context about the source document" not in llm.prompts[0]
 
 
 def test_rejects_unsupported_spreadsheet_extension():

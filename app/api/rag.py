@@ -12,7 +12,14 @@ router = APIRouter(prefix="/rag", tags=["RAG"])
 
 @router.post("/ingest", response_model=list[IngestedChunkSchema])
 async def ingest_document(file: UploadFile = File(...)):
-    chunks = await rag_service.ingest(file)
+    # The HTTP boundary is the only place that touches UploadFile; the RAG
+    # core ingests plain bytes.
+    file_bytes = await file.read()
+    chunks = await rag_service.ingest(
+        file_bytes=file_bytes,
+        filename=file.filename or "",
+        content_type=file.content_type or "",
+    )
     return [IngestedChunkSchema.model_validate(chunk) for chunk in chunks]
 
 

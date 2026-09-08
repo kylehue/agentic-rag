@@ -1,20 +1,19 @@
-import asyncio
 import logging
 from collections.abc import Sequence
 from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import UploadFile
-from sqlalchemy import JSON, Column, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, Integer, String, Text
 
 from app.core.config import settings
 from app.embedders.base import Embedder
 from app.errors.document import InvalidDocumentError
 from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk
-from app.plugin.context import IngestionContext
+from app.plugin.context import IngestionContext, IngestionFile
 from app.plugin.hooks import (
+    FileCompletedPayload,
     FileSubprocessedPayload,
     HookBus,
     IngestionCompletedPayload,
@@ -33,12 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class IngestionService:
-    """Runs a file (and any files emitted during processing) through the hook pipeline.
-
-    The service owns all persistence: source files, chunk files, chunk
-    records, and vectors. Plugins generate chunks by handling the
-    `ingestion.process` hook and may emit files for subprocess.
-    """
+    """Runs a file (and any files emitted during processing) through the hook pipeline."""
 
     def __init__(
         self,
@@ -66,6 +60,8 @@ class IngestionService:
                 Column("id", Integer, primary_key=True, autoincrement=True),
                 Column("chunk_id", String, nullable=False, unique=True),
                 Column("source_id", String, nullable=False),
+                Column("parent_source_id", String, nullable=True),
+                Column("origin_source_id", String, nullable=False),
                 Column("plugin", String, nullable=False),
                 Column("text", Text, nullable=False),
                 Column("metadata", JSON),
@@ -81,141 +77,165 @@ class IngestionService:
                 Column("file_content_type", String, nullable=False),
                 Column("file_filename", String, nullable=False),
                 Column("file_orig_filename", String, nullable=False),
+                Column("is_origin", Boolean, nullable=False),
             ],
         )
 
-    async def ingest(self, file_upload: UploadFile) -> list[IngestedChunk]:
-        """Ingest one uploaded file."""
-        if not file_upload.filename or not file_upload.content_type:
-            raise InvalidDocumentError(
-                "Invalid document. File name or content type is undefined."
-            )
+    async def ingest(self, file: IngestionFile) -> list[IngestedChunk]:
+        """Ingest a file and everything its plugins emit."""
 
-        source_bytes = await file_upload.read()
+        pending_sources: list[tuple[IngestionFile, bool]] = []
+        pending_chunks: list[tuple[IngestionContext, IngestedChunk]] = []
+        origin_file = file
 
-        return await self.ingest_bytes(
-            source_bytes,
-            file_upload.filename,
-            file_upload.content_type,
-        )
+        async def _ingest(
+            file: IngestionFile,
+            parent_file: IngestionFile | None,
+            depth: int,
+        ) -> tuple[IngestionContext, IngestionRuntime, list[IngestedChunk]]:
+            """Process one file, then recurse into every file it emits.
 
-    async def ingest_bytes(
-        self,
-        source_bytes: bytes,
-        source_filename: str,
-        source_content_type: str,
-        parent_source_id: str | None = None,
-        parent_source_filename: str | None = None,
-        depth: int = 0,
-    ) -> list[IngestedChunk]:
-        """Ingest raw bytes, including files emitted by plugins."""
-        if depth >= MAX_SUBPROCESS_DEPTH:
-            raise InvalidDocumentError("Document subprocess depth exceeded.")
+            Returns the file's context, its runtime, and the chunks of the
+            file's whole subtree (its own chunks plus every descendant's), so
+            the parent can report the subtree back through the
+            ``file_subprocessed`` hook. ``origin_file`` is the top-most file
+            of the emission chain and is inherited unchanged by every emitted
+            child. An empty chunk list marks a skipped file: no plugin
+            accepted it, so it was neither stored nor processed (its runtime
+            is discarded without firing any hooks).
+            """
+            if depth >= MAX_SUBPROCESS_DEPTH:
+                raise InvalidDocumentError("Document subprocess depth exceeded.")
 
-        context = IngestionContext(
-            source_id=str(uuid4()),
-            source_filename=source_filename,
-            source_content_type=source_content_type,
-            source_bytes=source_bytes,
-            parent_source_id=parent_source_id,
-        )
-
-        plugins = self._registry.accepting_plugins(context)
-
-        if not plugins:
-            if depth == 0:
+            if not file.filename or not file.content_type:
                 raise InvalidDocumentError(
-                    f"No plugin accepted document '{source_filename}'."
+                    "Invalid document. File name or content type is undefined."
                 )
-            else:
-                logger.warning(
-                    f"The document '{parent_source_filename}' emitted files that weren't accepted by any plugins."
-                )
-                return []  # avoid ingestion
 
-        runtime = IngestionRuntime(
-            context=context,
-            hooks=self._hooks,
-            llm=self._llm,
-        )
-
-        await self._hooks.emit(
-            "ingestion_started",
-            IngestionStartedPayload(context=context, runtime=runtime),
-        )
-
-        await self._save_source(
-            context, source_bytes, source_content_type, source_filename
-        )
-
-        # Plugins generate chunks by handling the process hook and may
-        # emit files along the way.
-        results = await self._hooks.emit(
-            "ingestion_process",
-            IngestionProcessPayload(context=context, runtime=runtime),
-        )
-
-        chunks: list[IngestedChunk] = []
-        for result in results:
-            if result:
-                chunks.extend(result)
-
-        await self._save_chunks(context, chunks)
-
-        all_chunks = list(chunks)
-
-        for emitted_file in runtime.take_emitted_files():
-            emitted_chunks = await self.ingest_bytes(
-                emitted_file.file_bytes,
-                emitted_file.filename,
-                emitted_file.content_type,
-                parent_source_id=context.source_id,
-                parent_source_filename=parent_source_filename or source_filename,
-                depth=depth + 1,
+            context = IngestionContext(
+                file=file,
+                origin_file=origin_file,
+                parent_file=parent_file,
             )
 
-            await self._hooks.emit(
-                "file_subprocessed",
-                FileSubprocessedPayload(
-                    emitted_file=emitted_file,
-                    chunks=emitted_chunks,
+            runtime = IngestionRuntime(
+                context=context,
+                hooks=self._hooks,
+                llm=self._llm,
+                embedder=self._embedder,
+                vector_storage=self._vector_storage,
+                sql_storage=self._sql_storage,
+                file_storage=self._file_storage,
+            )
+
+            plugins = self._registry.accepting_plugins(context)
+
+            if not plugins:
+                # only raise error if it's the origin file
+                if parent_file is None:
+                    raise InvalidDocumentError(
+                        f"No plugin accepted document '{file.filename}'."
+                    )
+                logger.warning(
+                    f"The document '{parent_file.filename}' emitted files that weren't accepted by any plugins."
+                )
+                return context, runtime, []  # avoid ingestion
+
+            await self._hooks.trigger(
+                "ingestion_started",
+                IngestionStartedPayload(context=context, runtime=runtime),
+            )
+
+            # Every file that goes through ingestion is stored exactly once.
+            # The flag marks user uploads so they can be told apart from
+            # emitted files in the documents table.
+            pending_sources.append((file, parent_file is None))
+
+            # Plugins generate chunks here and may emit files along the way.
+            results = await self._hooks.trigger(
+                "ingestion_process",
+                IngestionProcessPayload(context=context, runtime=runtime),
+            )
+            own_chunks = [chunk for result in results if result for chunk in result]
+
+            # Recurse into the emitted files in emission order, collecting each
+            # subtree and reporting it back through the subprocess hook.
+            child_chunks: list[IngestedChunk] = []
+            for emitted in runtime.pop_emitted_files():
+                _, _, subtree = await _ingest(
+                    file=emitted,
+                    parent_file=file,
+                    depth=depth + 1,
+                )
+                child_chunks.extend(subtree)
+                await self._hooks.trigger(
+                    "file_subprocessed",
+                    FileSubprocessedPayload(
+                        emitted_file=emitted,
+                        chunks=subtree,
+                        runtime=runtime,
+                    ),
+                )
+
+            all_chunks = [*own_chunks, *child_chunks]
+
+            if not all_chunks:
+                logger.warning(
+                    "Ingestion of '%s' produced no chunks; nothing was indexed. "
+                    "Verify that a plugin with an 'ingestion_process' handler "
+                    "accepts this document and generates chunks for it.",
+                    file.filename,
+                )
+
+            # This file (and its whole emitted subtree) is processed. Nothing
+            # is committed yet; ingestion_completed fires once, at the end.
+            await self._hooks.trigger(
+                "file_completed",
+                FileCompletedPayload(
+                    context=context,
+                    chunks=all_chunks,
                     runtime=runtime,
                 ),
             )
 
-            all_chunks.extend(emitted_chunks)
+            pending_chunks.extend((context, chunk) for chunk in own_chunks)
 
-        if not all_chunks:
-            logger.warning(
-                "Ingestion of '%s' produced no chunks; the source file was "
-                "stored but nothing was indexed. Verify that a plugin with "
-                "an 'ingestion_process' handler accepts this document.",
-                source_filename,
-            )
+            return context, runtime, all_chunks
 
-        await self._hooks.emit(
+        top_context, top_runtime, chunks = await _ingest(
+            file=file,
+            parent_file=None,
+            depth=0,
+        )
+
+        await self._commit(pending_sources, pending_chunks)
+
+        # The very end: every file processed and everything committed.
+        await self._hooks.trigger(
             "ingestion_completed",
             IngestionCompletedPayload(
-                context=context,
-                chunks=all_chunks,
-                runtime=runtime,
+                context=top_context,
+                chunks=chunks,
+                runtime=top_runtime,
             ),
         )
 
-        return all_chunks
+        return chunks
 
     async def _save_source(
         self,
-        context: IngestionContext,
-        source_bytes: bytes,
-        source_content_type: str,
-        source_filename: str,
+        file: IngestionFile,
+        is_origin: bool,
     ) -> str:
-        """Store the source file and record it in the documents table."""
+        """Store a file and record it in the documents table.
+
+        ``is_origin`` marks the file as a user upload (``True``) rather than a
+        file emitted by a plugin (``False``).
+        """
         file_path = await self._file_storage.upload(
-            file=BytesIO(source_bytes),
-            file_content_type=source_content_type,
-            file_filename=f"{uuid4()}{Path(source_filename).suffix}",
+            file=BytesIO(file.file_bytes),
+            file_content_type=file.content_type,
+            file_filename=f"{uuid4()}{Path(file.filename).suffix}",
             file_dir="documents/",
         )
 
@@ -223,11 +243,12 @@ class IngestionService:
             settings.DOCUMENT_METADATA_TABLE_NAME,
             [
                 {
-                    "source_id": context.source_id,
+                    "source_id": file.source_id,
                     "file_path": file_path,
-                    "file_content_type": source_content_type,
+                    "file_content_type": file.content_type,
                     "file_filename": Path(file_path).name,
-                    "file_orig_filename": source_filename,
+                    "file_orig_filename": file.filename,
+                    "is_origin": is_origin,
                 }
             ],
             ["id"],
@@ -235,18 +256,30 @@ class IngestionService:
 
         return file_path
 
-    async def _save_chunks(
+    async def _commit(
         self,
-        context: IngestionContext,
-        chunks: Sequence[IngestedChunk],
+        pending_sources: Sequence[tuple[IngestionFile, bool]],
+        pending_chunks: Sequence[tuple[IngestionContext, IngestedChunk]],
     ) -> None:
-        """Embed chunks, store chunk files, and persist chunk records.
+        """Persist everything collected during the walk."""
+        for file, is_origin in pending_sources:
+            await self._save_source(file, is_origin)
 
-        Chunk metadata is saved as-is, plus the storage paths and lineage
-        stamped by the service.
+        if pending_chunks:
+            await self._save_chunk_records(pending_chunks)
+
+    async def _save_chunk_records(
+        self,
+        records: Sequence[tuple[IngestionContext, IngestedChunk]],
+    ) -> None:
+        """Embed chunks and persist their records.
+
+        ``records`` pairs each chunk with the context it was produced in, so
+        the lineage columns (source / parent / origin) are stamped correctly
+        even though chunks from several files are saved in one batch. Chunk
+        metadata is saved as-is.
         """
-        if not chunks:
-            return
+        chunks = [chunk for _, chunk in records]
 
         embeddings = await self._embedder.embed_documents(
             [chunk.text for chunk in chunks]
@@ -256,32 +289,20 @@ class IngestionService:
             embeddings,
         )
 
-        rows: list[dict] = []
-
-        for chunk in chunks:
-            # Stamp storage paths and lineage on the chunk so the same
-            # metadata is returned by the API and persisted.
-            if context.parent_source_id is not None:
-                chunk.metadata["parent_source_id"] = context.parent_source_id
-
-            if chunk.file_bytes and chunk.file_filename and chunk.file_content_type:
-                file_path = await self._file_storage.upload(
-                    file=BytesIO(chunk.file_bytes),
-                    file_content_type=chunk.file_content_type,
-                    file_filename=f"{uuid4()}{Path(chunk.file_filename).suffix}",
-                    file_dir="chunk_files/",
-                )
-                chunk.metadata["file_path"] = file_path
-
-            rows.append(
-                {
-                    "chunk_id": chunk.chunk_id,
-                    "source_id": context.source_id,
-                    "plugin": chunk.plugin,
-                    "text": chunk.text,
-                    "metadata": chunk.metadata,
-                }
-            )
+        rows = [
+            {
+                "chunk_id": chunk.chunk_id,
+                "source_id": context.file.source_id,
+                "parent_source_id": (
+                    context.parent_file.source_id if context.parent_file else None
+                ),
+                "origin_source_id": context.origin_file.source_id,
+                "plugin": chunk.plugin,
+                "text": chunk.text,
+                "metadata": chunk.metadata,
+            }
+            for context, chunk in records
+        ]
 
         await self._sql_storage.upsert(
             settings.CHUNK_TABLE_NAME,

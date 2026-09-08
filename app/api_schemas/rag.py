@@ -2,7 +2,7 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.chunk import RetrievedChunk
+from app.api_schemas.chunk import RetrievedChunkSchema
 
 
 class RagAnswerSchema(BaseModel):
@@ -10,4 +10,4 @@ class RagAnswerSchema(BaseModel):
 
     query: str
     answer: str
-    chunks: Sequence[RetrievedChunk]
+    chunks: Sequence[RetrievedChunkSchema]

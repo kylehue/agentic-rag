@@ -42,7 +42,7 @@ sql_storage = LocalSqlStorage(storage_dir=settings.SQL_LOCAL_STORAGE_DIR)
 # Plugin system
 hooks = HookBus()
 plugin_registry = PluginRegistry(hooks)
-plugin_registry.register(TextPlugin())
+plugin_registry.register(TextPlugin(ignore_images=True))
 plugin_registry.register(TablePlugin())
 
 # Retrievers

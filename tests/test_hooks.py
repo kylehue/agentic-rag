@@ -19,7 +19,7 @@ def test_emit_without_handlers_returns_empty():
         chunks=[],
         runtime=parts.runtime,
     )
-    assert asyncio.run(bus.emit("ingestion_completed", payload)) == []
+    assert asyncio.run(bus.trigger("ingestion_completed", payload)) == []
 
 
 def test_emit_passes_payload_to_handler():
@@ -39,7 +39,7 @@ def test_emit_passes_payload_to_handler():
         chunks=[chunk],
         runtime=parts.runtime,
     )
-    asyncio.run(bus.emit("ingestion_completed", payload))
+    asyncio.run(bus.trigger("ingestion_completed", payload))
 
     assert seen == [payload]
     assert seen[0]["context"] is context
@@ -62,7 +62,7 @@ def test_emit_returns_handler_results_in_registration_order():
     parts = build_runtime(context)
     payload = IngestionProcessPayload(context=context, runtime=parts.runtime)
 
-    results = asyncio.run(bus.emit("ingestion_process", payload))
+    results = asyncio.run(bus.trigger("ingestion_process", payload))
 
     assert results == [["chunk-a"], ["chunk-b", "chunk-c"]]
 
@@ -80,7 +80,7 @@ def test_unregister_removes_handler():
     context = make_context()
     parts = build_runtime(context)
     asyncio.run(
-        bus.emit(
+        bus.trigger(
             "file_emitted",
             {"context": context, "emitted_file": object(), "runtime": parts.runtime},
         )

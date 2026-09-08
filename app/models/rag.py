@@ -1,8 +1,7 @@
-from app.models.chunk import RetrievedChunk
-
-
 from collections.abc import Sequence
 from dataclasses import dataclass
+
+from app.models.chunk import RetrievedChunk
 
 
 @dataclass(frozen=True)

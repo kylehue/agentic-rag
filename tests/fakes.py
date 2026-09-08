@@ -1,10 +1,17 @@
 from types import SimpleNamespace
 
-from unstructured.documents.elements import ElementMetadata, NarrativeText, Table
+from unstructured.documents.elements import (
+    ElementMetadata,
+    Footer,
+    Image,
+    NarrativeText,
+    PageBreak,
+    Table,
+)
 
 from app.embedders.base import Embedder
 from app.llm.base import LLMProvider
-from app.plugin.context import IngestionContext
+from app.plugin.context import IngestionContext, IngestionFile
 from app.plugin.hooks import HookBus
 from app.plugin.runtime import IngestionRuntime
 from app.store_file.base import FileStorage
@@ -113,6 +120,26 @@ class FakeFileStorage(FileStorage):
         return self.files[full_path]
 
 
+def make_ingestion_file(
+    *,
+    filename: str = "report.txt",
+    content_type: str = "text/plain",
+    file_bytes: bytes = b"hello",
+    description: str | None = None,
+    source_id: str | None = None,
+) -> IngestionFile:
+    """Build an IngestionFile, optionally pinning its auto-generated source_id."""
+    kwargs = dict(
+        filename=filename,
+        content_type=content_type,
+        file_bytes=file_bytes,
+        description=description,
+    )
+    if source_id is not None:
+        kwargs["source_id"] = source_id
+    return IngestionFile(**kwargs)  # type: ignore
+
+
 def make_context(
     *,
     filename: str = "report.txt",
@@ -120,13 +147,37 @@ def make_context(
     source_bytes: bytes = b"hello",
     source_id: str = "source-1",
     parent_source_id: str | None = None,
+    origin_source_id: str | None = None,
+    source_description: str | None = None,
+    parent_file: IngestionFile | None = None,
+    origin_file: IngestionFile | None = None,
 ) -> IngestionContext:
-    return IngestionContext(
+    file = make_ingestion_file(
+        filename=filename,
+        content_type=content_type,
+        file_bytes=source_bytes,
+        description=source_description,
         source_id=source_id,
-        source_filename=filename,
-        source_content_type=content_type,
-        source_bytes=source_bytes,
-        parent_source_id=parent_source_id,
+    )
+
+    if parent_file is None and parent_source_id is not None:
+        parent_file = make_ingestion_file(source_id=parent_source_id)
+
+    # Default the origin: an explicit origin wins, otherwise the parent (in a
+    # two-level chain the parent is the top-most file), otherwise the file
+    # itself.
+    if origin_file is None:
+        if origin_source_id is not None:
+            origin_file = make_ingestion_file(source_id=origin_source_id)
+        elif parent_file is not None:
+            origin_file = parent_file
+        else:
+            origin_file = file
+
+    return IngestionContext(
+        file=file,
+        origin_file=origin_file,
+        parent_file=parent_file,
     )
 
 
@@ -135,6 +186,10 @@ def build_runtime(
     *,
     hooks: HookBus | None = None,
     llm: LLMProvider | None = None,
+    embedder: Embedder | None = None,
+    vector_storage: VectorStorage | None = None,
+    sql_storage: SqlStorage | None = None,
+    file_storage: FileStorage | None = None,
 ) -> SimpleNamespace:
     """Build an IngestionRuntime with inspectable fakes.
 
@@ -143,12 +198,22 @@ def build_runtime(
     parts = SimpleNamespace(
         hooks=hooks if hooks is not None else HookBus(),
         llm=llm if llm is not None else FakeLLM(),
+        embedder=embedder if embedder is not None else FakeEmbedder(),
+        vector_storage=(
+            vector_storage if vector_storage is not None else FakeVectorStorage()
+        ),
+        sql_storage=sql_storage if sql_storage is not None else FakeSqlStorage(),
+        file_storage=file_storage if file_storage is not None else FakeFileStorage(),
     )
 
     parts.runtime = IngestionRuntime(
         context=context,
         hooks=parts.hooks,
         llm=parts.llm,
+        embedder=parts.embedder,
+        vector_storage=parts.vector_storage,
+        sql_storage=parts.sql_storage,
+        file_storage=parts.file_storage,
     )
 
     return parts
@@ -176,4 +241,41 @@ def make_table_element(
             page_number=page_number,
         )
     element.metadata = metadata
+    return element
+
+
+def make_image_element(
+    image_bytes: bytes,
+    page_number: int | None = None,
+    caption: str = "",
+    mime_type: str = "image/jpeg",
+):
+    import base64
+
+    element = Image(text=caption)
+    metadata = ElementMetadata(
+        image_base64=base64.b64encode(image_bytes).decode("utf-8"),
+        image_mime_type=mime_type,
+    )
+    if page_number is not None:
+        metadata = ElementMetadata(
+            image_base64=metadata.image_base64,
+            image_mime_type=mime_type,
+            page_number=page_number,
+        )
+    element.metadata = metadata
+    return element
+
+
+def make_page_break_element(page_number: int | None = None):
+    element = PageBreak(text="PageBreak")
+    if page_number is not None:
+        element.metadata = ElementMetadata(page_number=page_number)
+    return element
+
+
+def make_footer_element(text: str, page_number: int | None = None):
+    element = Footer(text=text)
+    if page_number is not None:
+        element.metadata = ElementMetadata(page_number=page_number)
     return element

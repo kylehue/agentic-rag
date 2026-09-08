@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from io import BytesIO
 import json
 from pathlib import Path
-import re
 from typing import Any
 
 import pandas as pd
@@ -15,7 +14,6 @@ from app.models.chunk import IngestedChunk
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionContext
 from app.plugin.hooks import IngestionProcessPayload, hook
-from app.plugin.runtime import IngestionRuntime
 from app.utils.string import render_template
 
 MAX_WORKBOOK_CONTEXT_CHARS = 30_000
@@ -61,6 +59,7 @@ separately. Do not infer or modify data types.
 Use an empty relationships list when no relationship is supported by the data.
 Do not invent joins, formulas, or facts.
 
+{file_description}
 Table catalog:
 {catalog}
 """
@@ -75,12 +74,7 @@ class ExtractedTable:
 
 
 class TablePlugin(Plugin):
-    """Handles spreadsheet documents (csv, xlsx, xls) and emitted table files.
-
-    Each table becomes one chunk carrying searchable semantic context and its
-    own CSV file. Table rows are not loaded into SQL for now; the saved file
-    is the source of truth for later agentic table querying.
-    """
+    """Handles spreadsheet documents (csv, xlsx, xls)."""
 
     SUPPORTED_EXTENSIONS = frozenset({"csv", "xlsx", "xls"})
 
@@ -89,7 +83,7 @@ class TablePlugin(Plugin):
         return "table"
 
     def accepts(self, context: IngestionContext) -> bool:
-        extension = Path(context.source_filename).suffix.lower().lstrip(".")
+        extension = Path(context.file.filename).suffix.lower().lstrip(".")
         return extension in self.SUPPORTED_EXTENSIONS
 
     @hook("ingestion_process")
@@ -121,6 +115,7 @@ class TablePlugin(Plugin):
             runtime.llm,
             catalog,
             len(tables),
+            context.file.description,
         )
 
         self._add_related_table_names(table_analyses, tables)
@@ -160,38 +155,34 @@ class TablePlugin(Plugin):
                         "table_name": table.name,
                         "schema": analysis["schema"],
                     },
-                    file_filename=f"{table.name}.csv",
-                    file_content_type="text/csv",
-                    file_bytes=table.dataframe.to_csv(index=False).encode("utf-8"),
                 )
             )
 
         return chunks
 
-    @classmethod
+    @staticmethod
     def _read_tables(
-        cls,
         context: IngestionContext,
     ) -> list[ExtractedTable]:
         """
-        Read spreadsheet data directly with pandas.
+        Read spreadsheet data directly with pandas, keeping the schema as-is.
 
-        CSV produces one table.
-        XLS/XLSX produces one table per sheet.
+        Column names and sheet names come straight from the file: they are not
+        normalized, deduplicated, or rewritten into safe identifiers.
+
+        CSV produces one table named after the file.
+        XLS/XLSX produces one table per sheet, named after the sheet.
         """
 
-        extension = Path(context.source_filename).suffix.lower()
+        extension = Path(context.file.filename).suffix.lower()
 
-        source = BytesIO(context.source_bytes)
+        source = BytesIO(context.file.file_bytes)
 
         if extension == ".csv":
-            dataframe = pd.read_csv(source)
-            dataframe = cls._normalize_dataframe_columns(dataframe)
-
             return [
                 ExtractedTable(
-                    dataframe=dataframe,
-                    name=cls._normalize_name(Path(context.source_filename).stem),
+                    dataframe=pd.read_csv(source),
+                    name=Path(context.file.filename).stem,
                 )
             ]
 
@@ -201,15 +192,12 @@ class TablePlugin(Plugin):
                 sheet_name=None,
             )
 
-            source_names = list(sheets.keys())
-            table_names = cls._normalize_unique_names(source_names)
-
             return [
                 ExtractedTable(
-                    dataframe=cls._normalize_dataframe_columns(sheets[name]),
-                    name=table_name,
+                    dataframe=dataframe,
+                    name=str(sheet_name),
                 )
-                for name, table_name in zip(source_names, table_names)
+                for sheet_name, dataframe in sheets.items()
             ]
 
         return []
@@ -219,8 +207,13 @@ class TablePlugin(Plugin):
         llm: LLMProvider,
         catalog: str,
         table_count: int,
+        file_description: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         """Generate the single workbook-level LLM analysis.
+
+        ``file_description`` is optional context about the source document
+        (often the text found around these tables in the parent document).
+        When present it is given to the LLM to inform the descriptions.
 
         Returns a safe fallback when the LLM fails or answers invalidly;
         the raw data and pandas-derived schema are still indexed.
@@ -231,6 +224,7 @@ class TablePlugin(Plugin):
                 WORKBOOK_ANALYSIS_PROMPT_TEMPLATE,
                 {
                     "catalog": catalog,
+                    "file_description": self._file_description_block(file_description),
                 },
             )
 
@@ -245,64 +239,17 @@ class TablePlugin(Plugin):
             return "", [self._empty_analysis() for _ in range(table_count)]
 
     @staticmethod
-    def _normalize_name(name: Any) -> str:
-        """Convert a name into a safe snake_case identifier."""
+    def _file_description_block(file_description: str | None) -> str:
+        """Render the optional file description as a prompt block ("" if absent)."""
+        if not file_description or not file_description.strip():
+            return ""
 
-        name = str(name).strip()
-
-        # Replace non-alphanumeric characters with underscores.
-        name = re.sub(r"[^a-zA-Z0-9]+", "_", name)
-
-        # Remove leading/trailing underscores.
-        name = name.strip("_").lower()
-
-        # Avoid empty identifiers.
-        if not name:
-            name = "value"
-
-        # Avoid identifiers starting with a number.
-        if name[0].isdigit():
-            name = f"value_{name}"
-
-        return name
-
-    @classmethod
-    def _normalize_unique_names(
-        cls,
-        names: list[Any],
-    ) -> list[str]:
-        """Normalize names and ensure every resulting name is unique."""
-
-        used: set[str] = set()
-        normalized: list[str] = []
-
-        for value in names:
-            base_name = cls._normalize_name(value)
-
-            name = base_name
-            suffix = 2
-
-            while name in used:
-                name = f"{base_name}_{suffix}"
-                suffix += 1
-
-            used.add(name)
-            normalized.append(name)
-
-        return normalized
-
-    @classmethod
-    def _normalize_dataframe_columns(
-        cls,
-        dataframe: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """Normalize DataFrame columns into unique safe names."""
-
-        dataframe = dataframe.copy()
-
-        dataframe.columns = cls._normalize_unique_names(list(dataframe.columns))
-
-        return dataframe
+        return (
+            "Additional context about the source document, provided by the "
+            "caller:\n"
+            f"{file_description.strip()}\n\n"
+            "Use this context to inform your descriptions.\n\n"
+        )
 
     @staticmethod
     def _pandas_dtype_to_type(

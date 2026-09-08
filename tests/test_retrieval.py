@@ -1,6 +1,10 @@
 import asyncio
 from dataclasses import replace
 
+import pytest
+from pydantic import ValidationError
+
+from app.api_schemas.chunk import RetrievedChunkSchema
 from app.models.chunk import RetrievedChunk
 from app.plugin.base import Plugin
 from app.plugin.hooks import HookBus, RetrievalFinalizePayload, hook
@@ -46,6 +50,7 @@ def make_chunk(plugin: str, chunk_id: str = "c1") -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=chunk_id,
         source_id="s1",
+        origin_source_id="s1",
         plugin=plugin,
         text=f"text from {plugin}",
         score=0.5,
@@ -83,6 +88,38 @@ def test_chunk_without_finalizing_plugin_passes_through():
     results = asyncio.run(service.retrieve("q"))
 
     assert results[0].text == "text from unknown"
+
+
+def test_from_dict_requires_origin_source_id():
+    data = {
+        "chunk_id": "c1",
+        "source_id": "s1",
+        "origin_source_id": "s1",
+        "plugin": "text",
+        "text": "t",
+        "parent_source_id": None,
+    }
+
+    chunk = RetrievedChunk.from_dict(data, score=0.4)
+    assert chunk.origin_source_id == "s1"
+    assert chunk.parent_source_id is None
+
+    without_origin = {k: v for k, v in data.items() if k != "origin_source_id"}
+    with pytest.raises(KeyError):
+        RetrievedChunk.from_dict(without_origin)
+
+
+def test_retrieved_chunk_schema_rejects_missing_origin():
+    chunk = make_chunk("text")
+
+    # A well-formed chunk (origin always set) validates.
+    schema = RetrievedChunkSchema.model_validate(chunk)
+    assert schema.origin_source_id == "s1"
+
+    # A chunk without an origin is invalid.
+    broken = replace(chunk, origin_source_id=None)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        RetrievedChunkSchema.model_validate(broken)
 
 
 def test_retrieval_completed_hook_fires_with_finalized_chunks():

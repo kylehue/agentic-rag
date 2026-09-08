@@ -16,6 +16,8 @@ class RetrievedChunkSchema(BaseModel):
     plugin: str
     chunk_id: str
     source_id: str
+    origin_source_id: str
+    parent_source_id: str | None
     text: str
     score: float
     metadata: dict

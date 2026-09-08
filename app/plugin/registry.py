@@ -30,9 +30,6 @@ class PluginRegistry:
             if isinstance(hook_name, str):
                 self._hooks.register(hook_name, getattr(plugin, attr_name))
 
-    def plugins(self) -> list[Plugin]:
-        return list(self._plugins)
-
     def plugin_for(self, name: str) -> Plugin | None:
         return self._plugins_by_name.get(name)
 

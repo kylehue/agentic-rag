@@ -25,7 +25,7 @@ class NoopPlugin(Plugin):
 def emit_started(hooks: HookBus, context) -> None:
     parts = build_runtime(context, hooks=hooks)
     asyncio.run(
-        hooks.emit(
+        hooks.trigger(
             "ingestion_started",
             IngestionStartedPayload(context=context, runtime=parts.runtime),
         )

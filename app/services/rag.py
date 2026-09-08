@@ -1,8 +1,7 @@
-from fastapi import UploadFile
-
 from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk, RetrievedChunk
 from app.models.rag import RagAnswer
+from app.plugin.context import IngestionFile
 from app.services.ingestion import IngestionService
 from app.services.retrieval import RetrievalService
 from app.utils.string import render_template
@@ -20,8 +19,6 @@ Evidence:
 
 
 class RagService:
-    """Facade for the RAG API: ingest, retrieve, answer."""
-
     def __init__(
         self,
         *,
@@ -33,8 +30,20 @@ class RagService:
         self._ingestion_service = ingestion_service
         self._retrieval_service = retrieval_service
 
-    async def ingest(self, file: UploadFile) -> list[IngestedChunk]:
+    async def ingest(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        content_type: str,
+        description: str | None = None,
+    ) -> list[IngestedChunk]:
         """Store and index a file."""
+        file = IngestionFile(
+            filename=filename,
+            content_type=content_type,
+            file_bytes=file_bytes,
+            description=description,
+        )
         return await self._ingestion_service.ingest(file)
 
     async def retrieve(self, user_query: str) -> list[RetrievedChunk]:

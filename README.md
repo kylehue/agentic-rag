@@ -24,6 +24,8 @@ The application is designed around separate ingestion, retrieval, and answer-gen
   - [Hooks](#hooks)
   - [Context and Runtime](#context-and-runtime)
   - [File Emission and Subprocess](#file-emission-and-subprocess)
+    - [File descriptions](#file-descriptions)
+    - [Reassembling tables split across pages](#reassembling-tables-split-across-pages)
   - [Project Structure](#project-structure)
     - [`app/plugin`](#appplugin)
     - [`app/plugins`](#appplugins)
@@ -53,7 +55,7 @@ The application is designed around separate ingestion, retrieval, and answer-gen
 
 ### Plugin Architecture
 
-Each supported document type is a **plugin** — identity plus a set of hook handlers. The pipeline is purely hook-driven: the services emit hooks, and plugins react. A plugin:
+Each supported document type is a **plugin** — identity plus a set of hook handlers. The pipeline is purely hook-driven: the services trigger hooks, and plugins react. A plugin:
 
 - decides which files it manages (`accepts(context)`),
 - **generates chunks** by handling the `ingestion_process` hook (returning `IngestedChunk`s; it never persists them),
@@ -64,8 +66,8 @@ All database and file persistence is owned by the services — plugins only prod
 
 Built-in plugins:
 
-- `TextPlugin` — text documents (pdf, docx, txt, md, html, ...).
-- `TablePlugin` — spreadsheets (csv, xlsx, xls) and emitted table files. Generates one chunk per table with LLM-generated semantic context and the table's CSV file.
+- `TextPlugin` — text documents (pdf, docx, txt, md, html, ...). Chunks the text, reassembles embedded tables that were split across page breaks (merging fragments that share a schema and have no other content between them) and emits each as a CSV for the `TablePlugin`, and emits embedded images with `runtime.emit_file` while indexing each figure with a description chunk. Constructor options `ignore_images` and `ignore_tables` (both default `False`) skip the processing overhead of embedded images or embedded tables: with `ignore_images`, image extraction is disabled in the partition call entirely (no emitted figure files, no description chunks); with `ignore_tables`, no reassembled CSV is emitted, but the table text still ends up in the document chunks (`infer_table_structure` stays on for that). An ignored image still occupies its place in the document stream and keeps separating runs of tables.
+- `TablePlugin` — spreadsheets (csv, xlsx, xls) and emitted table files. Generates one chunk per table with LLM-generated semantic context and the table's original schema (kept verbatim) in its metadata; it does not emit or store files.
 
 Adding a new document type means adding one plugin and registering it — no changes to the ingestion or retrieval services.
 
@@ -89,7 +91,7 @@ Spreadsheets are read with pandas and analyzed once with the LLM:
 - Column semantics
 - Relationships between tables
 
-Each table becomes one searchable chunk. The actual table data is **stored as a file** (CSV per table), not as SQL rows. Table content is expected to be queried through agentic tools in the future; the chunk file and its metadata (`table_name`, `schema`, `file_path`) are the source of truth for that.
+Each table becomes one searchable chunk. The actual table data is **stored as a file** (CSV per table in `documents/`), not as SQL rows — the chunk row links to it via `source_id` (→ `__documents__.file_path`). Table content is expected to be queried through agentic tools in future; the stored CSV and the chunk metadata (`table_name`, `schema`) are the source of truth for that.
 
 ## Running the Application
 
@@ -151,10 +153,11 @@ The plugin system lives in `app/plugin`:
 | Piece                                        | Role                                                                                                                                                                                                                                                                                                                                                                            |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Plugin` (`app/plugin/base.py`)              | The contract: `name`, `accepts`. No pipeline methods — all behavior is hook handlers, declared with the `@hook(name)` decorator.                                                                                                                                                                                                                                     |
-| `IngestionContext` (`app/plugin/context.py`) | Read-only details of the document being ingested: `source_id`, `source_filename`, `source_content_type`, `source_bytes`, `parent_source_id`.                                                                                                                                                                                                                        |
-| `IngestionRuntime` (`app/plugin/runtime.py`) | Per-ingestion-run state, created by the ingestion service: `context`, `llm`, `hooks`, `emit_file`. No storage — the service persists everything.                                                                                                                                                                                                                                |
+| `IngestionFile` (`app/plugin/context.py`)     | The unit of ingestion: a file's `filename`, `content_type`, `file_bytes`, an optional `description`, and its own auto-generated, read-only `source_id`. Used for top-level ingestion and for files a plugin emits.                                                                                                                                                        |
+| `IngestionContext` (`app/plugin/context.py`)  | Read-only details of the run: `file` (the file being ingested), `parent_file` (the file that emitted it, if any), and `origin_file` (the top-most file in the emission chain — `file` itself for top-level ingestion).                                                                                                                                                     |
+| `IngestionRuntime` (`app/plugin/runtime.py`)  | Per-ingestion-run state, created by the ingestion service: `context`, the shared services (`llm`, `embedder`, `vector_storage`, `sql_storage`, `file_storage`), `hooks`, and `emit_file`. Chunk and source persistence stays with the ingestion service.                                                                                                          |
 | `RetrievalRuntime` (`app/plugin/runtime.py`) | Per-retrieval-run state, created by the retrieval service: `query`, `llm`, `hooks`.                                                                                                                                                                                                                                                                                             |
-| `HookBus` + `@hook` (`app/plugin/hooks.py`)  | The event bus that drives the pipeline, typed per hook. Hook names are plain wire strings; the built-in names are typed with `Literal` overloads on `@hook` and `emit` (misspelling one is a type error), and each hook has a `TypedDict` payload and a handler type. Some hooks are observational, others are response hooks whose handler return values the services consume. |
+| `HookBus` + `@hook` (`app/plugin/hooks.py`)  | The event bus that drives the pipeline, typed per hook. Hook names are plain wire strings; the built-in names are typed with `Literal` overloads on `@hook` and `trigger` (misspelling one is a type error), and each hook has a `TypedDict` payload and a handler type. Some hooks are observational, others are response hooks whose handler return values the services consume. |
 | `PluginRegistry` (`app/plugin/registry.py`)  | Holds the registered plugins, discovers their `@hook`-decorated methods and wires them into the bus, and offers each document to all plugins via `accepts`.                                                                                                                                                                                                                     |
 
 The plugin framework lives in `app/plugin/`; the built-in plugins live in `app/plugins/`. The container (`app/container.py`) is the composition root that builds the hook bus, registry, plugins, and services.
@@ -163,19 +166,21 @@ The **ingestion service owns all persistence** — plugins only generate chunks 
 
 ### Ingestion Pipeline
 
-The `IngestionService` drives the pipeline through hooks:
+The `IngestionService` drives the pipeline through hooks. It walks the emission tree **recursively** through an inner function defined inside `ingest()`: the top-level file is processed first, and each file a plugin emits is ingested by a recursive call to that same inner function (the public `ingest()` stays a thin entry point). The steps below describe one file's turn; a file's emitted children are processed before it completes.
 
-1. Build the `IngestionContext` for the file (no type resolution — the system does not judge what a file is).
-2. Offer the file to **every registered plugin** via `plugin.accepts(context)`. Each plugin decides for itself whether it wants to manage that file (the built-ins claim their file extensions; a plugin may claim as many or as few document shapes as it likes). If no plugin accepts the file, ingestion fails with `InvalidDocumentError`.
-3. Build a per-run `IngestionRuntime` and store the source file (File DB + `__documents__` row).
+**Persistence is collected, then committed.** While the tree is walked, the service only *collects* what would be saved (source files, chunk records, vectors). It commits everything in one `_commit` step **only after every file in the tree has processed successfully** — so if any single process fails, nothing is saved.
+
+1. Build the `IngestionContext` for the file (no type resolution — the system does not judge what a file is): the `IngestionFile`, its `parent_file` (the emitting file, when it was emitted), and its `origin_file` (the top-most file in the emission chain — itself for top-level ingestion). The file's optional `description` is extra context plugins may use when they need LLM inference about it.
+2. Offer the file to **every registered plugin** via `plugin.accepts(context)`. Each plugin decides for itself whether it wants to manage that file (the built-ins claim their file extensions; a plugin may claim as many or as few document shapes as it likes). If no plugin accepts the top-level file, ingestion fails with `InvalidDocumentError`; an emitted file no plugin accepts is skipped with a warning.
+3. Build a per-run `IngestionRuntime`. Every file that goes through ingestion — the user upload and each file a plugin emits — is stored exactly once in the File DB (`documents/`) with a `__documents__` row. The `is_origin` column marks the user upload (`True`); emitted files are stored with `is_origin = False`.
 4. Emit the **`ingestion_process`** hook (`context`, `runtime`). Every plugin's handler that accepts the file generates chunks — and may call `runtime.emit_file` along the way — and returns them. Any parsing a plugin needs is done inside the handler (e.g. `TextPlugin` parses with Unstructured.io itself — the service never parses). The service collects all returned chunks and persists them:
     - chunk text is embedded and stored in the **Vector DB**,
-    - the chunk record (including any chunk file in the **File DB**) is stored in the **SQL DB** (`__chunks__`), with the stored file path and lineage stamped into the chunk's metadata,
-    - chunk metadata is saved **as-is** — plugins define their own keys.
-5. Drain the files the plugins emitted (`runtime.take_emitted_files()`). Each emitted file is re-ingested through the same pipeline (`ingest_bytes`) with a fresh `source_id` and a `parent_source_id` pointing back at the document that emitted it. The returned chunks are combined with the parent's.
-6. Emit lifecycle hooks throughout (`ingestion_started`, `file_emitted`, `file_subprocessed`, `ingestion_completed`) — every payload carries the per-run `IngestionRuntime`.
+    - the chunk record is stored in the **SQL DB** (`__chunks__`), with the lineage (`source_id`, `parent_source_id`, `origin_source_id`) stored as columns,
+    - chunk metadata is saved **as-is** — plugins define their own keys. A chunk never carries file bytes; a plugin that wants a file persisted emits it with `runtime.emit_file`.
+5. Drain the files the plugins emitted (`runtime.pop_emitted_files()`). Each emitted file is re-ingested through the same pipeline (`ingest`) with the emitting file passed as its `parent_file` and the run's `origin_file` passed through unchanged. Every `IngestionFile` has its own auto-generated `source_id`, so the emitted file is a distinct source; `parent_file` is its direct emitter and `origin_file` is the top-most ancestor. The returned chunks are combined with the parent's.
+6. Emit lifecycle hooks throughout (`ingestion_started`, `file_emitted`, `file_subprocessed`, `file_completed`) — every payload carries the per-run `IngestionRuntime`. `file_completed` fires for every file the pipeline walks (children before their emitter) once its whole subtree is processed. **`ingestion_completed` fires exactly once, at the very end, after the commit** — the whole ingestion is done and everything is persisted.
 
-For text documents, `TextPlugin` parses the source with Unstructured.io and chunks the text. Emitting embedded tables as CSV files (to be subprocessed by `TablePlugin`) is disabled for now pending better table-aware chunking — see the TODO in `TextPlugin._process`. The emission mechanism itself remains fully available on the runtime for any plugin.
+For text documents, `TextPlugin` parses the source with Unstructured.io and chunks the text. Embedded tables are reassembled and emitted as CSVs (see [File Emission and Subprocess](#file-emission-and-subprocess)) for the `TablePlugin` to enrich; embedded images are emitted as files with `runtime.emit_file`, and the figure's description (caption + nearby text) is indexed as its own text chunk.
 
 ### Retrieval Pipeline
 
@@ -225,9 +230,12 @@ All other hooks are observational.
 | `ingestion_process`   | `context`, `runtime`                 | `Sequence[IngestedChunk] \| None` |
 | `file_emitted`        | `context`, `emitted_file`, `runtime` | —                                 |
 | `file_subprocessed`   | `emitted_file`, `chunks`, `runtime`  | —                                 |
+| `file_completed`      | `context`, `chunks`, `runtime`       | —                                 |
 | `ingestion_completed` | `context`, `chunks`, `runtime`       | —                                 |
 | `retrieval_finalize`  | `chunk`, `runtime`                   | `RetrievedChunk \| None`          |
 | `retrieval_completed` | `chunks`, `runtime`                  | —                                 |
+
+`file_completed` fires once per file in the emission tree (the file's `context`, the chunks of its whole subtree, and that file's `runtime`) after the file and all its emitted children are processed, before anything is committed. `ingestion_completed` fires once per ingestion, at the very end, after the commit: the top-level `context`, all chunks, and the top-level `runtime`.
 
 Example — a plugin that generates chunks and audits ingestion:
 
@@ -241,27 +249,29 @@ class AuditPlugin(Plugin):
 
     @hook("ingestion_completed")
     async def on_completed(self, payload: IngestionCompletedPayload) -> None:
-        print(f"[audit] {payload['context'].source_filename} -> {len(payload['chunks'])} chunks")
+        print(f"[audit] {payload['context'].file.filename} -> {len(payload['chunks'])} chunks")
 ```
 
-Custom hooks work the same way: decorate a handler with any name and emit it through the bus (`runtime.hooks.emit("my.event", {...})`).
+Custom hooks work the same way: decorate a handler with any name and trigger it through the bus (`runtime.hooks.trigger("my.event", {...})`).
 
 ## Context and Runtime
 
-Plugins never talk to storage or providers directly, and their constructors take **options only — no services**. Hook handlers receive:
+Plugin constructors take **options only — no services**. Hook handlers receive:
 
-- **`IngestionContext`** — what is being ingested: `source_id`, `source_filename`, `source_content_type`, `source_bytes`, and `parent_source_id` (set for subprocessed files).
+- **`IngestionContext`** — what is being ingested: `file` (an `IngestionFile` — the bytes, identity, auto-generated `source_id`, and optional `description`), `parent_file` (the emitting file, set for subprocessed files), and `origin_file` (the top-most file in the emission chain — `file` itself for top-level ingestion).
 - **`RetrievalContext`** — what is being retrieved: `user_query`. It is the retrieval-phase counterpart of `IngestionContext` and is passed in every retrieval hook payload.
-- **`IngestionRuntime`** — the only per-run state and action a plugin gets:
+- **`IngestionRuntime`** — the per-run state and shared services a plugin gets:
 
 | Member                                          | Purpose                                                   |
 | ----------------------------------------------- | --------------------------------------------------------- |
 | `context`                                       | The ingestion context for this run.                       |
 | `llm`                                           | The text-only LLM provider.                               |
+| `embedder`                                      | The embedding provider.                                   |
+| `vector_storage` / `sql_storage` / `file_storage` | The shared storages, for plugins that need to read or write other content. |
 | `hooks`                                         | The shared hook bus (plugins may emit their own events).  |
-| `emit_file(filename, content_type, file_bytes)` | Emit a file for subprocess by the plugins that accept it. |
+| `emit_file(filename, content_type, file_bytes, description=None)` | Emit a file for subprocess by the plugins that accept it. |
 
-There are deliberately no save/embed/vector actions — the ingestion service persists everything the plugins return. When storing chunk records, it stamps the storage path (`file_path`) and lineage (`parent_source_id`) into the chunk's metadata, which is otherwise saved **as-is** with no key conventions.
+Chunk and source persistence is not a runtime action — the ingestion service persists everything the plugins return: it embeds and stores chunk records, stores every file exactly once in `documents/`, and stores lineage as dedicated columns: `source_id` (the file the chunk came from), `parent_source_id` (the emitting file, `None` for top-level files), and `origin_source_id` (always set — the top-most file in the emission chain; a top-level file is its own origin).
 
 On the retrieval side, the `RetrievalService` builds a per-run **`RetrievalContext`** (holding `user_query`) and a **`RetrievalRuntime`** exposing `context`, `llm`, and `hooks`. Both are passed in every retrieval hook payload.
 
@@ -269,17 +279,38 @@ On the retrieval side, the `RetrievalService` builds a per-run **`RetrievalConte
 
 Plugins can emit files so embedded content is processed as its own document:
 
-1. A plugin calls `runtime.emit_file(filename, content_type, file_bytes)` while handling the `ingestion_process` hook.
-2. After the hook completes, the `IngestionService` takes all emitted files and runs each one back through `ingest_bytes` — full pipeline, fresh `source_id`, with `parent_source_id` set to the emitting document.
+1. A plugin calls `runtime.emit_file(filename, content_type, file_bytes, description=None)` while handling the `ingestion_process` hook. This builds a new `IngestionFile` (with its own auto-generated `source_id`).
+2. After the hook completes, the `IngestionService` takes all emitted files and runs each one back through `ingest`, passing the emitting file as the `parent_file` — full pipeline, distinct source. Each emitted file is also stored in `documents/` (with `is_origin = False`), so embedded content like extracted tables and images is persisted alongside the original upload.
 3. The emitted file is offered to all plugins again, and the one(s) that accept it process it.
 
-The intended use is a text document with embedded tables: `TextPlugin` would convert each parsed table to CSV and emit it, and `TablePlugin` would generate semantic chunks for each CSV (the service stores the table file).
+### File descriptions
+
+Context about a file travels on the file itself:
+
+- `IngestionFile` carries an optional `description` and its own auto-generated, read-only `source_id`. Every file ingested — top-level or emitted — is a distinct source identified by `source_id`; lineage between an emitted file and the file that produced it is carried by `IngestionContext.parent_file`.
+- Plugins read the description via `context.file.description` and can feed it to an LLM. Chunks store their lineage as columns: `source_id` (the file they came from), `parent_source_id` (the emitting file's `source_id`, `None` for top-level files), and `origin_source_id` (always set — the top-most file in the emission chain, so any chunk can be referenced back to the original document it descended from, not just its direct parent; a top-level file is its own origin). `IngestionContext` exposes the matching `file`, `parent_file`, and `origin_file`.
+
+This is how a plugin enriches content it hands off: `TextPlugin` emits each reassembled embedded table as a CSV whose description combines the parent file's `description` (if any) with the document text found around the table. `TablePlugin` then passes that context to its LLM. The same mechanism is used for images: `TextPlugin` emits each extracted image with a description (caption + nearby text), ready for a future `ImagePlugin` to consume.
+
+The main use today is a text document with embedded tables: `TextPlugin` reassembles each parsed table and emits it as a CSV, and `TablePlugin` generates the semantic chunk for it. Embedded images are emitted with `runtime.emit_file`; until an image plugin accepts them the service logs that they were not accepted, but the figure's description is still indexed as a text chunk so the content stays searchable.
+
+### Reassembling tables split across pages
+
+A table that spans a page break is parsed by Unstructured into separate table elements, one per page. `TextPlugin` walks the element stream in order and groups **runs** of tables: a run is a maximal sequence of table elements with only page furniture (page breaks, page numbers, headers, footers) between them. Any other element — text, an image, an unparseable table — ends the run, because that content genuinely separates the tables in the document. A bare page break does not.
+
+Each run is handed to `merge_table_fragments` (in `app/plugins/text.py`, since the logic is specific to that plugin's parsing), which folds the fragments back into whole tables:
+
+- a fragment whose header repeats the table's header is a continuation page — its header is dropped (kept once) and its rows appended;
+- a fragment with **no** header is appended as raw data rows when its column count matches and its values are type-compatible with the table's existing rows (a column does not mix numbers with non-numeric text); this recovers continuations where the header was not repeated;
+- anything else (different column count, different header, conflicting value types) starts a new table.
+
+Each reassembled table is emitted as a CSV with a header row (generated `col_N` names when none was detected, so downstream readers treat row 0 as column names) and a description containing, up to `NEARBY_TEXT_CHARS` (default 500) characters of the document text found immediately before and after the table.
 
 ## Project Structure
 
 ### `app/plugin`
 
-The plugin framework: `Plugin` contract, `IngestionContext` / `EmittedFile`, `IngestionRuntime` / `RetrievalRuntime`, the `HookBus` + `@hook` decorator with per-hook typed payloads, and `PluginRegistry`.
+The plugin framework: `Plugin` contract, `IngestionFile` / `IngestionContext`, `IngestionRuntime` / `RetrievalRuntime`, the `HookBus` + `@hook` decorator with per-hook typed payloads, and `PluginRegistry`. `IngestionFile` is the unit of ingestion — a file's bytes, an auto-generated `source_id`, and an optional `description` — used both at the API boundary (built by the RAG service from the upload) and for files a plugin emits for subprocess. `IngestionContext` is `file` + `origin_file` + `parent_file`.
 
 ### `app/plugins`
 
@@ -289,13 +320,15 @@ Built-in document-type plugins. Each module contains one `Plugin` subclass.
 
 `TextPlugin` — accepts text document extensions.
 
-Parses the source with Unstructured.io (the only place in the app that uses it) and chunks the text (`chunk_by_title` when titles are present, otherwise `chunk_elements`), returning the chunks from its `ingestion_process` handler. (Table emission is disabled for now — see the TODO in `_process`.)
+Constructor options: `ignore_images` and `ignore_tables` (both default `False`). When set, the plugin skips the processing overhead of embedded images or embedded tables: `ignore_images` disables image extraction in the partition call itself (`extract_images_in_pdf` and the image-block payload options turned off), so no figure files or description chunks are produced; `ignore_tables` emits no reassembled CSV, but the table text still ends up in the document chunks (`infer_table_structure` stays on so it is readable). An ignored image still occupies its place in the document stream and keeps separating runs of tables from each other.
+
+Parses the source with Unstructured.io (the only place in the app that uses it; with `infer_table_structure=True` so table cell grids are available, and with image extraction enabled so embedded pictures carry their bytes). It chunks the text (`chunk_by_title` when titles are present, otherwise `chunk_elements`), groups the stream into runs of tables (see [Reassembling tables split across pages](#reassembling-tables-split-across-pages)), reassembles each run with `merge_table_fragments` (defined in this module, since the logic is specific to this plugin's parsing), emits each reassembled table as a CSV with a description (the parent file's `description` plus the nearby text) for the `TablePlugin`, and emits each embedded image with `runtime.emit_file` (bytes + caption/nearby-text description) while indexing the figure with a text chunk carrying that description.
 
 #### `app/plugins/table.py`
 
 `TablePlugin` — accepts spreadsheet extensions.
 
-Reads CSV/XLS/XLSX with pandas (one table per sheet), normalizes table and column names, builds a row-sampled catalog, asks the LLM for one workbook-level semantic analysis (descriptions, roles, relationships), and returns one chunk per table from its `ingestion_process` handler. Each chunk carries its own CSV file and `table_name` / `schema` metadata. Table rows are not loaded into SQL.
+Reads CSV/XLS/XLSX with pandas (one table per sheet), keeping the schema exactly as it came from the file — table and column names are not normalized, deduplicated, or rewritten into safe identifiers — builds a row-sampled catalog, asks the LLM for one workbook-level semantic analysis (descriptions, roles, relationships), and returns one chunk per table from its `ingestion_process` handler. Each chunk carries `table_name` / `schema` metadata and searchable analysis text; the plugin does not emit or store any file. Table rows are not loaded into SQL — the preserved original schema is what a future agentic tool will query against. When the ingested file carries a `description` (e.g. the text found around an embedded table in the parent document), it is passed to the LLM as additional context for the analysis.
 
 ### `app/api`
 
@@ -305,7 +338,7 @@ Contains the FastAPI HTTP routes.
 
 Contains the RAG endpoints:
 
-- `/rag/ingest`: uploads and ingests a document.
+- `/rag/ingest`: uploads and ingests a document. The endpoint is the only place that touches FastAPI's `UploadFile`; it reads the upload and hands the plain bytes, filename, and content type to the RAG service, which builds the `IngestionFile`.
 - `/rag/retrieve`: retrieves relevant chunks without generating a final answer.
 - `/rag/answer`: performs retrieval and generates the final LLM answer.
 
@@ -353,13 +386,13 @@ Internal application models.
 
 - `app/services/ingestion.py` — the pipeline driver: offers each file to all plugins, builds context/runtime, fires the `ingestion_process` hook, persists everything (source, chunk files, chunk records, vectors), and re-ingests emitted files.
 - `app/services/retrieval.py` — runs the hybrid retriever and offers each chunk to the `retrieval_finalize` hook.
-- `app/services/rag.py` — top-level facade for the API: ingest, retrieve, answer.
+- `app/services/rag.py` — top-level facade for the API: `ingest(file_bytes, filename, content_type, description=None)` (builds the `IngestionFile` and delegates to the ingestion service), `retrieve`, and `answer`.
 
 ### `app/store_file`, `app/store_sql`, `app/store_vector`
 
 Storage abstractions and local implementations:
 
-- `FileStorage` — upload/delete/read files. Local implementation stores under `.storage/file` (`documents/`, `chunk_files/`).
+- `FileStorage` — upload/delete/read files. Local implementation stores everything under `.storage/file/documents/`: the original user uploads (`is_origin = True` in `__documents__`) and every file a plugin emits (`is_origin = False`). Each file is stored exactly once, when it goes through ingestion — there is no separate chunk-file storage.
 - `SqlStorage` — tables, upserts, read-only queries, FTS5 search. Local implementation is one SQLite database (`.storage/sqlite/spreadsheets.sqlite3/database.db`) holding the `__chunks__` and `__documents__` system tables.
 - `VectorStorage` — stores chunk IDs + embeddings, cosine search. Local implementation is a persistent Chroma collection.
 
@@ -374,18 +407,18 @@ The composition root. It builds the hook bus, plugin registry, built-in plugins,
 
 ## Design Principles
 
-- **The pipeline is the hook bus.** Services emit hooks; plugins respond with data (chunks, replacement chunks) or reactions. There are no plugin `process`/`finalize` methods and no per-type dispatch in the system.
+- **The pipeline is the hook bus.** Services trigger hooks; plugins respond with data (chunks, replacement chunks) or reactions. There are no plugin `process`/`finalize` methods and no per-type dispatch in the system.
 - **Plugins own document types.** A plugin decides which files it wants to manage (`accepts`) and handles the ingestion/retrieval hooks for them. The system does not special-case document types and offers every file to all plugins.
-- **Services own persistence.** Plugins generate and return data; only the services touch the databases and file storage.
-- **Context and runtime, not globals.** Hook handlers receive everything they need per run: a read-only context (document details) plus a minimal runtime (shared services like the LLM, and `emit_file`). Plugin constructors take options only, never services.
+- **Services own chunk and source persistence.** Plugins generate and return data; the ingestion service is the only component that embeds, stores, or commits chunks, files, and vectors (the storages are exposed on the runtime for other plugin needs).
+- **Context and runtime, not globals.** Hook handlers receive everything they need per run: a read-only context (document details) plus a runtime (shared services — LLM, embedder, storages — and `emit_file`). Plugin constructors take options only, never services.
 - **Decoupled stores and providers.** Storage and AI providers sit behind small interfaces (`FileStorage`, `SqlStorage`, `VectorStorage`, `LLMProvider`, `Embedder`).
 - **Text-only LLM.** No binary attachments anywhere in the pipeline.
 
 ## Document Chunk Conventions
 
-- `IngestedChunk` fields: `plugin` (which plugin produced it, used for finalize routing), `text` (search + answer evidence), `metadata` (free-form, plugin-defined), and optional `file_filename` / `file_content_type` / `file_bytes` (stored as a chunk file by the service).
+- `IngestedChunk` fields: `plugin` (which plugin produced it, used for finalize routing), `text` (search + answer evidence), and `metadata` (free-form, plugin-defined). A chunk never carries file bytes — a plugin that wants a file persisted emits it with `runtime.emit_file`.
 - **There are no metadata key conventions.** The ingestion service persists a chunk's `metadata` as-is. Keys are defined by the plugin that produced the chunk (e.g. `TablePlugin` uses `table_name` and `schema`, intended for future agentic table querying).
-- The service stamps a couple of storage/lineage keys onto the metadata when persisting: `file_path` (where the chunk file was stored) and `parent_source_id` (for subprocessed documents).
+- Lineage is **not** in the metadata — it is stored as chunk-table columns: `source_id`, `parent_source_id` (the emitting file, `None` for top-level documents), and `origin_source_id` (always set — the top-most file in the emission chain; a top-level file is its own origin).
 
 ## Tests
 
@@ -395,7 +428,7 @@ The test suite lives in `tests/` and uses pytest.
 python -m pytest tests
 ```
 
-The suite covers the hook bus, plugin registry acceptance, both built-in plugins (with fakes for LLM/embedding/storage), the hook-driven retrieval finalization, and end-to-end ingestion pipelines using real local SQLite and file storage with a stubbed Unstructured partition.
+The suite covers the hook bus, plugin registry acceptance, both built-in plugins (with fakes for LLM/embedding/storage, including `TextPlugin`'s `ignore_images` / `ignore_tables` options), the table-fragment merging in `TextPlugin`, the file-description flow through ingestion and subprocess, the hook-driven retrieval finalization, the RAG service facade, and end-to-end ingestion pipelines using real local SQLite and file storage with a stubbed Unstructured partition — including hook ordering (`file_completed` per file, `ingestion_completed` once after the commit) and commit-then-fail atomicity.
 
 ## Extending the Application
 

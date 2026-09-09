@@ -67,7 +67,7 @@ All database and file persistence is owned by the services — plugins only prod
 Built-in plugins:
 
 - `TextPlugin` — text documents (pdf, docx, txt, md, html, ...). Chunks the text, reassembles embedded tables that were split across page breaks (merging fragments that share a schema and have no other content between them) and emits each as a CSV for the `TablePlugin`, and emits embedded images with `runtime.emit_file` while indexing each figure with a description chunk. Constructor options `ignore_images` and `ignore_tables` (both default `False`) skip the processing overhead of embedded images or embedded tables: with `ignore_images`, image extraction is disabled in the partition call entirely (no emitted figure files, no description chunks); with `ignore_tables`, no reassembled CSV is emitted, but the table text still ends up in the document chunks (`infer_table_structure` stays on for that). An ignored image still occupies its place in the document stream and keeps separating runs of tables.
-- `TablePlugin` — spreadsheets (csv, xlsx, xls) and emitted table files. Generates one chunk per table with LLM-generated semantic context and the table's original schema (kept verbatim) in its metadata; it does not emit or store files.
+- `TablePlugin` — spreadsheets (csv, xlsx, xls) and emitted table files. Generates one chunk per table with LLM-generated, retrieval-optimized descriptions (workbook context + per-table description + sample data). Its metadata carries `table_name` and, for tables embedded in a parent document, the forwarded `source_page_number`. Schema and relationship extraction is deliberately left to the agent that queries the stored tables; it does not emit or store files.
 
 Adding a new document type means adding one plugin and registering it — no changes to the ingestion or retrieval services.
 
@@ -84,14 +84,14 @@ This allows the system to handle both semantic queries and queries that depend o
 
 ### Spreadsheet Semantics
 
-Spreadsheets are read with pandas and analyzed once with the LLM:
+Spreadsheets are read with pandas and described once with the LLM:
 
 - Workbook meaning
-- Table descriptions
-- Column semantics
-- Relationships between tables
+- Retrieval-optimized table descriptions
 
-Each table becomes one searchable chunk. The actual table data is **stored as a file** (CSV per table in `documents/`), not as SQL rows — the chunk row links to it via `source_id` (→ `__documents__.file_path`). Table content is expected to be queried through agentic tools in future; the stored CSV and the chunk metadata (`table_name`, `schema`) are the source of truth for that.
+Schema and relationship extraction is deliberately **not** done at ingestion: the agent that queries the stored tables identifies them.
+
+Each table becomes one searchable chunk (description + sample data). The actual table data is **stored as a file** (CSV per table in `documents/`), not as SQL rows — the chunk row links to it via `source_id` (→ `__documents__.file_path`). Table content is expected to be queried through agentic tools in future; the stored CSV and the chunk metadata (`table_name`, and `source_page_number` for embedded tables) are the source of truth for that.
 
 ## Running the Application
 
@@ -153,7 +153,7 @@ The plugin system lives in `app/plugin`:
 | Piece                                        | Role                                                                                                                                                                                                                                                                                                                                                                               |
 | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Plugin` (`app/plugin/base.py`)              | The contract: `name`, `accepts`. No pipeline methods — all behavior is hook handlers, declared with the `@hook(name)` decorator.                                                                                                                                                                                                                                                   |
-| `IngestionFile` (`app/plugin/context.py`)    | The unit of ingestion: a file's `filename`, `content_type`, `file_bytes`, an optional `description`, and its own auto-generated, read-only `source_id`. Used for top-level ingestion and for files a plugin emits.                                                                                                                                                                 |
+| `IngestionFile` (`app/plugin/context.py`)     | The unit of ingestion: a file's `filename`, `content_type`, `file_bytes`, an optional `description`, and its own auto-generated, read-only `source_id`. Used for top-level ingestion and for files a plugin emits.                                                                                                                                                        |
 | `IngestionContext` (`app/plugin/context.py`) | Read-only details of the run: `file` (the file being ingested), `parent_file` (the file that emitted it, if any), and `origin_file` (the top-most file in the emission chain — `file` itself for top-level ingestion).                                                                                                                                                             |
 | `IngestionRuntime` (`app/plugin/runtime.py`) | Per-ingestion-run state, created by the ingestion service: `context`, the shared services (`llm`, `embedder`, `vector_storage`, `sql_storage`, `file_storage`), `hooks`, and `emit_file`. Chunk and source persistence stays with the ingestion service.                                                                                                                           |
 | `RetrievalRuntime` (`app/plugin/runtime.py`) | Per-retrieval-run state, created by the retrieval service: `query`, `llm`, `hooks`.                                                                                                                                                                                                                                                                                                |
@@ -176,7 +176,7 @@ The `IngestionService` drives the pipeline through hooks. It walks the emission 
 4. Emit the **`ingestion_process`** hook (`context`, `runtime`). Every plugin's handler that accepts the file generates chunks — and may call `runtime.emit_file` along the way — and returns them. Any parsing a plugin needs is done inside the handler (e.g. `TextPlugin` parses with Unstructured.io itself — the service never parses). The service collects all returned chunks and persists them:
     - chunk text is embedded and stored in the **Vector DB**,
     - the chunk record is stored in the **SQL DB** (`__chunks__`), with the lineage (`source_id`, `parent_source_id`, `origin_source_id`) stored as columns,
-    - chunk metadata is saved **as-is** — plugins define their own keys. A chunk never carries file bytes; a plugin that wants a file persisted emits it with `runtime.emit_file`.
+    - chunk metadata is saved **as-is** — plugins define their own keys. Before persistence, chunks inherit the metadata of the chunks above them in the emission tree (their own keys win on a collision). A chunk never carries file bytes; a plugin that wants a file persisted emits it with `runtime.emit_file`.
 5. Drain the files the plugins emitted (`runtime.pop_emitted_files()`). Each emitted file is re-ingested through the same pipeline (`ingest`) with the emitting file passed as its `parent_file` and the run's `origin_file` passed through unchanged. Every `IngestionFile` has its own auto-generated `source_id`, so the emitted file is a distinct source; `parent_file` is its direct emitter and `origin_file` is the top-most ancestor. The returned chunks are combined with the parent's.
 6. Emit lifecycle hooks throughout (`ingestion_started`, `file_emitted`, `file_subprocessed`, `file_completed`) — every payload carries the per-run `IngestionRuntime`. `file_completed` fires for every file the pipeline walks (children before their emitter) once its whole subtree is processed. **`ingestion_completed` fires exactly once, at the very end, after the commit** — the whole ingestion is done and everything is persisted.
 
@@ -269,7 +269,7 @@ Plugin constructors take **options only — no services**. Hook handlers receive
 | `embedder`                                                        | The embedding provider.                                                    |
 | `vector_storage` / `sql_storage` / `file_storage`                 | The shared storages, for plugins that need to read or write other content. |
 | `hooks`                                                           | The shared hook bus (plugins may emit their own events).                   |
-| `emit_file(filename, content_type, file_bytes, description=None)` | Emit a file for subprocess by the plugins that accept it.                  |
+| `emit_file(filename, content_type, file_bytes, description=None)` | Emit a file for subprocess by the plugins that accept it. |
 
 Chunk and source persistence is not a runtime action — the ingestion service persists everything the plugins return: it embeds and stores chunk records, stores every file exactly once in `documents/`, and stores lineage as dedicated columns: `source_id` (the file the chunk came from), `parent_source_id` (the emitting file, `None` for top-level files), and `origin_source_id` (always set — the top-most file in the emission chain; a top-level file is its own origin).
 
@@ -292,7 +292,9 @@ Context about a file travels on the file itself:
 
 This is how a plugin enriches content it hands off: `TextPlugin` emits each reassembled embedded table as a CSV whose description combines the parent file's `description` (if any) with the document text found around the table. `TablePlugin` then passes that context to its LLM. The same mechanism is used for images: `TextPlugin` emits each extracted image with a description (caption + nearby text), ready for a future `ImagePlugin` to consume.
 
-The main use today is a text document with embedded tables: `TextPlugin` reassembles each parsed table and emits it as a CSV, and `TablePlugin` generates the semantic chunk for it. Embedded images are emitted with `runtime.emit_file`; until an image plugin accepts them the service logs that they were not accepted, but the figure's description is still indexed as a text chunk so the content stays searchable.
+The main use today is a text document with embedded tables: `TextPlugin` reassembles each parsed table and emits it as a CSV, and `TablePlugin` generates the searchable chunk for it. Embedded images are emitted with `runtime.emit_file`; until an image plugin accepts them the service logs that they were not accepted, but the figure's description is still indexed as a text chunk so the content stays searchable.
+
+**Chunk metadata inheritance** covers machine-readable provenance across the emission tree: when the ingestion service walks the tree, every chunk inherits the merged metadata of all the chunks above it, and its own keys win on a collision. So an embedded table's chunk inherits `source_page_number` from its parent document's text chunks without any file-level plumbing; a top-level spreadsheet's chunks have no ancestors and keep exactly what the plugin set. Inheritance is transitive through the whole chain and applies before persistence, hooks (`file_subprocessed`, `file_completed`, `ingestion_completed`), and the API response.
 
 ### Reassembling tables split across pages
 
@@ -328,7 +330,7 @@ Parses the source with Unstructured.io (the only place in the app that uses it; 
 
 `TablePlugin` — accepts spreadsheet extensions.
 
-Reads CSV/XLS/XLSX with pandas (one table per sheet), keeping the schema exactly as it came from the file — table and column names are not normalized, deduplicated, or rewritten into safe identifiers — builds a row-sampled catalog, asks the LLM for one workbook-level semantic analysis (descriptions, roles, relationships), and returns one chunk per table from its `ingestion_process` handler. Each chunk carries `table_name` / `schema` metadata and searchable analysis text; the plugin does not emit or store any file. Table rows are not loaded into SQL — the preserved original schema is what a future agentic tool will query against. When the ingested file carries a `description` (e.g. the text found around an embedded table in the parent document), it is passed to the LLM as additional context for the analysis.
+Reads CSV/XLS/XLSX with pandas (one table per sheet), keeping the schema exactly as it came from the file — table and column names are not normalized, deduplicated, or rewritten into safe identifiers — builds a row-sampled catalog, asks the LLM for one workbook-level pass that produces retrieval-optimized descriptions (the workbook and each table), and returns one chunk per table from its `ingestion_process` handler. Each chunk carries searchable text (table name, workbook context, description, sample data) and `table_name` metadata plus, for tables embedded in a parent document, the `source_page_number` inherited from the parent document's chunks. Schema and relationship extraction is deliberately out of scope at ingestion — the agent that queries the stored tables identifies them. The plugin does not emit or store any file, and table rows are not loaded into SQL. When the ingested file carries a `description` (e.g. the text found around an embedded table in the parent document), it is passed to the LLM as additional context for the descriptions.
 
 ### `app/api`
 
@@ -418,7 +420,7 @@ The composition root for the external collaborators. It builds the providers, st
 ## Document Chunk Conventions
 
 - `IngestedChunk` fields: `plugin` (which plugin produced it, used for finalize routing), `text` (search + answer evidence), and `metadata` (free-form, plugin-defined). A chunk never carries file bytes — a plugin that wants a file persisted emits it with `runtime.emit_file`.
-- **There are no metadata key conventions.** The ingestion service persists a chunk's `metadata` as-is. Keys are defined by the plugin that produced the chunk (e.g. `TablePlugin` uses `table_name` and `schema`, intended for future agentic table querying).
+- **There are no metadata key conventions.** The ingestion service persists a chunk's `metadata` as-is. Keys are defined by the plugin that produced the chunk (e.g. `TablePlugin` uses `table_name` and, for embedded tables, `source_page_number`, intended for future agentic table querying).
 - Lineage is **not** in the metadata — it is stored as chunk-table columns: `source_id`, `parent_source_id` (the emitting file, `None` for top-level documents), and `origin_source_id` (always set — the top-most file in the emission chain; a top-level file is its own origin).
 
 ## Tests

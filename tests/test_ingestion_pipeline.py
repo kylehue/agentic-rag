@@ -36,12 +36,6 @@ ANALYSIS = {
         {
             "index": 0,
             "description": "Sales per region.",
-            "role": "fact data",
-            "schema": [
-                {"name": "region", "description": "sales region"},
-                {"name": "amount", "description": "total amount"},
-            ],
-            "relationships": [],
         }
     ],
 }
@@ -109,6 +103,64 @@ class UnacceptedEmitterPlugin(Plugin):
             file_bytes=b"mystery bytes",
         )
         return [IngestedChunk(plugin=self.name, text="txt body")]
+
+
+class PageMetadataPlugin(Plugin):
+    """Accepts .txt files, stamps page metadata on its chunk, and emits a .csv."""
+
+    @property
+    def name(self) -> str:
+        return "page-metadata"
+
+    def accepts(self, context) -> bool:
+        return context.file.filename.endswith(".txt")
+
+    @hook("ingestion_process")
+    async def _process(self, payload: IngestionProcessPayload) -> list:
+        from app.models.chunk import IngestedChunk
+
+        if not self.accepts(payload["context"]):
+            return []
+
+        runtime = payload["runtime"]
+        await runtime.emit_file(
+            filename="embedded.csv",
+            content_type="text/csv",
+            file_bytes=b"a,b\n1,2",
+        )
+        return [
+            IngestedChunk(
+                plugin=self.name,
+                text="txt body",
+                metadata={"color": "red", "source_page_number": 7},
+            )
+        ]
+
+
+class CsvColorPlugin(Plugin):
+    """Accepts .csv files and stamps a key that conflicts with the parent's."""
+
+    @property
+    def name(self) -> str:
+        return "csv-color"
+
+    def accepts(self, context) -> bool:
+        return context.file.filename.endswith(".csv")
+
+    @hook("ingestion_process")
+    async def _process(self, payload: IngestionProcessPayload) -> list:
+        from app.models.chunk import IngestedChunk
+
+        if not self.accepts(payload["context"]):
+            return []
+
+        return [
+            IngestedChunk(
+                plugin=self.name,
+                text="csv body",
+                metadata={"color": "blue"},
+            )
+        ]
 
 
 class FailsOnEmitPlugin(Plugin):
@@ -249,7 +301,9 @@ def test_csv_ingest_end_to_end(tmp_path):
     assert row["origin_source_id"] == row["source_id"]
     metadata = row["metadata"]
     assert metadata["table_name"] == "sales"
-    assert metadata["schema"]
+    # No schema/relationship extraction; a top-level file has no source page.
+    assert "schema" not in metadata
+    assert "source_page_number" not in metadata
     assert "sql_rows" not in metadata
     assert "parent_source_id" not in metadata
     assert "origin_source_id" not in metadata
@@ -349,7 +403,12 @@ def test_text_ingest_emits_and_subprocesses_embedded_table(tmp_path):
     assert len(text_chunks) == 1
     assert "Quarterly report body." in text_chunks[0].text
     assert len(table_chunks) == 1
-    assert table_chunks[0].metadata["table_name"] == "report_table_1"
+    # The embedded table's chunk inherited source_page_number from the
+    # parent document's chunks; its own keys are unchanged.
+    assert table_chunks[0].metadata == {
+        "table_name": "report_table_1",
+        "source_page_number": 1,
+    }
 
     assert len(chunk_rows) == 2
 
@@ -693,6 +752,44 @@ def test_file_completed_per_file_and_ingestion_completed_once_at_the_end(tmp_pat
     assert final["runtime"] is parent_event["runtime"]
     assert len(documents_at_ingestion_completed) == 2
     assert len(chunk_rows_at_ingestion_completed) == 2
+
+
+def test_lower_chunks_inherit_higher_chunk_metadata_with_own_keys_winning(tmp_path):
+    # A chunk inherits the merged metadata of the chunks above it in the
+    # emission tree. On a key collision, the chunk's own value wins, and the
+    # upper chunks are left unchanged.
+    service, sql_storage, *_ = build_service(
+        tmp_path,
+        plugins=[PageMetadataPlugin(), CsvColorPlugin()],
+    )
+
+    async def flow():
+        await service.initialize()
+        chunks = await service.ingest(
+            make_ingestion_file(
+                file_bytes=b"txt",
+                filename="report.txt",
+                content_type="text/plain",
+            )
+        )
+        chunk_rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
+        await sql_storage.close()
+        return chunks, chunk_rows
+
+    chunks, chunk_rows = asyncio.run(flow())
+
+    txt_chunk = next(c for c in chunks if c.plugin == "page-metadata")
+    csv_chunk = next(c for c in chunks if c.plugin == "csv-color")
+
+    # Upper chunk: its own metadata, unchanged.
+    assert txt_chunk.metadata == {"color": "red", "source_page_number": 7}
+    # Lower chunk: inherits source_page_number; its own color wins the
+    # collision.
+    assert csv_chunk.metadata == {"color": "blue", "source_page_number": 7}
+
+    # The inheritance is persisted with the chunk record.
+    row = next(r for r in chunk_rows if r["plugin"] == "csv-color")
+    assert row["metadata"] == {"color": "blue", "source_page_number": 7}
 
 
 def test_process_failure_saves_nothing(tmp_path):

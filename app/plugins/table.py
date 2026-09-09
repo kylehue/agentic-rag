@@ -21,43 +21,26 @@ MAX_TABLE_CONTEXT_CHARS = 10_000
 SAMPLED_DATA_ROWS_PER_TABLE = 5
 
 
-WORKBOOK_ANALYSIS_PROMPT_TEMPLATE = """You are analyzing a set of tables extracted from one source for a retrieval system.
+WORKBOOK_ANALYSIS_PROMPT_TEMPLATE = """You are describing a set of tables extracted from one source for a retrieval system.
 
-The input is a catalog of tables. Tables may refer to, define, summarize, or
-join other tables. Analyze the catalog as a whole so each table's meaning is
-informed by the other tables.
+The input is a catalog of tables. Describe the source and each table well
+enough that a searcher can find them: what they contain, what the columns
+mean, the granularity of the rows, and the kinds of questions the tables can
+answer.
 
 Return valid JSON only in this exact shape:
 {
-  "workbook_description": "One concise description optimized for RAG retrieval. Prioritize keyword density and explicit context over human readability. Just mention the possible use-cases or search queries in this workbook, no need to describe the schema.",
+  "workbook_description": "One concise description of the whole source optimized for RAG retrieval. Prioritize keyword density and explicit context over human readability. Just mention the possible use-cases or search queries this source answers, no need to describe the schema.",
   "tables": [
     {
       "index": 0,
-      "description": "what this table contains and its role in the source",
-      "role": "for example: lookup, fact data, summary, instructions, assumptions",
-      "schema": [
-        {
-          "name": "column_name",
-          "description": "meaning of the column"
-        }
-      ],
-      "relationships": [
-        {
-          "table_index": 1,
-          "relationship": "how this table relates to that table"
-        }
-      ]
+      "description": "What this table contains, what its columns mean, its row granularity, and the search queries it can answer. Optimized for RAG retrieval: keyword-dense and explicit over human readability."
     }
   ]
 }
 
 Include every catalog index exactly once.
-
-The column data types are already inferred from the source data and are provided
-separately. Do not infer or modify data types.
-
-Use an empty relationships list when no relationship is supported by the data.
-Do not invent joins, formulas, or facts.
+Do not invent facts that are not supported by the data.
 
 {file_description}
 Table catalog:
@@ -91,7 +74,7 @@ class TablePlugin(Plugin):
         self,
         payload: IngestionProcessPayload,
     ) -> list[IngestedChunk]:
-        """Generate one chunk per table, enriched by a workbook-level LLM analysis."""
+        """Generate one chunk per table, enriched by a workbook-level LLM description."""
         context = payload["context"]
         runtime = payload["runtime"]
 
@@ -109,8 +92,9 @@ class TablePlugin(Plugin):
         # Build a compact catalog from DataFrames.
         catalog = self._build_catalog(tables)
 
-        # LLM generates semantic descriptions only.
-        # Pandas remains authoritative for data types.
+        # The LLM generates retrieval-optimized descriptions only.
+        # Schema and relationship discovery is left to the agent that
+        # queries the stored tables.
         workbook_description, table_analyses = await self._analyze_workbook(
             runtime.llm,
             catalog,
@@ -118,28 +102,10 @@ class TablePlugin(Plugin):
             context.file.description,
         )
 
-        self._add_related_table_names(table_analyses, tables)
-
-        # Pandas is the source of truth for schema types.
-        # Do this for every table before building any chunk text because a table
-        # may need to include another table's schema in its related-table context.
-        for index, table in enumerate(tables):
-            table_analyses[index]["schema"] = self._merge_schema_types(
-                table.dataframe,
-                table_analyses[index]["schema"],
-            )
-
         chunks: list[IngestedChunk] = []
 
         for index, table in enumerate(tables):
             analysis = table_analyses[index]
-
-            related_tables = self._related_table_schemas(
-                table_index=index,
-                analysis=analysis,
-                tables=tables,
-                table_analyses=table_analyses,
-            )
 
             chunks.append(
                 IngestedChunk(
@@ -147,14 +113,10 @@ class TablePlugin(Plugin):
                     text=self._analysis_text(
                         table_name=table.name,
                         workbook_description=workbook_description,
-                        analysis=analysis,
+                        description=analysis["description"],
                         dataframe=table.dataframe,
-                        related_tables=related_tables,
                     ),
-                    metadata={
-                        "table_name": table.name,
-                        "schema": analysis["schema"],
-                    },
+                    metadata={"table_name": table.name},
                 )
             )
 
@@ -216,7 +178,7 @@ class TablePlugin(Plugin):
         When present it is given to the LLM to inform the descriptions.
 
         Returns a safe fallback when the LLM fails or answers invalidly;
-        the raw data and pandas-derived schema are still indexed.
+        the table's sample data is still indexed.
         """
 
         try:
@@ -283,8 +245,8 @@ class TablePlugin(Plugin):
         """
         Build the schema representation sent to the LLM.
 
-        The LLM receives the already-inferred type and only needs to explain
-        the semantic meaning of the column.
+        The LLM uses the column names and inferred types to ground the
+        descriptions it writes.
         """
 
         return [
@@ -388,12 +350,7 @@ class TablePlugin(Plugin):
 
     @staticmethod
     def _empty_analysis() -> dict[str, Any]:
-        return {
-            "description": "",
-            "role": "",
-            "schema": [],
-            "relationships": [],
-        }
+        return {"description": ""}
 
     @classmethod
     def _parse_workbook_analysis(
@@ -433,124 +390,25 @@ class TablePlugin(Plugin):
                 continue
 
             description = item.get("description", "")
-            role = item.get("role", "")
-            schema = item.get("schema", [])
-            relationships = item.get("relationships", [])
 
             analyses[index] = {
                 "description": (
                     description if isinstance(description, str) else str(description)
-                ),
-                "role": (role if isinstance(role, str) else str(role)),
-                "schema": (schema if isinstance(schema, list) else []),
-                "relationships": (
-                    relationships if isinstance(relationships, list) else []
                 ),
             }
 
         return (workbook_description, analyses)
 
     @staticmethod
-    def _merge_schema_types(
-        dataframe: pd.DataFrame,
-        analysis_schema: list[Any],
-    ) -> list[dict[str, str]]:
-        """
-        Merge LLM-generated column descriptions with authoritative pandas types.
-
-        Pandas determines the type.
-        LLM determines the semantic description.
-        """
-
-        descriptions: dict[str, str] = {}
-
-        for column in analysis_schema:
-            if not isinstance(column, dict):
-                continue
-
-            name = column.get("name")
-
-            if not isinstance(name, str):
-                continue
-
-            description = column.get("description", "")
-
-            descriptions[name] = (
-                description if isinstance(description, str) else str(description)
-            )
-
-        merged: list[dict[str, str]] = []
-
-        for column in dataframe.columns:
-            name = str(column)
-
-            merged.append(
-                {
-                    "name": name,
-                    "type": TablePlugin._pandas_dtype_to_type(dataframe[column].dtype),
-                    "description": descriptions.get(
-                        name,
-                        "",
-                    ),
-                }
-            )
-
-        return merged
-
-    @staticmethod
-    def _related_table_schemas(
-        table_index: int,
-        analysis: dict[str, Any],
-        tables: list[ExtractedTable],
-        table_analyses: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Build schema context for tables related to the current table."""
-
-        related_tables: list[dict[str, Any]] = []
-        seen: set[int] = set()
-
-        for relationship in analysis["relationships"]:
-            if not isinstance(relationship, dict):
-                continue
-
-            related_index = relationship.get("table_index")
-
-            if not isinstance(related_index, int):
-                continue
-
-            if not 0 <= related_index < len(tables):
-                continue
-
-            # Prevent self-reference and duplicate related tables.
-            if related_index == table_index or related_index in seen:
-                continue
-
-            seen.add(related_index)
-
-            related_tables.append(
-                {
-                    "table_name": tables[related_index].name,
-                    "schema": table_analyses[related_index]["schema"],
-                    "relationship": relationship.get(
-                        "relationship",
-                        "",
-                    ),
-                }
-            )
-
-        return related_tables
-
-    @staticmethod
     def _analysis_text(
         table_name: str,
         workbook_description: str,
-        analysis: dict[str, Any],
+        description: str,
         dataframe: pd.DataFrame,
-        related_tables: list[dict[str, Any]],
     ) -> str:
         """
-        Build searchable text containing workbook meaning, schema, relationships,
-        related table schemas, and representative values.
+        Build searchable text: the table's identity, the workbook context, the
+        retrieval-optimized description, and representative values.
         """
 
         parts = [f"Table: {table_name}"]
@@ -558,77 +416,8 @@ class TablePlugin(Plugin):
         if workbook_description:
             parts.extend(("Workbook context:", workbook_description))
 
-        if analysis["role"]:
-            parts.append(f"Role: {analysis['role']}")
-
-        if analysis["description"]:
-            parts.extend(("Description:", analysis["description"]))
-
-        if analysis["schema"]:
-            parts.append("Schema:")
-
-            for column in analysis["schema"]:
-                if isinstance(
-                    column,
-                    dict,
-                ):
-                    name = column.get("name", "Unknown column")
-                    column_type = column.get("type", "TEXT")
-                    description = column.get("description", "")
-
-                    line = (f"- {name} " f"({column_type}): " f"{description}").rstrip()
-
-                    parts.append(line)
-
-                else:
-                    parts.append(f"- {column}")
-
-        if analysis["relationships"]:
-            parts.append("Related tables:")
-
-            for relationship in analysis["relationships"]:
-                if isinstance(
-                    relationship,
-                    dict,
-                ):
-                    target = relationship.get("sheet_name") or (
-                        "table " f"{relationship.get('table_index', 'unknown')}"
-                    )
-
-                    description = relationship.get("relationship", "")
-
-                    parts.append(f"- {target}: " f"{description}".rstrip())
-
-                else:
-                    parts.append(f"- {relationship}")
-
-        if related_tables:
-            parts.append("Related table schemas:")
-
-            for related in related_tables:
-                parts.append(f"Table: {related['table_name']}")
-
-                schema = related.get("schema", [])
-
-                if schema:
-                    for column in schema:
-                        if not isinstance(column, dict):
-                            continue
-
-                        name = column.get("name", "Unknown column")
-                        column_type = column.get("type", "TEXT")
-                        description = column.get("description", "")
-
-                        line = (
-                            f"- {name} " f"({column_type}): " f"{description}"
-                        ).rstrip()
-
-                        parts.append(line)
-
-                relationship = related.get("relationship", "")
-
-                if relationship:
-                    parts.append(f"Relationship: {relationship}")
+        if description:
+            parts.extend(("Description:", description))
 
         parts.extend(
             (
@@ -641,29 +430,3 @@ class TablePlugin(Plugin):
         )
 
         return "\n".join(parts)
-
-    @staticmethod
-    def _add_related_table_names(
-        table_analyses: list[dict[str, Any]],
-        tables: list[ExtractedTable],
-    ) -> None:
-        """Convert model-generated table indexes into stable table names."""
-
-        for analysis in table_analyses:
-            enriched_relationships: list[Any] = []
-
-            for relationship in analysis["relationships"]:
-                if not isinstance(relationship, dict):
-                    enriched_relationships.append(relationship)
-                    continue
-
-                enriched = relationship.copy()
-
-                index = enriched.get("table_index")
-
-                if isinstance(index, int) and 0 <= index < len(tables):
-                    enriched["sheet_name"] = tables[index].name
-
-                enriched_relationships.append(enriched)
-
-            analysis["relationships"] = enriched_relationships

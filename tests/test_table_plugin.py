@@ -21,12 +21,6 @@ def make_analysis():
             {
                 "index": 0,
                 "description": "Sales per region.",
-                "role": "fact data",
-                "schema": [
-                    {"name": "Region", "description": "sales region"},
-                    {"name": "Amount", "description": "total amount"},
-                ],
-                "relationships": [],
             }
         ],
     }
@@ -71,7 +65,7 @@ def run_process(context, plugin: TablePlugin, **runtime_kwargs):
     return asyncio.run(flow()), parts
 
 
-def test_process_csv_returns_chunk_preserving_the_original_schema():
+def test_process_csv_returns_a_retrieval_chunk():
     llm = FakeLLM(json.dumps(make_analysis()))
     context = csv_context()
 
@@ -81,20 +75,17 @@ def test_process_csv_returns_chunk_preserving_the_original_schema():
     chunk = chunks[0]
     assert chunk.plugin == "table"
 
-    # Searchable text carries the LLM analysis and a data preview.
+    # Searchable text carries the workbook context, the LLM description,
+    # and a data preview.
     assert "Table: sales" in chunk.text
     assert "Regional sales figures." in chunk.text
-    assert "- Region (TEXT): sales region" in chunk.text
-    assert "Data:" in chunk.text
+    assert "Sales per region." in chunk.text
+    assert "Sample Data:" in chunk.text
     assert "north" in chunk.text
 
-    # The original file schema is preserved: column names are kept verbatim
-    # (not normalized/safe-stringed), types come from pandas.
-    assert chunk.metadata["table_name"] == "sales"
-    assert chunk.metadata["schema"] == [
-        {"name": "Region", "type": "TEXT", "description": "sales region"},
-        {"name": "Amount", "type": "INTEGER", "description": "total amount"},
-    ]
+    # No schema or relationship extraction: metadata is the table name only
+    # (a top-level file carries no source page).
+    assert chunk.metadata == {"table_name": "sales"}
 
     # No rows are loaded into SQL and no file is emitted: the chunk is
     # text + metadata only.
@@ -124,22 +115,8 @@ def test_process_xlsx_returns_chunk_per_sheet():
             {
                 "workbook_description": "Two sheets.",
                 "tables": [
-                    {
-                        "index": 0,
-                        "description": "alpha data",
-                        "role": "",
-                        "schema": [],
-                        "relationships": [],
-                    },
-                    {
-                        "index": 1,
-                        "description": "beta data",
-                        "role": "",
-                        "schema": [],
-                        "relationships": [
-                            {"table_index": 0, "relationship": "joins alpha"}
-                        ],
-                    },
+                    {"index": 0, "description": "alpha data"},
+                    {"index": 1, "description": "beta data"},
                 ],
             }
         )
@@ -157,10 +134,10 @@ def test_process_xlsx_returns_chunk_per_sheet():
     names = {chunk.metadata["table_name"] for chunk in chunks}
     assert names == {"Alpha", "Beta 2"}
 
-    # Relationship indexes are rewritten to stable table names.
+    # The chunk text carries the workbook context and the table's description.
     beta = next(chunk for chunk in chunks if chunk.metadata["table_name"] == "Beta 2")
-    assert "Alpha" in beta.text
-    assert "joins alpha" in beta.text
+    assert "Two sheets." in beta.text
+    assert "beta data" in beta.text
 
     # No files are emitted: the table plugin produces text + metadata only.
     assert parts.runtime.pop_emitted_files() == []
@@ -174,7 +151,9 @@ def test_llm_failure_falls_back_to_raw_data():
 
     assert len(chunks) == 1
     assert "Table: sales" in chunks[0].text
-    assert "Data:" in chunks[0].text
+    # The description is empty on fallback, but the sample data is indexed.
+    assert "Description:" not in chunks[0].text
+    assert "Sample Data:" in chunks[0].text
     assert "Region" in chunks[0].text
 
 

@@ -1,7 +1,9 @@
 import logging
 from collections.abc import Sequence
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import JSON, Boolean, Column, Integer, String, Text
@@ -90,6 +92,7 @@ class IngestionService:
             file: IngestionFile,
             parent_file: IngestionFile | None,
             depth: int,
+            inherited_metadata: dict[str, Any],
         ) -> tuple[IngestionContext, IngestionRuntime, list[IngestedChunk]]:
             """Process one file, then recurse into every file it emits.
 
@@ -101,6 +104,11 @@ class IngestionService:
             child. An empty chunk list marks a skipped file: no plugin
             accepted it, so it was neither stored nor processed (its runtime
             is discarded without firing any hooks).
+
+            ``inherited_metadata`` is the merged metadata of every chunk
+            produced above this file in the emission tree. This file's chunks
+            inherit it (their own keys win on a collision), and the merged
+            result is passed down to the files they emit.
             """
             if depth >= MAX_SUBPROCESS_DEPTH:
                 raise InvalidDocumentError("Document subprocess depth exceeded.")
@@ -156,6 +164,16 @@ class IngestionService:
             )
             own_chunks = [chunk for result in results if result for chunk in result]
 
+            # This file's chunks inherit the metadata of the chunks above
+            # them in the emission tree; on a key collision, this file's own
+            # value wins. The merged result is what their children inherit.
+            merged_own: list[IngestedChunk] = []
+            children_metadata = dict(inherited_metadata)
+            for chunk in own_chunks:
+                merged = {**inherited_metadata, **chunk.metadata}
+                merged_own.append(replace(chunk, metadata=merged))
+                children_metadata.update(merged)
+
             # Recurse into the emitted files in emission order, collecting each
             # subtree and reporting it back through the subprocess hook.
             child_chunks: list[IngestedChunk] = []
@@ -164,6 +182,7 @@ class IngestionService:
                     file=emitted,
                     parent_file=file,
                     depth=depth + 1,
+                    inherited_metadata=children_metadata,
                 )
                 child_chunks.extend(subtree)
                 await self._hooks.trigger(
@@ -175,7 +194,7 @@ class IngestionService:
                     ),
                 )
 
-            all_chunks = [*own_chunks, *child_chunks]
+            all_chunks = [*merged_own, *child_chunks]
 
             if not all_chunks:
                 logger.warning(
@@ -196,7 +215,7 @@ class IngestionService:
                 ),
             )
 
-            pending_chunks.extend((context, chunk) for chunk in own_chunks)
+            pending_chunks.extend((context, chunk) for chunk in merged_own)
 
             return context, runtime, all_chunks
 
@@ -204,6 +223,7 @@ class IngestionService:
             file=file,
             parent_file=None,
             depth=0,
+            inherited_metadata={},
         )
 
         await self._commit(pending_sources, pending_chunks)

@@ -26,12 +26,6 @@ ANALYSIS = {
         {
             "index": 0,
             "description": "Sales per region.",
-            "role": "fact data",
-            "schema": [
-                {"name": "region", "description": "sales region"},
-                {"name": "amount", "description": "total amount"},
-            ],
-            "relationships": [],
         }
     ],
 }

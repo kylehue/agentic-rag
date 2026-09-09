@@ -350,7 +350,8 @@ Domain-specific errors (`InvalidDocumentError` for unsupported/invalid uploads).
 
 ### `app/llm`
 
-- `app/llm/base.py` — the text-only `LLMProvider` interface.
+- `app/llm/base.py` — the `LLMProvider` interface: the wire types (`ChatMessage`, `ImageContent`, `ToolSpec`, `ToolCall`, `ChatResult`) and the public surface. A `ChatMessage`'s content is a plain string or a list of text and image parts (vision). Providers implement one raw primitive (`complete` -- the lowest-level public entry point, accepting any combination of tools and a JSON schema) and declare `capabilities` (both providers assume full native support: tool calling, structured outputs, and vision). The base class provides `answer` (plain text), `chat` (native tool calling), and `structured` (native JSON-schema output, validated with pydantic) as thin compositions of it. There are no fallback strategies: if the model or endpoint cannot comply, the error propagates.
+- `app/llm/openai.py` — the OpenAI-compatible implementation (custom `base_url` supported, e.g. a routing endpoint).
 - `app/llm/gemini.py` — the Gemini implementation.
 
 ### `app/embedders`
@@ -403,8 +404,9 @@ The composition root for the external collaborators. It builds the providers, st
 - **Services own chunk and source persistence.** Plugins generate and return data; the ingestion service is the only component that embeds, stores, or commits chunks, files, and vectors (the storages are exposed on the runtime for other plugin needs).
 - **Context and runtime, not globals.** Lifecycle methods receive everything they need per run: a read-only context (document details) plus a runtime (shared services — LLM, embedder, storages — and `emit_file`). Plugin constructors take options only, never services.
 - **Decoupled stores and providers.** Storage and AI providers sit behind small interfaces (`FileStorage`, `SqlStorage`, `VectorStorage`, `LLMProvider`, `Embedder`).
+- **Native LLM capabilities, no silent fallbacks.** Both providers assume the model natively supports tool calling, structured outputs (JSON schema), and vision. There is no degraded prompt-based path: if the model or endpoint cannot comply, the error propagates to the caller.
 - **The facade composes, the container injects.** The container supplies the external collaborators (LLM, embedder, retriever, storages, plugins); `RagService` composes everything internal from them -- the plugin registry and the ingestion/retrieval services. The API layer only ever talks to the facade.
-- **Text-only LLM.** No binary attachments anywhere in the pipeline.
+- **Text and images to the LLM, nothing else.** Messages carry text and image parts (vision); no other binary attachments anywhere in the pipeline.
 
 ## Document Chunk Conventions
 

@@ -10,7 +10,13 @@ from unstructured.documents.elements import (
 )
 
 from app.embedders.base import Embedder
-from app.llm.base import LLMProvider
+from app.llm.base import (
+    ChatMessage,
+    LLMCapabilities,
+    LLMProvider,
+    RawResult,
+    ToolSpec,
+)
 from app.plugin.context import IngestionContext, IngestionFile
 from app.plugin.registry import PluginRegistry
 from app.plugin.runtime import IngestionRuntime
@@ -20,15 +26,52 @@ from app.store_vector.base import VectorStorage
 
 
 class FakeLLM(LLMProvider):
-    """Text-only LLM stub returning a fixed response."""
+    """LLM stub that replays scripted raw completions.
 
-    def __init__(self, response: str = "") -> None:
-        self.response = response
-        self.prompts: list[str] = []
+    One entry (the common case) is returned for every call; several entries
+    are consumed in order and the last one repeats once the script runs out.
+    Entries may be a str (plain text content), a RawResult, or an Exception
+    to raise. The provider's strategy layer (tool-convention parsing,
+    corrective retries, structured validation) runs for real on top of these
+    raw completions.
+    """
 
-    async def answer(self, query: str) -> str:
-        self.prompts.append(query)
-        return self.response
+    def __init__(self, *responses: str | RawResult | BaseException) -> None:
+        self._responses = list(responses) or [""]
+        self._index = 0
+        self.calls: list[list[ChatMessage]] = []
+        # Recorded message content; a str, or a list of text/image parts.
+        self.prompts: list = []
+        self.tools: list[list[ToolSpec]] = []
+        self.json_schemas: list[dict | None] = []
+
+    @property
+    def capabilities(self) -> LLMCapabilities:
+        return LLMCapabilities()
+
+    async def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolSpec] | None = None,
+        json_schema: dict | None = None,
+    ) -> RawResult:
+        self.calls.append(messages)
+        self.prompts.append(messages[-1].content if messages else "")
+        self.tools.append(tools or [])
+        self.json_schemas.append(json_schema)
+
+        if len(self._responses) == 1:
+            item = self._responses[0]
+        else:
+            item = self._responses[self._index]
+            self._index = min(self._index + 1, len(self._responses) - 1)
+
+        if isinstance(item, BaseException):
+            raise item
+        if isinstance(item, RawResult):
+            return item
+        return RawResult(content=item)
 
 
 class FakeEmbedder(Embedder):

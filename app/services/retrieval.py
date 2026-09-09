@@ -1,17 +1,13 @@
 from app.llm.base import LLMProvider
 from app.models.chunk import RetrievedChunk
 from app.plugin.context import RetrievalContext
-from app.plugin.hooks import (
-    RetrievalCompletedPayload,
-    RetrievalFinalizePayload,
-)
 from app.plugin.registry import PluginRegistry
 from app.plugin.runtime import RetrievalRuntime
 from app.retrievers.base import Retriever
 
 
 class RetrievalService:
-    """Retrieves chunks and finalizes them through the retrieval hooks."""
+    """Retrieves chunks and finalizes them through the plugins' lifecycle methods."""
 
     def __init__(
         self,
@@ -22,7 +18,7 @@ class RetrievalService:
     ) -> None:
         self._retriever = retriever
         self._llm = llm
-        self._hooks = registry.hooks
+        self._registry = registry
 
     async def retrieve(self, user_query: str) -> list[RetrievedChunk]:
         """Retrieves chunks given a user query."""
@@ -31,7 +27,6 @@ class RetrievalService:
 
         runtime = RetrievalRuntime(
             context=context,
-            hooks=self._hooks,
             llm=self._llm,
         )
 
@@ -40,13 +35,8 @@ class RetrievalService:
         finalized: list[RetrievedChunk] = []
 
         for chunk in chunks:
-            replacements = await self._hooks.trigger(
-                "retrieval_finalize",
-                RetrievalFinalizePayload(
-                    context=context,
-                    chunk=chunk,
-                    runtime=runtime,
-                ),
+            replacements = await self._registry.retrieval_finalize(
+                chunk, context, runtime
             )
 
             replacement = next(
@@ -56,13 +46,6 @@ class RetrievalService:
 
             finalized.append(replacement if replacement is not None else chunk)
 
-        await self._hooks.trigger(
-            "retrieval_completed",
-            RetrievalCompletedPayload(
-                context=context,
-                chunks=finalized,
-                runtime=runtime,
-            ),
-        )
+        await self._registry.retrieval_completed(finalized, context, runtime)
 
         return finalized

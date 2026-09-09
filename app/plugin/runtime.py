@@ -1,10 +1,16 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from app.embedders.base import Embedder
 from app.llm.base import LLMProvider
 from app.plugin.context import IngestionContext, IngestionFile, RetrievalContext
-from app.plugin.hooks import FileEmittedPayload, HookBus
 from app.store_file.base import FileStorage
 from app.store_sql.base import SqlStorage
 from app.store_vector.base import VectorStorage
+
+if TYPE_CHECKING:
+    from app.plugin.registry import PluginRegistry
 
 
 class IngestionRuntime:
@@ -12,17 +18,17 @@ class IngestionRuntime:
 
     Created by the IngestionService for each ingestion (including
     subprocessed files). Plugins use it to reach the shared services
-    (`llm`, `embedder`, the storages, `hooks`) and to emit files for
-    subprocess. Chunk and source persistence stays with the ingestion
-    service; the storages are exposed for plugins that need to read or
-    write other content.
+    (`llm`, `embedder`, the storages) and to emit files for subprocess.
+    Chunk and source persistence stays with the ingestion service; the
+    storages are exposed for plugins that need to read or write other
+    content.
     """
 
     def __init__(
         self,
         *,
         context: IngestionContext,
-        hooks: HookBus,
+        registry: PluginRegistry,
         llm: LLMProvider,
         embedder: Embedder,
         vector_storage: VectorStorage,
@@ -30,7 +36,7 @@ class IngestionRuntime:
         file_storage: FileStorage,
     ) -> None:
         self._context = context
-        self._hooks = hooks
+        self._registry = registry
         self._llm = llm
         self._embedder = embedder
         self._vector_storage = vector_storage
@@ -43,8 +49,8 @@ class IngestionRuntime:
         return self._context
 
     @property
-    def hooks(self) -> HookBus:
-        return self._hooks
+    def registry(self) -> PluginRegistry:
+        return self._registry
 
     @property
     def llm(self) -> LLMProvider:
@@ -87,14 +93,7 @@ class IngestionRuntime:
             description=description,
         )
         self._emitted.append(emitted)
-        await self._hooks.trigger(
-            "file_emitted",
-            FileEmittedPayload(
-                context=self._context,
-                emitted_file=emitted,
-                runtime=self,
-            ),
-        )
+        await self._registry.file_emitted(emitted, self._context, self)
         return emitted
 
     def pop_emitted_files(self) -> list[IngestionFile]:
@@ -108,28 +107,22 @@ class RetrievalRuntime:
     """Per-retrieval-run state available to plugins during retrieval.
 
     Created by the RetrievalService for each retrieve() call. Finalize
-    handlers use it to reach the retrieval context (the user query), the
-    shared LLM, and the hook bus.
+    handlers use it to reach the retrieval context (the user query) and
+    the shared LLM.
     """
 
     def __init__(
         self,
         *,
         context: RetrievalContext,
-        hooks: HookBus,
         llm: LLMProvider,
     ) -> None:
         self._context = context
-        self._hooks = hooks
         self._llm = llm
 
     @property
     def context(self) -> RetrievalContext:
         return self._context
-
-    @property
-    def hooks(self) -> HookBus:
-        return self._hooks
 
     @property
     def llm(self) -> LLMProvider:

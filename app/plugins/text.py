@@ -26,7 +26,6 @@ from unstructured.partition.auto import partition
 from app.models.chunk import IngestedChunk
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionContext
-from app.plugin.hooks import IngestionProcessPayload, hook
 from app.plugin.runtime import IngestionRuntime
 
 # How much surrounding document text (in characters) is captured above and
@@ -83,14 +82,11 @@ class TextPlugin(Plugin):
         extension = Path(context.file.filename).suffix.lower().lstrip(".")
         return extension in self.SUPPORTED_EXTENSIONS
 
-    @hook("ingestion_process")
-    async def _process(
+    async def on_ingestion_process(
         self,
-        payload: IngestionProcessPayload,
+        context: IngestionContext,
+        runtime: IngestionRuntime,
     ) -> list[IngestedChunk]:
-        context = payload["context"]
-        runtime = payload["runtime"]
-
         if not self.accepts(context):
             return []
 

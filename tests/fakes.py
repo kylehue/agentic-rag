@@ -12,7 +12,7 @@ from unstructured.documents.elements import (
 from app.embedders.base import Embedder
 from app.llm.base import LLMProvider
 from app.plugin.context import IngestionContext, IngestionFile
-from app.plugin.hooks import HookBus
+from app.plugin.registry import PluginRegistry
 from app.plugin.runtime import IngestionRuntime
 from app.store_file.base import FileStorage
 from app.store_sql.base import SqlStorage
@@ -184,7 +184,7 @@ def make_context(
 def build_runtime(
     context: IngestionContext,
     *,
-    hooks: HookBus | None = None,
+    registry: PluginRegistry | None = None,
     llm: LLMProvider | None = None,
     embedder: Embedder | None = None,
     vector_storage: VectorStorage | None = None,
@@ -196,7 +196,7 @@ def build_runtime(
     Returns a namespace with `runtime` plus each fake for assertions.
     """
     parts = SimpleNamespace(
-        hooks=hooks if hooks is not None else HookBus(),
+        registry=registry if registry is not None else PluginRegistry(),
         llm=llm if llm is not None else FakeLLM(),
         embedder=embedder if embedder is not None else FakeEmbedder(),
         vector_storage=(
@@ -208,7 +208,7 @@ def build_runtime(
 
     parts.runtime = IngestionRuntime(
         context=context,
-        hooks=parts.hooks,
+        registry=parts.registry,
         llm=parts.llm,
         embedder=parts.embedder,
         vector_storage=parts.vector_storage,

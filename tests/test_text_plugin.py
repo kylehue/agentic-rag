@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from app.plugin.hooks import IngestionProcessPayload
 from app.plugin.registry import PluginRegistry
 
 from fakes import (
@@ -53,13 +52,13 @@ TABLE_B_NO_HEADER = (
 
 
 def run_process(context, plugin: TextPlugin, partition_result, **runtime_kwargs):
-    """Wire the plugin through a registry and fire the process hook.
+    """Wire the plugin through a registry and run the ingestion process.
 
     Returns (chunks, parts); parts carries the runtime and the fakes.
     """
     registry = PluginRegistry()
     registry.register(plugin)
-    parts = build_runtime(context, hooks=registry.hooks, **runtime_kwargs)
+    parts = build_runtime(context, registry=registry, **runtime_kwargs)
 
     async def flow():
         with patch.object(
@@ -67,15 +66,7 @@ def run_process(context, plugin: TextPlugin, partition_result, **runtime_kwargs)
             "partition",
             return_value=partition_result,
         ):
-            results = await parts.runtime.hooks.trigger(
-                "ingestion_process",
-                IngestionProcessPayload(context=context, runtime=parts.runtime),
-            )
-        chunks = []
-        for result in results:
-            if result:
-                chunks.extend(result)
-        return chunks
+            return await registry.ingestion_process(context, parts.runtime)
 
     return asyncio.run(flow()), parts
 
@@ -450,15 +441,12 @@ def partition_kwargs_for(plugin: TextPlugin, elements) -> dict:
     context = make_context(filename="report.pdf")
     registry = PluginRegistry()
     registry.register(plugin)
-    parts = build_runtime(context, hooks=registry.hooks)
+    parts = build_runtime(context, registry=registry)
 
     async def flow():
         with patch.object(text_module, "partition") as mock_partition:
             mock_partition.return_value = elements
-            await parts.runtime.hooks.trigger(
-                "ingestion_process",
-                IngestionProcessPayload(context=context, runtime=parts.runtime),
-            )
+            await registry.ingestion_process(context, parts.runtime)
         return mock_partition.call_args.kwargs
 
     return asyncio.run(flow())  # type: ignore
@@ -506,18 +494,14 @@ def test_rejects_files_it_does_not_accept():
     context = make_context(filename="sales.xlsx")
     registry = PluginRegistry()
     registry.register(TextPlugin())
-    parts = build_runtime(context, hooks=registry.hooks)
+    parts = build_runtime(context, registry=registry)
 
     def boom(*args, **kwargs):
         raise AssertionError("partition should not be called for rejected files")
 
     async def flow():
         with patch.object(text_module, "partition", side_effect=boom):
-            results = await parts.runtime.hooks.trigger(
-                "ingestion_process",
-                IngestionProcessPayload(context=context, runtime=parts.runtime),
-            )
-        return [r for r in results if r]
+            return await registry.ingestion_process(context, parts.runtime)
 
     assert asyncio.run(flow()) == []
     assert parts.runtime.pop_emitted_files() == []

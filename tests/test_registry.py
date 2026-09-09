@@ -1,9 +1,11 @@
 import asyncio
+from dataclasses import replace
 
 import pytest
 
+from app.models.chunk import IngestedChunk, RetrievedChunk
 from app.plugin.base import Plugin
-from app.plugin.hooks import HookBus, IngestionStartedPayload, hook
+from app.plugin.context import RetrievalContext
 from app.plugin.registry import PluginRegistry
 
 from fakes import build_runtime, make_context
@@ -20,16 +22,6 @@ class NoopPlugin(Plugin):
 
     def accepts(self, context) -> bool:
         return self._accepts_all
-
-
-def emit_started(hooks: HookBus, context) -> None:
-    parts = build_runtime(context, hooks=hooks)
-    asyncio.run(
-        hooks.trigger(
-            "ingestion_started",
-            IngestionStartedPayload(context=context, runtime=parts.runtime),
-        )
-    )
 
 
 def test_accepting_plugins_returns_willing_plugins_in_order():
@@ -53,40 +45,6 @@ def test_duplicate_plugin_name_rejected():
         registry.register(NoopPlugin("a"))
 
 
-def test_decorated_hook_handlers_are_wired_on_register():
-    registry = PluginRegistry()
-    events: list = []
-
-    class TappingPlugin(NoopPlugin):
-        @hook("ingestion_started")
-        async def on_started(self, payload: IngestionStartedPayload) -> None:
-            events.append(payload["context"])
-
-    context = make_context()
-    registry.register(TappingPlugin("t"))
-    emit_started(registry.hooks, context)
-
-    assert events == [context]
-
-
-def test_decorated_handlers_receieve_runtime():
-    registry = PluginRegistry()
-    seen: list = []
-
-    class RuntimeSpyPlugin(NoopPlugin):
-
-        @hook("ingestion_started")
-        async def on_started(self, payload: IngestionStartedPayload) -> None:
-            seen.append(payload["runtime"])
-
-    registry.register(RuntimeSpyPlugin("spy"))
-    context = make_context()
-    emit_started(registry.hooks, context)
-
-    assert len(seen) == 1
-    assert seen[0].context is context
-
-
 def test_plugin_for_returns_registered_plugin():
     registry = PluginRegistry()
     plugin = NoopPlugin("a")
@@ -94,3 +52,90 @@ def test_plugin_for_returns_registered_plugin():
 
     assert registry.plugin_for("a") is plugin
     assert registry.plugin_for("missing") is None
+
+
+def test_events_reach_every_registered_plugin_with_context_and_runtime():
+    registry = PluginRegistry()
+    events: list = []
+
+    class TappingPlugin(NoopPlugin):
+        async def on_ingestion_started(self, context, runtime) -> None:
+            events.append((context, runtime))
+
+    context = make_context()
+    registry.register(TappingPlugin("t"))
+    parts = build_runtime(context, registry=registry)
+    asyncio.run(registry.ingestion_started(context, parts.runtime))
+
+    assert events == [(context, parts.runtime)]
+
+
+def test_ingestion_process_aggregates_chunks_in_registration_order():
+    registry = PluginRegistry()
+
+    class ChunkPlugin(NoopPlugin):
+        def __init__(self, name: str, texts: list[str]) -> None:
+            super().__init__(name)
+            self._texts = texts
+
+        async def on_ingestion_process(self, context, runtime) -> list:
+            return [
+                IngestedChunk(plugin=self.name, text=text) for text in self._texts
+            ]
+
+    registry.register(ChunkPlugin("a", ["a1"]))
+    registry.register(ChunkPlugin("b", ["b1", "b2"]))
+    registry.register(ChunkPlugin("c", []))
+
+    context = make_context()
+    parts = build_runtime(context, registry=registry)
+    chunks = asyncio.run(registry.ingestion_process(context, parts.runtime))
+
+    assert [chunk.text for chunk in chunks] == ["a1", "b1", "b2"]
+
+
+def test_retrieval_finalize_returns_one_result_per_plugin():
+    registry = PluginRegistry()
+    chunk = RetrievedChunk(
+        chunk_id="c1",
+        source_id="s1",
+        origin_source_id="s1",
+        plugin="a",
+        text="t",
+        score=0.5,
+    )
+
+    class Finalizer(NoopPlugin):
+        def __init__(self, name: str, replacement: str | None) -> None:
+            super().__init__(name)
+            self._replacement = replacement
+
+        async def on_retrieval_finalize(self, chunk, context, runtime):
+            if self._replacement is None:
+                return None
+            return replace(chunk, text=self._replacement)
+
+    registry.register(Finalizer("none", None))
+    registry.register(Finalizer("renamer", "renamed"))
+
+    context = make_context()
+    parts = build_runtime(context, registry=registry)
+    retrieval_context = RetrievalContext(user_query="q")
+    results = asyncio.run(
+        registry.retrieval_finalize(chunk, retrieval_context, parts.runtime)
+    )
+
+    assert results[0] is None
+    assert results[1] is not None
+    assert results[1].text == "renamed"
+
+
+def test_empty_registry_fans_out_to_nothing():
+    registry = PluginRegistry()
+    context = make_context()
+    parts = build_runtime(context, registry=registry)
+
+    assert (
+        asyncio.run(registry.ingestion_process(context, parts.runtime)) == []
+    )
+    asyncio.run(registry.ingestion_started(context, parts.runtime))

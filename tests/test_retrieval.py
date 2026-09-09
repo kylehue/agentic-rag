@@ -7,7 +7,6 @@ from pydantic import ValidationError
 from app.api_schemas.chunk import RetrievedChunkSchema
 from app.models.chunk import RetrievedChunk
 from app.plugin.base import Plugin
-from app.plugin.hooks import RetrievalFinalizePayload, hook
 from app.plugin.registry import PluginRegistry
 from app.retrievers.base import Retriever
 from app.services.retrieval import RetrievalService
@@ -24,7 +23,7 @@ class FakeRetriever(Retriever):
 
 
 class EnrichingPlugin(Plugin):
-    """Finalizes only the chunks it produced, via the retrieval.finalize hook."""
+    """Finalizes only the chunks it produced."""
 
     def __init__(self, name: str) -> None:
         self._name = name
@@ -36,13 +35,11 @@ class EnrichingPlugin(Plugin):
     def accepts(self, context) -> bool:
         return False
 
-    @hook("retrieval_finalize")
-    async def on_finalize(self, payload: RetrievalFinalizePayload):
-        chunk = payload["chunk"]
+    async def on_retrieval_finalize(self, chunk, context, runtime):
         if chunk.plugin != self._name:
             return None
         return replace(
-            chunk, text=f"{chunk.text} [enriched with {payload['context'].user_query}]"
+            chunk, text=f"{chunk.text} [enriched with {context.user_query}]"
         )
 
 
@@ -123,21 +120,30 @@ def test_retrieved_chunk_schema_rejects_missing_origin():
         RetrievedChunkSchema.model_validate(broken)
 
 
-def test_retrieval_completed_hook_fires_with_finalized_chunks():
+def test_retrieval_completed_fires_with_finalized_chunks():
     registry = PluginRegistry()
-    events: list[dict] = []
+    events: list = []
 
-    async def on_completed(payload):
-        events.append(payload)
+    class CompletionObserver(Plugin):
+        @property
+        def name(self) -> str:
+            return "completion-observer"
 
-    registry.hooks.register("retrieval_completed", on_completed)
+        def accepts(self, context) -> bool:
+            return False
+
+        async def on_retrieval_completed(self, chunks, context, runtime) -> None:
+            events.append((context, chunks, runtime))
+
+    registry.register(CompletionObserver())
 
     service = build_service(registry, FakeRetriever([make_chunk("text")]))
 
     asyncio.run(service.retrieve("q"))
 
     assert len(events) == 1
-    assert len(events[0]["chunks"]) == 1
-    # The completed payload carries the per-run retrieval context and runtime.
-    assert events[0]["context"].user_query == "q"
-    assert events[0]["runtime"].context is events[0]["context"]
+    context, chunks, runtime = events[0]
+    assert len(chunks) == 1
+    # The event carries the per-run retrieval context and runtime.
+    assert context.user_query == "q"
+    assert runtime.context is context

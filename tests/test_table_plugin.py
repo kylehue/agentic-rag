@@ -5,7 +5,6 @@ import json
 import pandas as pd
 
 from app.plugin.context import IngestionContext
-from app.plugin.hooks import IngestionProcessPayload
 from app.plugin.registry import PluginRegistry
 
 from fakes import FakeLLM, build_runtime, make_context
@@ -43,24 +42,16 @@ def csv_context(
 
 
 def run_process(context, plugin: TablePlugin, **runtime_kwargs):
-    """Wire the plugin through a registry and fire the process hook.
+    """Wire the plugin through a registry and run the ingestion process.
 
     Returns (chunks, parts); parts carries the runtime and the fakes.
     """
     registry = PluginRegistry()
     registry.register(plugin)
-    parts = build_runtime(context, hooks=registry.hooks, **runtime_kwargs)
+    parts = build_runtime(context, registry=registry, **runtime_kwargs)
 
     async def flow():
-        results = await parts.runtime.hooks.trigger(
-            "ingestion_process",
-            IngestionProcessPayload(context=context, runtime=parts.runtime),
-        )
-        chunks = []
-        for result in results:
-            if result:
-                chunks.extend(result)
-        return chunks
+        return await registry.ingestion_process(context, parts.runtime)
 
     return asyncio.run(flow()), parts
 

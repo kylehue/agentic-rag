@@ -14,13 +14,6 @@ from app.errors.document import InvalidDocumentError
 from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk
 from app.plugin.context import IngestionContext, IngestionFile
-from app.plugin.hooks import (
-    FileCompletedPayload,
-    FileSubprocessedPayload,
-    IngestionCompletedPayload,
-    IngestionProcessPayload,
-    IngestionStartedPayload,
-)
 from app.plugin.registry import PluginRegistry
 from app.plugin.runtime import IngestionRuntime
 from app.store_file.base import FileStorage
@@ -46,7 +39,6 @@ class IngestionService:
         file_storage: FileStorage,
     ) -> None:
         self._registry = registry
-        self._hooks = registry.hooks
         self._llm = llm
         self._embedder = embedder
         self._vector_storage = vector_storage
@@ -126,7 +118,7 @@ class IngestionService:
 
             runtime = IngestionRuntime(
                 context=context,
-                hooks=self._hooks,
+                registry=self._registry,
                 llm=self._llm,
                 embedder=self._embedder,
                 vector_storage=self._vector_storage,
@@ -147,10 +139,7 @@ class IngestionService:
                 )
                 return context, runtime, []  # avoid ingestion
 
-            await self._hooks.trigger(
-                "ingestion_started",
-                IngestionStartedPayload(context=context, runtime=runtime),
-            )
+            await self._registry.ingestion_started(context, runtime)
 
             # Every file that goes through ingestion is stored exactly once.
             # The flag marks user uploads so they can be told apart from
@@ -158,11 +147,7 @@ class IngestionService:
             pending_sources.append((file, parent_file is None))
 
             # Plugins generate chunks here and may emit files along the way.
-            results = await self._hooks.trigger(
-                "ingestion_process",
-                IngestionProcessPayload(context=context, runtime=runtime),
-            )
-            own_chunks = [chunk for result in results if result for chunk in result]
+            own_chunks = await self._registry.ingestion_process(context, runtime)
 
             # This file's chunks inherit the metadata of the chunks above
             # them in the emission tree; on a key collision, this file's own
@@ -185,14 +170,7 @@ class IngestionService:
                     inherited_metadata=children_metadata,
                 )
                 child_chunks.extend(subtree)
-                await self._hooks.trigger(
-                    "file_subprocessed",
-                    FileSubprocessedPayload(
-                        emitted_file=emitted,
-                        chunks=subtree,
-                        runtime=runtime,
-                    ),
-                )
+                await self._registry.file_subprocessed(emitted, subtree, context, runtime)
 
             all_chunks = [*merged_own, *child_chunks]
 
@@ -206,14 +184,7 @@ class IngestionService:
 
             # This file (and its whole emitted subtree) is processed. Nothing
             # is committed yet; ingestion_completed fires once, at the end.
-            await self._hooks.trigger(
-                "file_completed",
-                FileCompletedPayload(
-                    context=context,
-                    chunks=all_chunks,
-                    runtime=runtime,
-                ),
-            )
+            await self._registry.file_completed(all_chunks, context, runtime)
 
             pending_chunks.extend((context, chunk) for chunk in merged_own)
 
@@ -229,14 +200,7 @@ class IngestionService:
         await self._commit(pending_sources, pending_chunks)
 
         # The very end: every file processed and everything committed.
-        await self._hooks.trigger(
-            "ingestion_completed",
-            IngestionCompletedPayload(
-                context=top_context,
-                chunks=chunks,
-                runtime=top_runtime,
-            ),
-        )
+        await self._registry.ingestion_completed(chunks, top_context, top_runtime)
 
         return chunks
 

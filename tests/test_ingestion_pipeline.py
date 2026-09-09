@@ -8,11 +8,8 @@ import pytest
 
 from app.core.config import settings
 from app.errors.document import InvalidDocumentError
+from app.models.chunk import IngestedChunk
 from app.plugin.base import Plugin
-from app.plugin.hooks import (
-    IngestionProcessPayload,
-    hook,
-)
 from app.plugin.registry import PluginRegistry
 from app.plugins import text as text_module
 from app.services.ingestion import IngestionService
@@ -51,14 +48,8 @@ class SidecarPlugin(Plugin):
     def accepts(self, context) -> bool:
         return context.file.filename.endswith(".csv")
 
-    @hook("ingestion_process")
-    async def _process(
-        self,
-        payload: IngestionProcessPayload,
-    ) -> list:
-        from app.models.chunk import IngestedChunk
-
-        if not self.accepts(payload["context"]):
+    async def on_ingestion_process(self, context, runtime) -> list:
+        if not self.accepts(context):
             return []
 
         return [IngestedChunk(plugin=self.name, text="sidecar marker")]
@@ -74,10 +65,6 @@ class EmptyPlugin(Plugin):
     def accepts(self, context) -> bool:
         return True
 
-    @hook("ingestion_process")
-    async def _process(self, payload: IngestionProcessPayload) -> list:
-        return []
-
 
 class UnacceptedEmitterPlugin(Plugin):
     """Accepts .txt files, chunks them, and emits a file no plugin accepts."""
@@ -89,14 +76,10 @@ class UnacceptedEmitterPlugin(Plugin):
     def accepts(self, context) -> bool:
         return context.file.filename.endswith(".txt")
 
-    @hook("ingestion_process")
-    async def _process(
-        self,
-        payload: IngestionProcessPayload,
-    ) -> list:
-        from app.models.chunk import IngestedChunk
+    async def on_ingestion_process(self, context, runtime) -> list:
+        if not self.accepts(context):
+            return []
 
-        runtime = payload["runtime"]
         await runtime.emit_file(
             filename="data.unknown",
             content_type="application/x-unknown",
@@ -115,14 +98,10 @@ class PageMetadataPlugin(Plugin):
     def accepts(self, context) -> bool:
         return context.file.filename.endswith(".txt")
 
-    @hook("ingestion_process")
-    async def _process(self, payload: IngestionProcessPayload) -> list:
-        from app.models.chunk import IngestedChunk
-
-        if not self.accepts(payload["context"]):
+    async def on_ingestion_process(self, context, runtime) -> list:
+        if not self.accepts(context):
             return []
 
-        runtime = payload["runtime"]
         await runtime.emit_file(
             filename="embedded.csv",
             content_type="text/csv",
@@ -147,11 +126,8 @@ class CsvColorPlugin(Plugin):
     def accepts(self, context) -> bool:
         return context.file.filename.endswith(".csv")
 
-    @hook("ingestion_process")
-    async def _process(self, payload: IngestionProcessPayload) -> list:
-        from app.models.chunk import IngestedChunk
-
-        if not self.accepts(payload["context"]):
+    async def on_ingestion_process(self, context, runtime) -> list:
+        if not self.accepts(context):
             return []
 
         return [
@@ -174,15 +150,9 @@ class FailsOnEmitPlugin(Plugin):
     def accepts(self, context) -> bool:
         return context.file.filename.endswith((".txt", ".csv"))
 
-    @hook("ingestion_process")
-    async def _process(
-        self,
-        payload: IngestionProcessPayload,
-    ) -> list:
-        from app.models.chunk import IngestedChunk
-
-        context = payload["context"]
-        runtime = payload["runtime"]
+    async def on_ingestion_process(self, context, runtime) -> list:
+        if not self.accepts(context):
+            return []
 
         if context.file.filename.endswith(".csv"):
             raise RuntimeError("simulated plugin failure on the emitted file")
@@ -206,15 +176,9 @@ class ChainEmitterPlugin(Plugin):
     def accepts(self, context) -> bool:
         return context.file.filename.startswith("step")
 
-    @hook("ingestion_process")
-    async def _process(
-        self,
-        payload: IngestionProcessPayload,
-    ) -> list:
-        from app.models.chunk import IngestedChunk
-
-        context = payload["context"]
-        runtime = payload["runtime"]
+    async def on_ingestion_process(self, context, runtime) -> list:
+        if not self.accepts(context):
+            return []
 
         level = int(context.file.filename.split("step")[1].split(".")[0])
 
@@ -234,7 +198,6 @@ def build_service(tmp_path, *, llm=None, plugins=None):
     file_storage = LocalFileStorage(storage_dir=tmp_path / "file")
     vector_storage = FakeVectorStorage()
     registry = PluginRegistry()
-    hooks = registry.hooks
     for plugin in (plugins if plugins is not None else [TextPlugin(), TablePlugin()]):
         registry.register(plugin)
 
@@ -247,7 +210,7 @@ def build_service(tmp_path, *, llm=None, plugins=None):
         file_storage=file_storage,
     )
 
-    return service, sql_storage, file_storage, vector_storage, hooks
+    return service, sql_storage, file_storage, vector_storage, registry
 
 
 def test_csv_ingest_end_to_end(tmp_path):
@@ -319,27 +282,40 @@ def test_csv_ingest_end_to_end(tmp_path):
     assert vector_storage.added[0][0] == [chunks[0].chunk_id]
 
 
+class EmissionObserverPlugin(Plugin):
+    """Records file_emitted / file_subprocessed events. Accepts nothing."""
+
+    def __init__(self) -> None:
+        self.emitted: list = []
+        self.subprocessed: list = []
+
+    @property
+    def name(self) -> str:
+        return "emission-observer"
+
+    def accepts(self, context) -> bool:
+        return False
+
+    async def on_file_emitted(self, emitted_file, context, runtime) -> None:
+        self.emitted.append(emitted_file)
+
+    async def on_file_subprocessed(
+        self, emitted_file, chunks, context, runtime
+    ) -> None:
+        self.subprocessed.append((emitted_file, chunks))
+
+
 def test_text_ingest_emits_and_subprocesses_embedded_table(tmp_path):
     # A text document with an embedded table yields text chunks, and the
     # table is emitted as a CSV (with a description of the surrounding
     # context) that the TablePlugin sub-processes into one chunk.
     llm = FakeLLM(json.dumps(ANALYSIS))
-    service, sql_storage, file_storage, vector_storage, hooks = build_service(
+    service, sql_storage, file_storage, vector_storage, registry = build_service(
         tmp_path,
         llm=llm,
     )
-
-    emitted_events: list[dict] = []
-    subprocessed_events: list[dict] = []
-
-    async def on_emitted(payload):
-        emitted_events.append(payload)
-
-    async def on_subprocessed(payload):
-        subprocessed_events.append(payload)
-
-    hooks.register("file_emitted", on_emitted)
-    hooks.register("file_subprocessed", on_subprocessed)
+    observer = EmissionObserverPlugin()
+    registry.register(observer)
 
     table_html = (
         "<table><thead><tr><th>region</th><th>amount</th></tr></thead>"
@@ -387,15 +363,15 @@ def test_text_ingest_emits_and_subprocesses_embedded_table(tmp_path):
     assert original["file_path"] != emitted_doc["file_path"]
 
     # Emission and subprocess both happened exactly once.
-    assert len(emitted_events) == 1
-    emitted_file = emitted_events[0]["emitted_file"]
+    assert len(observer.emitted) == 1
+    emitted_file = observer.emitted[0]
     assert emitted_file.filename == "report_table_1.csv"
     assert emitted_file.content_type == "text/csv"
     # The emitted description carries the text found around the table.
     assert emitted_file.description is not None
     assert "Quarterly report body." in emitted_file.description
-    assert len(subprocessed_events) == 1
-    assert len(subprocessed_events[0]["chunks"]) == 1
+    assert len(observer.subprocessed) == 1
+    assert len(observer.subprocessed[0][1]) == 1
 
     # One text chunk (parent) and one table chunk (the sub-processed CSV).
     text_chunks = [c for c in chunks if c.plugin == "text"]
@@ -665,40 +641,50 @@ def test_unaccepted_emitted_file_is_ignored_with_warning(tmp_path, caplog):
     )
 
 
+class LifecycleObserverPlugin(Plugin):
+    """Records file_completed / ingestion_completed with the commit state at
+    fire time. Accepts nothing."""
+
+    def __init__(self, sql_storage) -> None:
+        self._sql_storage = sql_storage
+        self.file_completed: list = []
+        self.ingestion_completed: list = []
+
+    @property
+    def name(self) -> str:
+        return "lifecycle-observer"
+
+    def accepts(self, context) -> bool:
+        return False
+
+    async def on_file_completed(self, chunks, context, runtime) -> None:
+        documents = await self._sql_storage.get_all(
+            settings.DOCUMENT_METADATA_TABLE_NAME
+        )
+        self.file_completed.append((context, chunks, runtime, len(documents)))
+
+    async def on_ingestion_completed(self, chunks, context, runtime) -> None:
+        documents = await self._sql_storage.get_all(
+            settings.DOCUMENT_METADATA_TABLE_NAME
+        )
+        chunk_rows = await self._sql_storage.get_all(settings.CHUNK_TABLE_NAME)
+        self.ingestion_completed.append(
+            (context, chunks, runtime, len(documents), len(chunk_rows))
+        )
+
+
 def test_file_completed_per_file_and_ingestion_completed_once_at_the_end(tmp_path):
     # file_completed fires for every file the pipeline walks (children first,
     # the emitting parent last) and nothing is committed while it runs.
     # ingestion_completed fires exactly once, at the very end, after the
     # commit.
     llm = FakeLLM(json.dumps(ANALYSIS))
-    service, sql_storage, _files, _vectors, hooks = build_service(
+    service, sql_storage, _files, _vectors, registry = build_service(
         tmp_path,
         llm=llm,
     )
-
-    file_completed_events: list[dict] = []
-    ingestion_completed_events: list[dict] = []
-    documents_at_file_completed: list[dict] = []
-    documents_at_ingestion_completed: list[dict] = []
-    chunk_rows_at_ingestion_completed: list[dict] = []
-
-    async def on_file_completed(payload):
-        file_completed_events.append(payload)
-        documents_at_file_completed.extend(
-            await sql_storage.get_all(settings.DOCUMENT_METADATA_TABLE_NAME)
-        )
-
-    async def on_ingestion_completed(payload):
-        ingestion_completed_events.append(payload)
-        documents_at_ingestion_completed.extend(
-            await sql_storage.get_all(settings.DOCUMENT_METADATA_TABLE_NAME)
-        )
-        chunk_rows_at_ingestion_completed.extend(
-            await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
-        )
-
-    hooks.register("file_completed", on_file_completed)
-    hooks.register("ingestion_completed", on_ingestion_completed)
+    observer = LifecycleObserverPlugin(sql_storage)
+    registry.register(observer)
 
     table_html = (
         "<table><thead><tr><th>region</th><th>amount</th></tr></thead>"
@@ -729,29 +715,39 @@ def test_file_completed_per_file_and_ingestion_completed_once_at_the_end(tmp_pat
     chunks = asyncio.run(flow())
 
     # file_completed: once per file, emitted child before the parent.
-    assert [e["context"].file.filename for e in file_completed_events] == [
+    assert [e[0].file.filename for e in observer.file_completed] == [
         "report_table_1.csv",
         "report.pdf",
     ]
-    child_event, parent_event = file_completed_events
-    assert child_event["context"].parent_file is not None
-    assert parent_event["context"].parent_file is None
-    # The parent's payload carries the whole subtree: its own chunk plus
-    # the sub-processed table chunk.
-    assert [c.plugin for c in parent_event["chunks"]] == ["text", "table"]
+    child_context, child_chunks, child_runtime, child_docs = observer.file_completed[0]
+    parent_context, parent_chunks, parent_runtime, parent_docs = (
+        observer.file_completed[1]
+    )
+    assert child_context.parent_file is not None
+    assert parent_context.parent_file is None
+    # The parent's event carries the whole subtree: its own chunk plus the
+    # sub-processed table chunk.
+    assert [c.plugin for c in parent_chunks] == ["text", "table"]
 
     # Nothing is committed while file_completed is running.
-    assert documents_at_file_completed == []
+    assert child_docs == 0
+    assert parent_docs == 0
 
     # ingestion_completed: exactly once, at the very end, after the commit.
-    assert len(ingestion_completed_events) == 1
-    final = ingestion_completed_events[0]
-    assert final["context"].file.filename == "report.pdf"
-    assert final["context"].parent_file is None
-    assert final["chunks"] == chunks
-    assert final["runtime"] is parent_event["runtime"]
-    assert len(documents_at_ingestion_completed) == 2
-    assert len(chunk_rows_at_ingestion_completed) == 2
+    assert len(observer.ingestion_completed) == 1
+    (
+        final_context,
+        final_chunks,
+        final_runtime,
+        final_docs,
+        final_rows,
+    ) = observer.ingestion_completed[0]
+    assert final_context.file.filename == "report.pdf"
+    assert final_context.parent_file is None
+    assert final_chunks == chunks
+    assert final_runtime is parent_runtime
+    assert final_docs == 2
+    assert final_rows == 2
 
 
 def test_lower_chunks_inherit_higher_chunk_metadata_with_own_keys_winning(tmp_path):

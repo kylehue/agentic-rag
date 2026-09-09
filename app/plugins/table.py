@@ -13,7 +13,7 @@ from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionContext
-from app.plugin.hooks import IngestionProcessPayload, hook
+from app.plugin.runtime import IngestionRuntime
 from app.utils.string import render_template
 
 MAX_WORKBOOK_CONTEXT_CHARS = 30_000
@@ -69,15 +69,12 @@ class TablePlugin(Plugin):
         extension = Path(context.file.filename).suffix.lower().lstrip(".")
         return extension in self.SUPPORTED_EXTENSIONS
 
-    @hook("ingestion_process")
-    async def _process(
+    async def on_ingestion_process(
         self,
-        payload: IngestionProcessPayload,
+        context: IngestionContext,
+        runtime: IngestionRuntime,
     ) -> list[IngestedChunk]:
         """Generate one chunk per table, enriched by a workbook-level LLM description."""
-        context = payload["context"]
-        runtime = payload["runtime"]
-
         if not self.accepts(context):
             return []
 

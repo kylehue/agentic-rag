@@ -1,10 +1,9 @@
-import asyncio
 import base64
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
-from openai import OpenAI
-from openai.types.chat import ChatCompletionMessageFunctionToolCall
+from openai import AsyncOpenAI
 
 from app.core.config import Settings
 from app.llm.base import (
@@ -12,7 +11,7 @@ from app.llm.base import (
     ContentPart,
     LLMCapabilities,
     LLMProvider,
-    RawResult,
+    RawDelta,
     ToolCall,
     ToolSpec,
 )
@@ -29,14 +28,14 @@ class OpenAIProvider(LLMProvider):
         self._api_key = settings.OPENAI_API_KEY
         self._model = settings.OPENAI_MODEL
         self._base_url = settings.OPENAI_BASE_URL
-        self._client = None
+        self._client: AsyncOpenAI | None = None
 
-    def _ensure_client(self) -> OpenAI:
+    def _ensure_client(self) -> AsyncOpenAI:
         """Create and reuse the OpenAI client, or explain when the API key is missing."""
         if self._client is None:
             if not self._api_key:
                 raise ValueError("OPENAI_API_KEY is not configured")
-            self._client = OpenAI(
+            self._client = AsyncOpenAI(
                 api_key=self._api_key,
                 base_url=self._base_url,
             )
@@ -46,18 +45,19 @@ class OpenAIProvider(LLMProvider):
     def capabilities(self) -> LLMCapabilities:
         return FULL_CAPABILITIES
 
-    async def complete(
+    async def stream_complete(
         self,
         messages: list[ChatMessage],
         *,
         tools: list[ToolSpec] | None = None,
         json_schema: dict | None = None,
-    ) -> RawResult:
+    ) -> AsyncIterator[RawDelta]:
         client = self._ensure_client()
 
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": [self._to_wire(message) for message in messages],
+            "stream": True,
         }
         if tools:
             kwargs["tools"] = [self._to_wire_tool(spec) for spec in tools]
@@ -67,33 +67,41 @@ class OpenAIProvider(LLMProvider):
                 "json_schema": {"name": "response", "schema": json_schema},
             }
 
-        response = await asyncio.to_thread(client.chat.completions.create, **kwargs)
-        choice = response.choices[0]
-        message = choice.message
-
-        tool_calls: list[ToolCall] = []
-        for call in message.tool_calls or ():
-            # tool_calls is a union that also includes the custom tool-call
-            # shape, which has no .function member.
-            if not isinstance(call, ChatCompletionMessageFunctionToolCall):
+        # Tool calls stream in fragments: the id and name arrive once, and
+        # the JSON arguments arrive in pieces, each keyed by its index.
+        # Buffer the fragments and yield each call whole, at stream end.
+        pending: dict[int, dict[str, str]] = {}
+        stream = await client.chat.completions.create(**kwargs)
+        async for chunk in stream:
+            if not chunk.choices:
                 continue
+            delta = chunk.choices[0].delta
+            if delta.content:
+                yield RawDelta(text=delta.content)
+            for fragment in delta.tool_calls or ():
+                state = pending.setdefault(
+                    fragment.index, {"id": "", "name": "", "arguments": ""}
+                )
+                if fragment.id:
+                    state["id"] = fragment.id
+                if fragment.function is not None:
+                    if fragment.function.name:
+                        state["name"] += fragment.function.name
+                    if fragment.function.arguments:
+                        state["arguments"] += fragment.function.arguments
+
+        for state in pending.values():
             try:
-                arguments = json.loads(call.function.arguments or "{}")
+                arguments = json.loads(state["arguments"] or "{}")
             except json.JSONDecodeError:
                 arguments = {}
-            tool_calls.append(
-                ToolCall(
-                    id=call.id,
-                    name=call.function.name,
+            yield RawDelta(
+                tool_call=ToolCall(
+                    id=state["id"],
+                    name=state["name"],
                     arguments=arguments if isinstance(arguments, dict) else {},
                 )
             )
-
-        return RawResult(
-            content=message.content or "",
-            tool_calls=tuple(tool_calls),
-            finish_reason=choice.finish_reason,
-        )
 
     @staticmethod
     def _to_wire_content(

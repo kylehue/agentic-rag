@@ -1,4 +1,4 @@
-import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
@@ -11,7 +11,7 @@ from app.llm.base import (
     ContentPart,
     LLMCapabilities,
     LLMProvider,
-    RawResult,
+    RawDelta,
     ToolCall,
     ToolSpec,
 )
@@ -65,7 +65,7 @@ class GeminiProvider(LLMProvider):
         settings = settings or Settings()
         self._api_key = settings.GOOGLE_API_KEY
         self._model = settings.GEMINI_MODEL
-        self._client = None
+        self._client: genai.Client | None = None
 
     def _ensure_client(self) -> genai.Client:
         """Create and reuse the Gemini client, or explain when the API key is missing."""
@@ -95,15 +95,13 @@ class GeminiProvider(LLMProvider):
                 )
         return parts
 
-    async def complete(
+    def _prepare(
         self,
         messages: list[ChatMessage],
-        *,
-        tools: list[ToolSpec] | None = None,
-        json_schema: dict | None = None,
-    ) -> RawResult:
-        client = self._ensure_client()
-
+        tools: list[ToolSpec] | None,
+        json_schema: dict | None,
+    ) -> tuple[list[types.ContentUnionDict], types.GenerateContentConfig]:
+        """The Gemini contents and config for one completion."""
         # Gemini pairs function responses by name, not call id: recover the
         # names of any tool calls we are responding to.
         call_names = {
@@ -173,41 +171,45 @@ class GeminiProvider(LLMProvider):
                     )
                 )
 
-        response = await asyncio.to_thread(
-            client.models.generate_content,
+        return contents, config
+
+    async def stream_complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolSpec] | None = None,
+        json_schema: dict | None = None,
+    ) -> AsyncIterator[RawDelta]:
+        client = self._ensure_client()
+        contents, config = self._prepare(messages, tools, json_schema)
+
+        saw_candidate = False
+        # The aio method is a coroutine that returns an async iterator.
+        stream = await client.aio.models.generate_content_stream(
             model=self._model,
             contents=contents,
             config=config,
         )
-
-        candidates = response.candidates
-        if not candidates:
-            raise RuntimeError("Gemini returned no candidates")
-        candidate = candidates[0]
-
-        content = ""
-        tool_calls: list[ToolCall] = []
-        # Both `candidate.content` and `content.parts` are optional in the SDK.
-        parts: list[types.Part] | None = (
-            candidate.content.parts if candidate.content is not None else None
-        )
-        for part in parts or ():
-            if part.text:
-                content += part.text
-            elif part.function_call is not None and part.function_call.name:
-                tool_calls.append(
-                    ToolCall(
-                        id=f"gemini_{uuid4().hex}",
-                        name=part.function_call.name,
-                        arguments=dict(part.function_call.args or {}),
+        async for chunk in stream:
+            candidates = chunk.candidates
+            if not candidates:
+                continue
+            saw_candidate = True
+            candidate = candidates[0]
+            # Both `candidate.content` and `content.parts` are optional in
+            # the SDK.
+            if candidate.content is None:
+                continue
+            for part in candidate.content.parts or ():
+                if part.text:
+                    yield RawDelta(text=part.text)
+                elif part.function_call is not None and part.function_call.name:
+                    yield RawDelta(
+                        tool_call=ToolCall(
+                            id=f"gemini_{uuid4().hex}",
+                            name=part.function_call.name,
+                            arguments=dict(part.function_call.args or {}),
+                        )
                     )
-                )
-
-        finish_reason = (
-            candidate.finish_reason.name if candidate.finish_reason else None
-        )
-        return RawResult(
-            content=content,
-            tool_calls=tuple(tool_calls),
-            finish_reason=finish_reason,
-        )
+        if not saw_candidate:
+            raise RuntimeError("Gemini returned no candidates")

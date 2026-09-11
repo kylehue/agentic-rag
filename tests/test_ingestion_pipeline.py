@@ -263,10 +263,20 @@ def test_csv_ingest_end_to_end(tmp_path):
     assert row["parent_source_id"] is None
     assert row["origin_source_id"] == row["source_id"]
     metadata = row["metadata"]
-    assert metadata["table_name"] == "sales"
-    # No schema/relationship extraction; a top-level file has no source page.
-    assert "schema" not in metadata
-    assert "source_page_number" not in metadata
+    # The plugin stored the name plus a precomputed schema (so the agent can
+    # use the table without reading the file); the description is not
+    # duplicated into the metadata — it is in the chunk's text. The service
+    # added no SQL rows, lineage, or file path. A top-level file has no
+    # source page.
+    assert metadata == {
+        "table_name": "sales",
+        "schema": [
+            {"name": "region", "type": "TEXT"},
+            {"name": "amount", "type": "INTEGER"},
+        ],
+        "row_count": 1,
+        "column_count": 2,
+    }
     assert "sql_rows" not in metadata
     assert "parent_source_id" not in metadata
     assert "origin_source_id" not in metadata
@@ -380,11 +390,15 @@ def test_text_ingest_emits_and_subprocesses_embedded_table(tmp_path):
     assert "Quarterly report body." in text_chunks[0].text
     assert len(table_chunks) == 1
     # The embedded table's chunk inherited source_page_number from the
-    # parent document's chunks; its own keys are unchanged.
-    assert table_chunks[0].metadata == {
-        "table_name": "report_table_1",
-        "source_page_number": 1,
-    }
+    # parent document's chunks; its own keys (name, schema) are present
+    # alongside. The description is not duplicated into the metadata.
+    table_metadata = table_chunks[0].metadata
+    assert table_metadata["table_name"] == "report_table_1"
+    assert table_metadata["source_page_number"] == 1
+    assert table_metadata["schema"]
+    assert "description" not in table_metadata
+    assert table_metadata["row_count"] == 1
+    assert table_metadata["column_count"] == 2
 
     assert len(chunk_rows) == 2
 

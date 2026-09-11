@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
 from unstructured.documents.elements import (
@@ -14,7 +15,9 @@ from app.llm.base import (
     ChatMessage,
     LLMCapabilities,
     LLMProvider,
+    RawDelta,
     RawResult,
+    ToolCall,
     ToolSpec,
 )
 from app.plugin.context import IngestionContext, IngestionFile
@@ -34,11 +37,19 @@ class FakeLLM(LLMProvider):
     to raise. The provider's strategy layer (tool-convention parsing,
     corrective retries, structured validation) runs for real on top of these
     raw completions.
+
+    With `chunk_size`, the replayed text is split into that many characters
+    per `RawDelta`, to exercise token-level streaming for real.
     """
 
-    def __init__(self, *responses: str | RawResult | BaseException) -> None:
+    def __init__(
+        self,
+        *responses: str | RawResult | BaseException,
+        chunk_size: int | None = None,
+    ) -> None:
         self._responses = list(responses) or [""]
         self._index = 0
+        self._chunk_size = chunk_size
         self.calls: list[list[ChatMessage]] = []
         # Recorded message content; a str, or a list of text/image parts.
         self.prompts: list = []
@@ -49,12 +60,11 @@ class FakeLLM(LLMProvider):
     def capabilities(self) -> LLMCapabilities:
         return LLMCapabilities()
 
-    async def complete(
+    def _next(
         self,
         messages: list[ChatMessage],
-        *,
-        tools: list[ToolSpec] | None = None,
-        json_schema: dict | None = None,
+        tools: list[ToolSpec] | None,
+        json_schema: dict | None,
     ) -> RawResult:
         self.calls.append(messages)
         self.prompts.append(messages[-1].content if messages else "")
@@ -72,6 +82,28 @@ class FakeLLM(LLMProvider):
         if isinstance(item, RawResult):
             return item
         return RawResult(content=item)
+
+    async def stream_complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolSpec] | None = None,
+        json_schema: dict | None = None,
+    ) -> AsyncIterator[RawDelta]:
+        """Replay the scripted result as a stream: the text in `chunk_size`
+        pieces (or one piece), then each tool call whole."""
+        result = self._next(messages, tools, json_schema)
+        if isinstance(result.content, str):
+            text = result.content
+        else:
+            text = "".join(part for part in result.content if isinstance(part, str))
+        if self._chunk_size:
+            for start in range(0, len(text), self._chunk_size):
+                yield RawDelta(text=text[start : start + self._chunk_size])
+        elif text:
+            yield RawDelta(text=text)
+        for call in result.tool_calls:
+            yield RawDelta(tool_call=call)
 
 
 class FakeEmbedder(Embedder):
@@ -322,3 +354,33 @@ def make_footer_element(text: str, page_number: int | None = None):
     if page_number is not None:
         element.metadata = ElementMetadata(page_number=page_number)
     return element
+
+
+def make_tool(name, output="tool result", calls=None):
+    """A stub agent tool that records its invocations and returns fixed text."""
+    from app.agent.tools import AgentTool
+
+    async def execute(arguments):
+        if calls is not None:
+            calls.append((name, arguments))
+        return output
+
+    return AgentTool(
+        name=name,
+        description=f"{name} tool.",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+
+
+def tool_call_response(name: str, arguments: dict | None = None) -> RawResult:
+    """A scripted RawResult in which the model requests one tool call."""
+    return RawResult(
+        content="",
+        tool_calls=(ToolCall(id="c1", name=name, arguments=arguments or {}),),
+    )
+
+
+async def drain(stream) -> list:
+    """Collect an async iterator into a list (for assertions)."""
+    return [item async for item in stream]

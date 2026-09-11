@@ -40,10 +40,19 @@ class GeminiEmbedder(Embedder):
         client = self._ensure_client()
         embeddings: list[list[float]] = []
         for start in range(0, len(texts), self._batch_size):
+            # One Content per text. A list of bare strings is collapsed by the
+            # google-genai SDK into a single multi-part Content for the
+            # gemini-embedding-2 models, which silently returns one vector.
+            contents = [
+                types.Content(parts=[types.Part(text=text)])
+                for text in texts[start : start + self._batch_size]
+            ]
             response = await asyncio.to_thread(
                 client.models.embed_content,
                 model=self._model,
-                contents=list(texts[start : start + self._batch_size]),
+                # list[Content] is runtime-correct (verified against the API);
+                # the stub's invariant union list rejects the narrower list.
+                contents=contents,  # type: ignore[arg-type]
                 config=types.EmbedContentConfig(task_type=task_type),
             )
             embeddings.extend(list(item.values) for item in response.embeddings)  # type: ignore

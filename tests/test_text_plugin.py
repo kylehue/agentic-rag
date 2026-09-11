@@ -1,5 +1,7 @@
 import asyncio
+import json
 from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -471,6 +473,123 @@ def test_default_partition_extracts_images():
     assert kwargs["extract_image_block_types"] == ["Image"]
     assert kwargs["extract_image_block_to_payload"] is True
     assert kwargs["infer_table_structure"] is True
+
+
+def api_partition_kwargs_for(plugin: TextPlugin, elements) -> dict:
+    """Run the plugin with the API backend stubbed and return the kwargs it
+    called the API with. The local partition is stubbed to fail, so the test
+    also proves API mode does not run it."""
+    context = make_context(filename="report.pdf")
+    registry = PluginRegistry()
+    registry.register(plugin)
+    parts = build_runtime(context, registry=registry)
+
+    async def flow():
+        with patch.object(text_module, "_partition_via_api") as mock_api:
+            mock_api.return_value = elements
+            with patch.object(text_module, "partition") as mock_local:
+                mock_local.side_effect = AssertionError(
+                    "local partition must not run in API mode"
+                )
+                await registry.ingestion_process(context, parts.runtime)
+        return mock_api.call_args.kwargs
+
+    return asyncio.run(flow())  # type: ignore
+
+
+def test_use_api_calls_the_hosted_api_with_the_key():
+    elements = [make_text_element("Body.", page_number=1)]
+    kwargs = api_partition_kwargs_for(
+        TextPlugin(use_api=True, api_key="test-key"), elements
+    )
+
+    assert kwargs["api_key"] == "test-key"
+    assert kwargs["api_url"] == text_module.UNSTRUCTURED_API_URL
+    # The file goes out as raw bytes with its name and type...
+    assert isinstance(kwargs["file"], bytes)
+    assert kwargs["filename"] == "report.pdf"
+    assert kwargs["content_type"] == "text/plain"
+    # ...and image block extraction is on, as with the local path.
+    assert kwargs["extract_image_block_types"] == ["Image"]
+
+
+def test_use_api_respects_ignore_images():
+    elements = [make_text_element("Body.", page_number=1)]
+    kwargs = api_partition_kwargs_for(
+        TextPlugin(use_api=True, api_key="test-key", ignore_images=True),
+        elements,
+    )
+
+    assert kwargs["api_key"] == "test-key"
+    assert kwargs["extract_image_block_types"] is None
+
+
+def test_partition_via_api_runs_the_job_flow():
+    # The Platform API is job-based: create a job, poll it, download the
+    # output. A fake client plays all three roles.
+    payload = make_text_element("hello", page_number=1).to_dict()
+    captured: list = []
+
+    class FakeJobs:
+        def __init__(self):
+            self.statuses = iter(["PENDING", "COMPLETED"])
+            self.create_request = None
+            self.download_request = None
+
+        def create_job(self, request):
+            self.create_request = request
+            return SimpleNamespace(job_information=SimpleNamespace(id="job-1"))
+
+        def get_job(self, request):
+            assert request == {"job_id": "job-1"}
+            return SimpleNamespace(
+                job_information=SimpleNamespace(
+                    status=next(self.statuses),
+                    output_node_files=[SimpleNamespace(file_id="out-1")],
+                )
+            )
+
+        def download_job_output(self, request):
+            self.download_request = request
+            return SimpleNamespace(any=[payload])
+
+    class FakeClient:
+        def __init__(self, api_key_auth, server_url):
+            captured.append(self)
+            self.api_key_auth = api_key_auth
+            self.server_url = server_url
+            self.jobs = FakeJobs()
+
+    with (
+        patch.object(text_module, "UnstructuredClient", FakeClient),
+        patch.object(text_module.time, "sleep", lambda _seconds: None),
+    ):
+        elements = text_module._partition_via_api(
+            api_key="key-1",
+            api_url="http://api.test/v1",
+            file=b"raw bytes",
+            filename="report.pdf",
+            content_type="application/pdf",
+            extract_image_block_types=["Image"],
+        )
+
+    # The output JSON comes back as real Element objects...
+    assert [element.text for element in elements] == ["hello"]
+    # ...the job went to the given endpoint with a hi-res Partitioner node...
+    client = captured[0]
+    assert client.server_url == "http://api.test/v1"
+    assert client.api_key_auth == "key-1"
+    node = json.loads(
+        client.jobs.create_request.body_create_job.request_data
+    )["job_nodes"][0]
+    assert node["type"] == "partition"
+    assert node["subtype"] == "unstructured_api"
+    assert node["settings"]["strategy"] == "hi_res"
+    assert node["settings"]["infer_table_structure"] is True
+    assert node["settings"]["extract_image_block_types"] == ["Image"]
+    # ...and the output was downloaded from the job's output file.
+    assert client.jobs.download_request.job_id == "job-1"
+    assert client.jobs.download_request.file_id == "out-1"
 
 
 def test_defaults_manage_images_and_tables():

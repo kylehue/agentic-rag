@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import json
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -71,6 +72,29 @@ class RawResult:
 
 
 @dataclass(frozen=True)
+class RawDelta:
+    """One increment of a streamed completion.
+
+    A piece of text, one complete tool call, or both empty (a keep-alive).
+    Tool calls are yielded whole: the provider assembles the streamed
+    fragments (id, name, JSON argument pieces) before yielding them.
+    """
+
+    text: str = ""
+    tool_call: ToolCall | None = None
+
+
+def accumulate_result(deltas: Iterable[RawDelta]) -> RawResult:
+    """Assemble the raw result of a streamed completion from its deltas."""
+    parts = list(deltas)
+    content = "".join(delta.text for delta in parts)
+    tool_calls = tuple(
+        delta.tool_call for delta in parts if delta.tool_call is not None
+    )
+    return RawResult(content=content, tool_calls=tool_calls)
+
+
+@dataclass(frozen=True)
 class ChatResult:
     """What a chat turn produced: text, a tool call, or both."""
 
@@ -113,12 +137,15 @@ def _extract_json(content: str):
 class LLMProvider(abc.ABC):
     """Provider-neutral LLM interface.
 
-    Providers implement one raw primitive, `complete`, and declare
-    `capabilities` (assumed fully supported). The public methods are
-    concrete here: `answer` (plain text), `chat` (native tool calling),
-    and `structured` (native JSON-schema output, validated with pydantic).
-    Callers that need a combination none of those provide (e.g. tools and
-    a JSON schema in the same call) use `complete` directly.
+    Providers implement one raw primitive, `stream_complete` (a token-level
+    stream of `RawDelta`s), and declare `capabilities` (assumed fully
+    supported). Everything else is concrete here: `complete` accumulates the
+    stream into one `RawResult` (one execution, two consumers, like the
+    agent's `ask_stream`/`ask`), and `answer` (plain text), `chat` (native
+    tool calling), and `structured` (native JSON-schema output, validated
+    with pydantic) are thin compositions of it. Callers that need a
+    combination none of those provide (e.g. tools and a JSON schema in the
+    same call) use `complete` directly.
 
     Messages carry text and image parts (vision); no other binary
     attachments are ever sent to the LLM.
@@ -132,6 +159,22 @@ class LLMProvider(abc.ABC):
     # --- public API ---
 
     @abc.abstractmethod
+    async def stream_complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolSpec] | None = None,
+        json_schema: dict | None = None,
+    ) -> AsyncIterator[RawDelta]:
+        """One streamed completion against the provider's API.
+
+        The lowest-level public entry point: yields the reply token by
+        token (`RawDelta.text`) and each tool call whole, as the provider
+        produces them. Accepts any combination of `tools` and `json_schema`.
+        """
+        raise NotImplementedError
+        yield  # pragma: no cover - marks this as an abstract async generator
+
     async def complete(
         self,
         messages: list[ChatMessage],
@@ -139,12 +182,14 @@ class LLMProvider(abc.ABC):
         tools: list[ToolSpec] | None = None,
         json_schema: dict | None = None,
     ) -> RawResult:
-        """One raw completion against the provider's API.
-
-        The lowest-level public entry point: `answer`, `chat`, and
-        `structured` are thin compositions of it, and it accepts any
-        combination of `tools` and `json_schema` they do not cover.
-        """
+        """One raw completion: the accumulated result of `stream_complete`."""
+        deltas = [
+            delta
+            async for delta in self.stream_complete(
+                messages, tools=tools, json_schema=json_schema
+            )
+        ]
+        return accumulate_result(deltas)
 
     async def answer(self, query: str) -> str:
         """Generate an answer from a text prompt."""

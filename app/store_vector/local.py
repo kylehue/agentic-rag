@@ -39,11 +39,14 @@ class LocalVectorStorage(VectorStorage):
 
         # Delete first so re-indexing an existing ID also removes legacy Chroma
         # documents and metadata from versions that stored chunk payloads here.
+        vectors: list[Sequence[float] | Sequence[int]] = [
+            list(embedding) for embedding in embeddings
+        ]
         await asyncio.to_thread(self._collection.delete, ids=list(ids))
         await asyncio.to_thread(
             self._collection.upsert,
             ids=list(ids),
-            embeddings=[list(embedding) for embedding in embeddings],
+            embeddings=vectors,
         )
 
     async def search(
@@ -57,9 +60,10 @@ class LocalVectorStorage(VectorStorage):
         if collection_count == 0:
             return []
 
+        query_vectors: list[Sequence[float] | Sequence[int]] = [query_embedding]
         result = await asyncio.to_thread(
             self._collection.query,
-            query_embeddings=[query_embedding],
+            query_embeddings=query_vectors,
             n_results=min(top_k, collection_count),
             include=["distances"],
         )

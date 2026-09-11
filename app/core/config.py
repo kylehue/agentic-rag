@@ -2,9 +2,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    UNSTRUCTURED_API_KEY: str = ""
+    UNSTRUCTURED_USE_API: bool = True  # disable = self-host
     GOOGLE_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3.5-flash-lite"
-    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"
+    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-2"
     SENTENCE_TRANSFORMER_MODEL: str = "google/embeddinggemma-300m"
     HF_TOKEN: str = ""
     OPENAI_API_KEY: str = ""

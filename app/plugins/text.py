@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import time
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -22,6 +24,13 @@ from unstructured.documents.elements import (
     Title,
 )
 from unstructured.partition.auto import partition
+from unstructured.staging.base import elements_from_dicts
+from unstructured_client import UnstructuredClient
+from unstructured_client.models.operations import (
+    CreateJobRequest,
+    DownloadJobOutputRequest,
+)
+from unstructured_client.models.shared import BodyCreateJob, InputFiles
 
 from app.models.chunk import IngestedChunk
 from app.plugin.base import Plugin
@@ -34,6 +43,14 @@ NEARBY_TEXT_CHARS = 500
 
 # Page furniture: neither breaks a run of tables nor counts as nearby text.
 TRANSPARENT_ELEMENT_TYPES = (PageBreak, PageNumber, Header, Footer)
+
+# The Unstructured Platform API endpoint (fixed by Unstructured; see
+# docs.unstructured.io). It is job-based, and requires
+# unstructured-client>=0.46.2 to resolve correctly.
+UNSTRUCTURED_API_URL = "https://platform-api.transform.unstructured.io/api/v1"
+
+# How often to poll a running API job for its status.
+API_JOB_POLL_INTERVAL_SECONDS = 10
 
 
 class TextPlugin(Plugin):
@@ -62,6 +79,9 @@ class TextPlugin(Plugin):
         *,
         ignore_images: bool = False,
         ignore_tables: bool = False,
+        use_api: bool = False,
+        api_key: str = "",
+        api_url: str = UNSTRUCTURED_API_URL,
     ) -> None:
         """
         - ``ignore_images`` - turn off the plugin's management of embedded images.
@@ -70,9 +90,18 @@ class TextPlugin(Plugin):
         - ``ignore_tables`` - turn off the plugin's management of embedded tables.
           No reassembled CSV is emitted, but the table text still ends up in the
           document chunks (``infer_table_structure`` stays on for that).
+        - ``use_api`` - partition with the hosted Unstructured Platform API
+          instead of running the (hi_res) partition locally. Both backends use
+          the same partition settings and return the same Element objects, so
+          this is a pure backend switch (for debugging).
+        - ``api_key`` - the API key, used only when ``use_api`` is True.
+        - ``api_url`` - the Platform API endpoint (defaults to Unstructured's).
         """
         self._ignore_images = ignore_images
         self._ignore_tables = ignore_tables
+        self._use_api = use_api
+        self._api_key = api_key
+        self._api_url = api_url
 
     @property
     def name(self) -> str:
@@ -176,26 +205,62 @@ class TextPlugin(Plugin):
         # ``infer_table_structure`` stays on even when the tables are
         # ignored: it is what keeps the table text in the chunks readable.
         if self._ignore_images:
-            return partition(
-                file=BytesIO(context.file.file_bytes),
-                file_filename=context.file.filename,
-                content_type=context.file.content_type,
-                strategy="hi_res",
-                infer_table_structure=True,
-                extract_images_in_pdf=False,
-                extract_image_block_types=None,
-                extract_image_block_to_payload=False,
+            extract_images_in_pdf = False
+            extract_image_block_types = None
+            extract_image_block_to_payload = False
+        else:
+            extract_images_in_pdf = True
+            extract_image_block_types = ["Image"]
+            extract_image_block_to_payload = True
+
+        return self._partition_with(
+            file_bytes=context.file.file_bytes,
+            file_filename=context.file.filename,
+            content_type=context.file.content_type,
+            extract_images_in_pdf=extract_images_in_pdf,
+            extract_image_block_types=extract_image_block_types,
+            extract_image_block_to_payload=extract_image_block_to_payload,
+        )
+
+    def _partition_with(
+        self,
+        *,
+        file_bytes: bytes,
+        file_filename: str,
+        content_type: str,
+        extract_images_in_pdf: bool,
+        extract_image_block_types: list[str] | None,
+        extract_image_block_to_payload: bool,
+    ) -> list[Element]:
+        """Run the partition on the configured backend.
+
+        The partition settings are equivalent for both backends (hi_res, table
+        structure inference, and the image block types); only the target
+        differs (hosted API vs. local), so switching is a pure backend change
+        that returns the same Element objects either way.
+        """
+        if self._use_api:
+            # The Platform API is job-based; the image block types alone
+            # control image extraction there (Base64 lands in the element
+            # metadata, as locally).
+            return _partition_via_api(
+                api_key=self._api_key,
+                api_url=self._api_url,
+                file=file_bytes,
+                filename=file_filename,
+                content_type=content_type,
+                extract_image_block_types=extract_image_block_types,
             )
 
         return partition(
-            file=BytesIO(context.file.file_bytes),
-            file_filename=context.file.filename,
-            content_type=context.file.content_type,
+            file=BytesIO(file_bytes),
+            file_filename=file_filename,
+            content_type=content_type,
             strategy="hi_res",
             infer_table_structure=True,  # Needed for the table cell grids.
-            extract_images_in_pdf=True,
-            extract_image_block_types=["Image"],
-            extract_image_block_to_payload=True,
+            extract_images_in_pdf=extract_images_in_pdf,
+            extract_image_block_types=extract_image_block_types,
+            extract_image_block_to_payload=extract_image_block_to_payload,
         )
 
     @staticmethod
@@ -216,6 +281,96 @@ class TextPlugin(Plugin):
             max_characters=1500,
             overlap=200,
         )
+
+
+def _partition_via_api(
+    *,
+    api_key: str,
+    api_url: str,
+    file: bytes,
+    filename: str,
+    content_type: str,
+    extract_image_block_types: list[str] | None,
+) -> list[Element]:
+    """Partition one file with the hosted Unstructured Platform API.
+
+    The Platform API is job-based: create a one-file job with a High Res
+    Partitioner node, poll it until it completes, and download the element
+    JSON. Returns the same Element objects the local partition produces, so
+    the rest of the pipeline is unchanged.
+    """
+    settings: dict = {
+        "strategy": "hi_res",
+        "infer_table_structure": True,  # Needed for the table cell grids.
+    }
+    if extract_image_block_types:
+        settings["extract_image_block_types"] = extract_image_block_types
+
+    client = UnstructuredClient(api_key_auth=api_key, server_url=api_url)
+
+    create_response = client.jobs.create_job(
+        request=CreateJobRequest(
+            body_create_job=BodyCreateJob(
+                request_data=json.dumps(
+                    {
+                        "job_nodes": [
+                            {
+                                "name": "Partitioner",
+                                "type": "partition",
+                                "subtype": "unstructured_api",
+                                "settings": settings,
+                            }
+                        ]
+                    }
+                ),
+                input_files=[
+                    InputFiles(
+                        content=file,
+                        file_name=filename,
+                        content_type=content_type or "application/octet-stream",
+                    )
+                ],
+            )
+        )
+    )
+    job_info = create_response.job_information
+    if job_info is None or job_info.id is None:
+        raise RuntimeError(
+            "Unstructured API job creation returned no job information."
+        )
+    job_id = job_info.id
+
+    while True:
+        job_info = client.jobs.get_job(request={"job_id": job_id}).job_information
+        if job_info is None:
+            raise RuntimeError(
+                "Unstructured API job status returned no job information."
+            )
+        status = job_info.status
+        if status == "COMPLETED":
+            break
+        if status in ("FAILED", "STOPPED"):
+            raise RuntimeError(
+                f"Unstructured API job did not complete successfully: {status}"
+            )
+        time.sleep(API_JOB_POLL_INTERVAL_SECONDS)
+
+    output_files = job_info.output_node_files or []
+    if not output_files or output_files[0].file_id is None:
+        raise RuntimeError("Unstructured API job returned no output files")
+
+    download_response = client.jobs.download_job_output(
+        request=DownloadJobOutputRequest(
+            job_id=job_id, file_id=output_files[0].file_id
+        )
+    )
+    # The output is the file's elements as a JSON list.
+    if not isinstance(download_response.any, list):
+        raise RuntimeError(
+            "Unexpected Unstructured API job output: expected a list of "
+            f"elements, got {type(download_response.any).__name__}."
+        )
+    return elements_from_dicts(download_response.any)
 
 
 # --- element stream ---

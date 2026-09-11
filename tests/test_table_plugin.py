@@ -74,9 +74,18 @@ def test_process_csv_returns_a_retrieval_chunk():
     assert "Sample Data:" in chunk.text
     assert "north" in chunk.text
 
-    # No schema or relationship extraction: metadata is the table name only
-    # (a top-level file carries no source page).
-    assert chunk.metadata == {"table_name": "sales"}
+    # Metadata carries the name plus the precomputed schema, so the agent can
+    # inspect and query the table without reading the file. The description is
+    # deliberately not duplicated here — it is already in the chunk's text.
+    assert chunk.metadata == {
+        "table_name": "sales",
+        "schema": [
+            {"name": "Region", "type": "TEXT"},
+            {"name": "Amount", "type": "INTEGER"},
+        ],
+        "row_count": 3,
+        "column_count": 2,
+    }
 
     # No rows are loaded into SQL and no file is emitted: the chunk is
     # text + metadata only.

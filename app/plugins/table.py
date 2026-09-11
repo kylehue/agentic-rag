@@ -113,7 +113,7 @@ class TablePlugin(Plugin):
                         description=analysis["description"],
                         dataframe=table.dataframe,
                     ),
-                    metadata={"table_name": table.name},
+                    metadata=self._table_metadata(table),
                 )
             )
 
@@ -254,6 +254,25 @@ class TablePlugin(Plugin):
             }
             for column in dataframe.columns
         ]
+
+    @classmethod
+    def _table_metadata(cls, table: ExtractedTable) -> dict[str, Any]:
+        """Structured metadata so the agent can query a table without reading
+        it: the schema (column names and types) and the row/column counts.
+
+        The retrieval-optimized description is deliberately not stored here —
+        it is already in the chunk's text, and duplicating it in the metadata
+        would only waste tokens.
+        """
+        return {
+            "table_name": table.name,
+            "schema": [
+                {"name": col["name"], "type": col["type"]}
+                for col in cls._schema_for_prompt(table.dataframe)
+            ],
+            "row_count": len(table.dataframe),
+            "column_count": len(table.dataframe.columns),
+        }
 
     @staticmethod
     def _sample_table_rows(

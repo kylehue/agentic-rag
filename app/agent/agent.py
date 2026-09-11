@@ -1,0 +1,169 @@
+from collections.abc import AsyncIterator, Sequence
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+from app.agent.events import (
+    AgentEvent,
+    AnswerDeltaEvent,
+    AnswerEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from app.agent.graph import DEFAULT_MAX_TOOL_ROUNDS, AgentState, build_agent, to_content
+from app.agent.tools import AgentTools
+from app.llm.base import LLMProvider
+
+
+def initial_state(
+    question: str,
+    history: Sequence[tuple[str, str]] = (),
+    system_prompt: str | None = None,
+) -> AgentState:
+    """The graph's starting state for one question.
+
+    `history` is the prior conversation, oldest first, as (role, content)
+    pairs with role "user" or "assistant". It is placed between the system
+    prompt and the current question, so the agent can answer follow-ups.
+    `system_prompt` (optional) leads the message list when non-empty.
+    """
+    messages: list = []
+    if system_prompt:
+        messages.append(SystemMessage(system_prompt))
+    for role, content in history:
+        if role == "user":
+            messages.append(HumanMessage(content))
+        else:
+            messages.append(AIMessage(content))
+    messages.append(HumanMessage(question))
+    return {
+        "messages": messages,
+        "tool_rounds": 0,
+    }
+
+
+def _update_messages(state: dict) -> list:
+    """The node update's messages as a list.
+
+    Nodes return one message or a list; a list here keeps the projection
+    uniform. (Iterating a message object directly would silently yield its
+    dict entries, which is why this normalizes.)
+    """
+    messages = state.get("messages") or []
+    if not isinstance(messages, list):
+        messages = [messages]
+    return messages
+
+
+class Agent:
+    """A generic tool-calling agent: an LLM, a set of tools, and the graph.
+
+    Framework-only: it knows nothing about RAG. It is handed the LLM, the
+    tools, and an optional system prompt, and answers questions through the
+    orchestration graph. `ask` is a projection of `ask_stream`: one execution,
+    two consumers.
+    """
+
+    def __init__(
+        self,
+        llm: LLMProvider,
+        tools: AgentTools,
+        *,
+        system_prompt: str | None = None,
+        max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
+    ) -> None:
+        self._system_prompt = system_prompt
+        self._tools = tools
+        self._graph = build_agent(llm, tools, max_tool_rounds=max_tool_rounds)
+
+    @property
+    def tools(self) -> AgentTools:
+        return self._tools
+
+    async def ask(
+        self,
+        question: str,
+        history: Sequence[tuple[str, str]] = (),
+    ) -> str:
+        """Ask a question and return the agent's final answer text.
+
+        `history` is the prior conversation (see `initial_state`).
+        """
+        answer = None
+        async for event in self.ask_stream(question, history=history):
+            if isinstance(event, AnswerEvent):
+                answer = event.content
+        if answer is None:
+            raise RuntimeError("The agent produced no final answer.")
+        return answer
+
+    async def ask_stream(
+        self,
+        question: str,
+        history: Sequence[tuple[str, str]] = (),
+    ) -> AsyncIterator[AgentEvent]:
+        """Ask a question and stream the run as it happens.
+
+        Runs the same compiled graph and projects it into events: one
+        `AnswerDeltaEvent` per token the model streams, one `ToolCallEvent`
+        per tool the model requests, one `ToolResultEvent` per result it
+        reads back, ending with the single `AnswerEvent`. A run that ends
+        without an answer simply ends. `history` is the prior conversation
+        (see `initial_state`).
+        """
+        async for mode, data in self._graph.astream(
+            initial_state(question, history, self._system_prompt),
+            stream_mode=["updates", "custom"],
+        ):
+            if mode == "custom":
+                # The model node's token stream, emitted as it happens.
+                if isinstance(data, dict) and data.get("type") == "answer_delta":
+                    yield AnswerDeltaEvent(content=data["text"])
+                continue
+            for node, state in data.items():  # type: ignore
+                if node == "model":
+                    events = self._model_events(state)
+                else:
+                    events = self._tool_events(state)
+                for event in events:
+                    yield event
+
+    @staticmethod
+    def _model_events(state: dict) -> list[AgentEvent]:
+        """The events of one model turn: the tool calls it requested, or its
+        answer. A message that carries both is read as tool calls only —
+        mid-run commentary is not part of the trace."""
+        events: list[AgentEvent] = []
+        for message in _update_messages(state):
+            if not isinstance(message, AIMessage):
+                continue
+            if message.tool_calls:
+                for call in message.tool_calls:
+                    events.append(
+                        ToolCallEvent(
+                            name=call["name"],
+                            arguments=call.get("args") or {},
+                        )
+                    )
+            elif message.content:
+                text = to_content(message.content)
+                if isinstance(text, list):
+                    text = " ".join(part for part in text if isinstance(part, str))
+                if text:
+                    events.append(AnswerEvent(content=text))
+        return events
+
+    @staticmethod
+    def _tool_events(state: dict) -> list[AgentEvent]:
+        """The events of one tool turn: what each executed tool returned."""
+        events: list[AgentEvent] = []
+        for message in _update_messages(state):
+            if not isinstance(message, ToolMessage):
+                continue
+            content = message.content
+            events.append(
+                ToolResultEvent(
+                    name=message.name or "unknown",
+                    content=content if isinstance(content, str) else str(content),
+                )
+            )
+        return events

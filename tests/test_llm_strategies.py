@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from app.llm.base import (
     ChatMessage,
     ImageContent,
+    RawDelta,
     RawResult,
     StructuredOutputError,
     ToolCall,
@@ -44,6 +45,34 @@ def test_answer_returns_the_raw_content():
 
     assert asyncio.run(llm.answer("what?")) == "hello there"
     assert llm.prompts == ["what?"]
+
+
+# --- complete: the accumulated projection of stream_complete ---
+
+
+def test_complete_accumulates_a_streamed_result():
+    class SplitLLM(FakeLLM):
+        async def stream_complete(self, messages, *, tools=None, json_schema=None):
+            self.calls.append(messages)
+            self.tools.append(tools or [])
+            for piece in ("he", "llo"):
+                yield RawDelta(text=piece)
+            yield RawDelta(
+                tool_call=ToolCall(
+                    id="c1", name="search", arguments={"query": "garden"}
+                )
+            )
+
+    llm = SplitLLM()
+
+    result = asyncio.run(llm.complete(user("hi"), tools=[SEARCH]))
+
+    # complete is the stream, accumulated: text joined, tool calls kept.
+    assert result.content == "hello"
+    assert result.tool_calls == (
+        ToolCall(id="c1", name="search", arguments={"query": "garden"}),
+    )
+    assert llm.tools[0] == [SEARCH]
 
 
 # --- chat: native tool calling ---

@@ -164,3 +164,5 @@ def test_retrieve_delegates_through_the_facade():
     results = asyncio.run(rag.retrieve("anything"))
 
     assert results == [chunk]
+
+

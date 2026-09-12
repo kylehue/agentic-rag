@@ -1,6 +1,6 @@
 # Agentic RAG
 
-A Retrieval-Augmented Generation (RAG) backend built around a **plugin architecture** for document types. It ingests text documents and spreadsheets, creates searchable representations, retrieves relevant evidence using both semantic and lexical search, and uses an LLM to generate grounded answers.
+An agentic Retrieval-Augmented Generation (RAG) pipeline built around a **plugin architecture** for document types. It ingests text documents and spreadsheets, creates searchable representations, retrieves relevant evidence using both semantic and lexical search, and uses an LLM to generate grounded answers.
 
 The application is designed around separate ingestion, retrieval, and answer-generation stages. Document-type behavior lives in **plugins**, which the system discovers and orchestrates through a plugin registry and per-run contexts and runtimes.
 
@@ -317,7 +317,7 @@ Plugin constructors take **options only, no services**. Lifecycle methods receiv
 | Member                                                            | Purpose                                                                    |
 | ----------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | `context`                                                         | The ingestion context for this run.                                        |
-| `llm`                                                             | The LLM provider being used in the pipeline.                                                |
+| `llm`                                                             | The LLM provider being used in the pipeline.                               |
 | `embedder`                                                        | The embedding provider.                                                    |
 | `vector_storage` / `sql_storage` / `file_storage`                 | The shared storages, for plugins that need to read or write other content. |
 | `registry`                                                        | The plugin registry; `emit_file` reports emitted files through it.         |

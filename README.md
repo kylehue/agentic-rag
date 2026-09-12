@@ -24,7 +24,6 @@ The application is designed around separate ingestion, retrieval, and answer-gen
     - [File descriptions](#file-descriptions)
     - [Text Plugin: Reassembling tables split across pages](#text-plugin-reassembling-tables-split-across-pages)
   - [Project Structure](#project-structure)
-    - [`app/agent`](#appagent)
     - [`app/agent_tools`](#appagent_tools)
     - [`app/plugin`](#appplugin)
     - [`app/plugins`](#appplugins)
@@ -112,7 +111,7 @@ docker compose up --build
   python stream_agent.py "your question"
   ```
 
-  The script prints each tool call and result as it happens, types out the answer token by token, and lists the evidence chunks at the end. Run it bare (with no argument) for an interactive conversation; the memory stays in the process for the session, so follow-up questions work. Set `RAG_BASE_URL` to point it at another server.
+  The script prints each tool call and result as it happens, types out the answer token by token, and lists the chunks the answer cites at the end. Run it without arguments for an interactive conversation; the memory stays in the process for the session, so follow-up questions work.
 
 - **JSON endpoints:** `POST /rag/ingest` (multipart upload), `POST /rag/retrieve?user_query=...`, `POST /rag/answer` (JSON body `{"query", "history"}`), and `POST /rag/answer/stream` (same body, returned as a server-sent event stream).
 
@@ -197,12 +196,12 @@ The two rankings are combined with Reciprocal Rank Fusion (RRF). RRF merges rank
 ```mermaid
 flowchart TD
     Q[/Question/] --> A["Prepare a fresh agent"]
-    A --> B["Ask the model, streaming tokens"]
+    A --> B["Agent observation"]
     B --> C{"Call a tool?"}
-    C -->|no| D["Finish with the answer"]
+    C -->|no| D[/Answer/]
     C -->|yes| E["Run the requested tools in parallel"]
 
-    subgraph TOOLS["Tools — read-only lookups"]
+    subgraph TOOLS["Tools"]
         T1["Look up evidence"]
         T2["Read table structure"]
         T3["Run a table query"]
@@ -210,22 +209,20 @@ flowchart TD
     end
 
     E --> TOOLS
-    TOOLS --> B
-    D --> G["Stream every step to the client"]
-    E --> G
+    TOOLS -- Tool outputs --> B
 ```
 
 Answering runs an agent built on langgraph. The agent loops between two steps: it asks the LLM (with the tools available), and when the LLM requests tools, it runs them and feeds the results back. Once the loop reached the max limits, the LLM is called without tools and must answer, so the loop always terminates.
 
 The agent's tools are read-only lookups over the RAG system:
 
-- `search_documents`: hybrid retrieval over the corpus, through the same path the `/rag/retrieve` endpoint uses.
+- `search_documents`: hybrid retrieval over the corpus, through the same path the `/rag/retrieve` endpoint uses; each result carries its source id, chunk id, and text.
 - `list_tables`: the stored tables' names, ids, and row/column counts.
 - `inspect_table`: a table's schema (columns and types) and shape, read from stored metadata with no file read.
 - `query_table`: runs the model's SQL over one table in a throwaway in-memory database and returns at most 100 rows. The only tool that reads table data.
 - `query_chunks`: read-only SELECT over the chunk and document records.
 
-The system prompt's tools section is generated from the tool definitions (`AgentTools.outline()`), so the prompt can never list a tool the agent does not have or miss one it does. The agent answers only from tool output, cites claims with `[source-id:chunk-id]`, and the answer's reported evidence is exactly the chunks its searches returned.
+The system prompt's tools section is generated from the tool definitions (`tools_outline()`), so the prompt can never list a tool the agent does not have or miss one it does. The agent answers only from tool output; the prompt tells it to cite factual claims as `#[source_id:chunk_id]` using the source and chunk ids the search tool returns (the citation format is owned by the agent service, the tools do not know about it). When the answer is done, those references are parsed out of the answer text: `RagAnswer.chunk_refs` holds exactly the chunks the answer cites (keyed by `#[source_id:chunk_id]`), not everything it retrieved along the way.
 
 **Streaming.** The LLM providers stream natively, and the run is forwarded as events: a token event per streamed token, a tool-call event per tool the model requests, a tool-result event per result, and a final answer event. `POST /rag/answer/stream` serves these as server-sent events (`answer_delta` frames as the answer types out, `tool_call` / `tool_result` frames while the agent works, then a final `answer` frame with the full answer JSON).
 
@@ -233,10 +230,9 @@ The system prompt's tools section is generated from the tool definitions (`Agent
 
 The layers, so each concern has one home:
 
-- `app/agent/`: the generic agent framework (the loop, the events, the tool abstractions). No RAG knowledge.
-- `app/agent_tools/`: the RAG tools, one module each.
-- `app/services/agent_service.py`: composes the generic agent with the RAG tools and retrieval path into the answering pipeline.
-- `app/api/agent.py`: the answer endpoints.
+- `app/services/rag_agent.py`: the `RagAgentService`. It takes the RAG service and the tools at initialization, owns the orchestration graph and the run events, composes a fresh run per answer, parses the answer's `chunk_refs` from its citations, and exposes `ask()` and `ask_stream()`.
+- `app/agent_tools/`: the RAG tools, one module each (an `AgentTool` subclass per tool).
+- `app/api/rag_agent.py`: the answer endpoints.
 
 ## Plugin Lifecycle
 
@@ -358,20 +354,11 @@ Each reassembled table is emitted as a CSV with a header row (generated `col_N` 
 
 ## Project Structure
 
-### `app/agent`
-
-A **generic** tool-calling agent framework (langgraph). It knows nothing about RAG: it is handed an LLM, a set of tools, and an optional system prompt, and the only framework types it uses are langgraph's state graph and langchain-core messages (confined to `graph.py` and `agent.py`).
-
-- `app/agent/tools.py` - `AgentTool` (name, description, JSON-schema parameters, an async `execute` that returns the text the model reads) and `AgentTools` (the named set the graph and the LLM specs derive from; tool failures become error strings). `AgentTools.outline()` renders the set as a system-prompt outline (each tool's description plus a compact parameter summary), so prompts can be built from the tool definitions.
-- `app/agent/graph.py` - the orchestration graph: a model node (asks the LLM with the tools) and a tools node (executes the requested calls, concurrently when a round has several), with a tool budget that forces a final answer.
-- `app/agent/events.py` - the run's observable trace as frozen dataclasses: `AnswerDeltaEvent` (a streamed token), `ToolCallEvent`, `ToolResultEvent`, and `AnswerEvent` (canonical, the last event of a run).
-- `app/agent/agent.py` - `Agent`: the LLM + tools + compiled graph; `ask_stream(question)` runs the graph and yields its events (tokens as they stream, then each step), and `ask(question)` is the final-answer projection of it.
-
-The RAG-specific tools, system prompt, and per-answer composition live in `app/agent_tools/` and `app/services/agent_service.py`, so this package stays reusable and RAG-free.
-
 ### `app/agent_tools`
 
-The RAG agent's tools, one module each: `search_documents.py`, `list_tables.py`, `inspect_table.py`, `query_table.py`, `query_chunks.py`, plus `common.py` (the shared table-resolution and schema helpers). `build_rag_tools(retrieve=, sql_storage=, file_storage=)` assembles the built-in set. They are read-only and token-lean: `inspect_table` reads the schema/shape from chunk metadata (no file read; the description lives in the chunk text), and `query_table` reads only the target sheet and caps output at 100 rows.
+The RAG agent's tools, plugin-style: one module per tool (`search_documents.py`, `list_tables.py`, `inspect_table.py`, `query_table.py`, `query_chunks.py`), plus `base.py` (the `AgentTool` base class and the `RagServiceView` protocol its executor receives) and `common.py` (the shared table-resolution and schema helpers).
+
+`AgentTool` declares the tool's `name`, `description`, and `parameters` (the JSON schema the model sees) and implements `create_executor(rag_service)`, which returns the async execute function the agent uses (a closure over the RAG service pieces it needs; the RAG service exposes its collaborators as public properties for this). Tools are read-only and token-lean: `inspect_table` reads the schema/shape from chunk metadata (no file read; the description lives in the chunk text), and `query_table` reads only the target sheet and caps output at 100 rows. `tools_outline()` renders the set as the system prompt's tools section.
 
 ### `app/plugin`
 
@@ -412,9 +399,9 @@ Contains the RAG endpoints, backed by the `RagService`:
 - `/rag/ingest`: uploads and ingests a document. The endpoint is the only place that touches FastAPI's `UploadFile`; it reads the upload and hands the plain bytes, filename, and content type to the RAG service, which builds the `IngestionFile`.
 - `/rag/retrieve`: retrieves relevant chunks without generating a final answer.
 
-#### `app/api/agent.py`
+#### `app/api/rag_agent.py`
 
-Contains the answer endpoints, backed by the `AgentService`:
+Contains the answer endpoints, backed by the `RagAgent` service:
 
 - `/rag/answer`: JSON body `{"query", "history"}`; generates the final LLM answer for the question plus its prior conversation.
 - `/rag/answer/stream`: the same body; the agent run as a server-sent event stream (an `answer_delta` frame per streamed token, a `tool_call` frame per tool it requests, a `tool_result` frame per result it reads, and one final `answer` frame carrying the JSON `RagAnswer`).
@@ -436,7 +423,7 @@ Domain-specific errors (`InvalidDocumentError` for unsupported/invalid uploads).
 
 ### `app/llm`
 
-- `app/llm/base.py` - the `LLMProvider` interface: the wire types (`ChatMessage`, `ImageContent`, `ToolSpec`, `ToolCall`, `RawDelta`, `ChatResult`) and the public surface. A `ChatMessage`'s content is a plain string or a list of text and image parts (vision). Providers implement one raw primitive (`stream_complete`, a token-level stream of `RawDelta`s (text pieces and whole tool calls) that accepts any combination of tools and a JSON schema) and declare `capabilities` (both providers assume full native support: tool calling, structured outputs, and vision). The base class provides `complete` (the stream accumulated into one `RawResult`) and `answer` (plain text), `chat` (native tool calling), and `structured` (native JSON-schema output, validated with pydantic) as thin compositions of it. There are no fallback strategies: if the model or endpoint cannot comply, the error propagates.
+- `app/llm/base.py` - the `LLMProvider` interface: the wire types (`ChatMessage`, `ImageContent`, `ToolSpec`, `ToolCall`, `RawDelta`, `ChatResult`) and the public surface. A `ChatMessage`'s content is a plain string or a list of text and image parts (vision). Providers implement one raw primitive (`stream_complete`, a token-level stream of `RawDelta`s (text pieces and whole tool calls) that accepts any combination of tools and a JSON schema), and assume full native model support (tool calling, structured outputs, and vision). The base class provides `complete` (the stream accumulated into one `RawResult`) and `answer` (plain text), `chat` (native tool calling), and `structured` (native JSON-schema output, validated with pydantic) as thin compositions of it. There are no fallback strategies: if the model or endpoint cannot comply, the error propagates.
 - `app/llm/openai.py` - the OpenAI-compatible implementation (custom `base_url` supported, for example a routing endpoint).
 - `app/llm/gemini.py` - the Gemini implementation.
 
@@ -457,7 +444,7 @@ Domain-specific errors (`InvalidDocumentError` for unsupported/invalid uploads).
 Internal application models.
 
 - `app/models/chunk.py` - `IngestedChunk` and `RetrievedChunk`. Both carry `plugin` (the name of the plugin that produced the chunk), which is how retrieval routes chunks back to their finalizer.
-- `app/models/rag.py` - `RagAnswer`.
+- `app/models/rag.py` - `RagAnswer` (query, answer, and `chunk_refs`: the chunks the answer cites, keyed by `#[source_id:chunk_id]`).
 - `app/models/stream.py` - `StreamEvent`: the neutral item the answer stream yields (a wire event name plus a payload), so the API never sees the agent's event types.
 - `app/models/vector.py` - `VectorSearchResult`.
 
@@ -465,8 +452,8 @@ Internal application models.
 
 - `app/services/ingestion.py` - the pipeline driver: offers each file to all plugins, builds context/runtime, runs `on_ingestion_process` on every plugin, persists everything (source files, chunk records, vectors), and re-ingests emitted files.
 - `app/services/retrieval.py` - runs the hybrid retriever and runs `on_retrieval_finalize` on every plugin for each chunk.
-- `app/services/agent_service.py` - `AgentService`: takes the RAG service (its `retrieve` is the agent's search path) and the RAG tools (as a builder, so each answer gets its own evidence-recording retrieval path), composes a fresh `Agent` per answer with the RAG system prompt (a template whose tools section is generated from the tool definitions via `AgentTools.outline`), and translates a run into neutral `StreamEvent`s. `answer` returns the `RagAnswer`; `answer_stream` yields the run ending with it.
-- `app/services/rag.py` - the wrapper for ingestion and retrieval (the agent lives in `AgentService`). It builds the `PluginRegistry` from the `plugins` option and the ingestion and retrieval services (which take the registry) from the collaborators it is given. `initialize()` creates the system tables at startup; `ingest(file_bytes, filename, content_type, description=None)` builds the `IngestionFile` and delegates; `retrieve` returns evidence.
+- `app/services/rag.py` - the wrapper for ingestion and retrieval. It builds the `PluginRegistry` from the `plugins` option and the ingestion and retrieval services (which take the registry) from the collaborators it is given, and exposes those collaborators (plus `llm` and `embedder`) as public properties so the agent's tools can use them. `initialize()` creates the system tables at startup; `ingest(file_bytes, filename, content_type, description=None)` builds the `IngestionFile` and delegates; `retrieve` returns evidence.
+- `app/services/rag_agent.py` - the `RagAgentService`: takes the RAG service and the tools at initialization, builds the orchestration graph, and owns the run's events, the system prompt (a template whose tools section is generated from the tool definitions via `tools_outline`), the citation format (`CHUNK_REF_PATTERN`, `extract_chunk_refs`: the single source of truth for `#[source_id:chunk_id]`), the parsing of each answer's `chunk_refs` from its citations, and the translation of a run into neutral `StreamEvent`s. `ask()` returns the `RagAnswer`; `ask_stream()` yields the run ending with it.
 
 ### `app/store_file`, `app/store_sql`, `app/store_vector`
 
@@ -483,7 +470,7 @@ Storage abstractions and local implementations:
 
 ### `app/container.py`
 
-The composition root for the external collaborators. It builds the providers, storages, retrievers, and built-in plugins, then composes the `RagService` wrapper (which gets the plugins through its `plugins` option) and the `AgentService` (which gets the RAG service and the RAG tools). It also exposes the FastAPI lifespan (`rag_service.initialize()`, storage shutdown). The pipeline internals (the plugin registry and the ingestion/retrieval services) are composed inside the `RagService`.
+The composition root for the external collaborators. It builds the providers, storages, retrievers, and built-in plugins, then composes the `RagService` wrapper (which gets the plugins through its `plugins` option) and the `RagAgent` (which gets the RAG service and the RAG tools). It also exposes the FastAPI lifespan (`rag_service.initialize()`, storage shutdown). The pipeline internals (the plugin registry and the ingestion/retrieval services) are composed inside the `RagService`.
 
 ## Design Principles
 
@@ -493,8 +480,8 @@ The composition root for the external collaborators. It builds the providers, st
 - **Context and runtime, not globals.** Lifecycle methods receive everything they need per run: a read-only context (document details) plus a runtime (shared services such as the LLM, embedder, and storages, and `emit_file`). Plugin constructors take options only, never services.
 - **Decoupled stores and providers.** Storage and AI providers sit behind small interfaces (`FileStorage`, `SqlStorage`, `VectorStorage`, `LLMProvider`, `Embedder`).
 - **Native LLM capabilities, no silent fallbacks.** Both providers assume the model natively supports tool calling, structured outputs (JSON schema), and vision. There is no degraded prompt-based path: if the model or endpoint cannot comply, the error propagates to the caller.
-- **The wrappers compose, the container injects.** The container supplies the external collaborators (LLM, embedder, retriever, storages, plugins) and composes the services from them. `RagService` composes the ingestion/retrieval internals (the plugin registry and its two services), and `AgentService` composes the agent pipeline (the RAG service's retrieval path plus the RAG tools). The API layer only ever talks to the services.
-- **The agent is generic, the pipeline is the RAG seam.** `app/agent` is a framework that knows only the LLM, the tools, and an optional system prompt (no RAG imports). The RAG specifics live in `app/agent_tools/` (the tools) and `app/services/agent_service.py` (system prompt, per-answer composition, event to stream translation). The RAG service never builds the agent, and the API consumes neutral `StreamEvent`s, so neither knows the agent's internals. Adding a tool touches only `app/agent_tools/`; adding a document type still touches only `app/plugins/`.
+- **The wrappers compose, the container injects.** The container supplies the external collaborators (LLM, embedder, retriever, storages, plugins) and composes the services from them. `RagService` composes the ingestion/retrieval internals (the plugin registry and its two services), and `RagAgent` composes the answering agent (the RAG service plus the tools passed in at initialization). The API layer only ever talks to the services.
+- **The agent is part of the RAG service layer, and its tools are plugins.** The orchestration graph, the run events, and the system prompt live in `app/services/rag_agent.py`. Tools are `AgentTool` subclasses in `app/agent_tools/`, passed to `RagAgent` at initialization; each tool's executor is created per answer with the RAG service (whose public properties expose `llm`, `embedder`, `retriever`, and the storages). The RAG service itself never builds the agent, and the API consumes neutral `StreamEvent`s. Adding a tool means adding one `AgentTool` subclass and one line in the container; adding a document type still touches only `app/plugins/`.
 - **Tables are queried, not read.** A table's schema and shape are computed at ingestion and stored in its chunk metadata (the description stays in the chunk's text), so the agent inspects a table from metadata (no file read) and writes targeted SQL for `query_table`. Whole tables are never loaded into or returned to the model.
 - **Text and images to the LLM, nothing else.** Messages carry text and image parts (vision); no other binary attachments anywhere in the pipeline.
 
@@ -506,7 +493,7 @@ The test suite lives in `tests/` and runs with:
 python -m pytest tests
 ```
 
-It exercises the plugin lifecycle, both built-in plugins, the ingestion and retrieval pipelines end to end (with real local storage and stubbed external calls), the LLM strategies, and the agent (tools, graph, streaming, and the agent service) with scripted fake LLMs.
+It exercises the plugin lifecycle, both built-in plugins, the ingestion and retrieval pipelines end to end (with real local storage and stubbed external calls), the LLM strategies, and the RAG agent (tools, the tool-calling loop, streaming, and citation parsing) with scripted fake LLMs.
 
 ## Extending the Application
 

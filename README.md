@@ -129,8 +129,6 @@ They meet at the stored chunks: ingestion writes them, retrieval reads them, and
 ```mermaid
 flowchart TD
     F[/File/] --> ING
-    Q[/Question/] --> RET
-    Q --> AGT
 
     subgraph ING["Ingestion"]
         I1["Understand the file with plugins"] --> I2["Store the resulting chunks"]
@@ -143,14 +141,14 @@ flowchart TD
         R1["Find the relevant chunks"]
     end
 
+    Q[/Question/] --> A1
     subgraph AGT["Agent"]
-        A1["Ask the model"] <--> A2["Run the requested tools"]
+        A1["Observe"] --> A2["Run the requested tools"]
         A2 --> A3["Produce the answer"]
     end
 
     A2 -->|"search"| R1
     R1 -->|"evidence"| A1
-    A2 -->|"read"| D
     A3 --> O[/Answer/]
 ```
 

@@ -79,7 +79,7 @@ def test_initialize_creates_the_system_tables():
     assert settings.DOCUMENT_METADATA_TABLE_NAME in parts.sql_storage.tables
 
 
-def test_ingest_end_to_end_through_the_facade():
+def test_ingest_end_to_end_through_the_wrapper():
     rag, parts = build_rag()
 
     async def flow():
@@ -150,7 +150,7 @@ def test_plugins_option_limits_registered_plugins():
         asyncio.run(flow())
 
 
-def test_retrieve_delegates_through_the_facade():
+def test_retrieve_delegates_through_the_wrapper():
     chunk = RetrievedChunk(
         chunk_id="c1",
         source_id="s1",

@@ -20,7 +20,7 @@ FULL_CAPABILITIES = LLMCapabilities()
 
 
 class OpenAIProvider(LLMProvider):
-    """OpenAI-compatible implementation of the LLM interface (text only)."""
+    """OpenAI-compatible implementation of the LLM interface."""
 
     def __init__(self, settings: Settings | None = None):
         """Read settings and defer client creation until it is needed."""

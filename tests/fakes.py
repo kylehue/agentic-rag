@@ -10,10 +10,10 @@ from unstructured.documents.elements import (
     Table,
 )
 
+from app.agent_tools import AgentTool
 from app.embedders.base import Embedder
 from app.llm.base import (
     ChatMessage,
-    LLMCapabilities,
     LLMProvider,
     RawDelta,
     RawResult,
@@ -23,6 +23,7 @@ from app.llm.base import (
 from app.plugin.context import IngestionContext, IngestionFile
 from app.plugin.registry import PluginRegistry
 from app.plugin.runtime import IngestionRuntime
+from app.services.rag import RagService
 from app.store_file.base import FileStorage
 from app.store_sql.base import SqlStorage
 from app.store_vector.base import VectorStorage
@@ -55,10 +56,6 @@ class FakeLLM(LLMProvider):
         self.prompts: list = []
         self.tools: list[list[ToolSpec]] = []
         self.json_schemas: list[dict | None] = []
-
-    @property
-    def capabilities(self) -> LLMCapabilities:
-        return LLMCapabilities()
 
     def _next(
         self,
@@ -96,7 +93,7 @@ class FakeLLM(LLMProvider):
         if isinstance(result.content, str):
             text = result.content
         else:
-            text = "".join(part for part in result.content if isinstance(part, str))
+            text = "".join(part for part in result.content if isinstance(part, str))  # type: ignore
         if self._chunk_size:
             for start in range(0, len(text), self._chunk_size):
                 yield RawDelta(text=text[start : start + self._chunk_size])
@@ -357,19 +354,50 @@ def make_footer_element(text: str, page_number: int | None = None):
 
 
 def make_tool(name, output="tool result", calls=None):
-    """A stub agent tool that records its invocations and returns fixed text."""
-    from app.agent.tools import AgentTool
+    """A stub agent tool: records its invocations and returns fixed text."""
 
-    async def execute(arguments):
-        if calls is not None:
-            calls.append((name, arguments))
-        return output
+    class FakeTool(AgentTool):
+        @property
+        def name(self) -> str:
+            return name
 
-    return AgentTool(
-        name=name,
-        description=f"{name} tool.",
-        parameters={"type": "object", "properties": {}},
-        execute=execute,
+        @property
+        def description(self) -> str:
+            return f"{name} tool."
+
+        @property
+        def parameters(self) -> dict:
+            return {"type": "object", "properties": {}}
+
+        def create_executor(self, rag_service):
+            async def execute(arguments):
+                if calls is not None:
+                    calls.append((name, arguments))
+                return output
+
+            return execute
+
+    return FakeTool()
+
+
+def build_rag_service(
+    llm, retriever, *, sql_storage=None, file_storage=None, vector_storage=None
+):
+    """A real `RagService` over fake collaborators, for agent tests.
+
+    Building the real service (instead of a stand-in) keeps the agent's
+    dependency typed as `RagService`; pass real storages to exercise the
+    tools against them.
+    """
+    return RagService(
+        llm=llm,
+        embedder=FakeEmbedder(),
+        retriever=retriever,
+        vector_storage=(
+            vector_storage if vector_storage is not None else FakeVectorStorage()
+        ),
+        sql_storage=sql_storage if sql_storage is not None else FakeSqlStorage(),
+        file_storage=file_storage if file_storage is not None else FakeFileStorage(),
     )
 
 

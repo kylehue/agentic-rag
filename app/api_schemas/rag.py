@@ -1,9 +1,6 @@
-from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
-
-from app.api_schemas.chunk import RetrievedChunkSchema
 
 HistoryRole = Literal["user", "assistant"]
 
@@ -28,4 +25,4 @@ class RagAnswerSchema(BaseModel):
 
     query: str
     answer: str
-    chunks: Sequence[RetrievedChunkSchema]
+    chunk_refs: dict[str, dict[str, str]]

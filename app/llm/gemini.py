@@ -9,14 +9,11 @@ from app.core.config import Settings
 from app.llm.base import (
     ChatMessage,
     ContentPart,
-    LLMCapabilities,
     LLMProvider,
     RawDelta,
     ToolCall,
     ToolSpec,
 )
-
-FULL_CAPABILITIES = LLMCapabilities()
 
 _JSON_TYPE_MAP = {
     "string": types.Type.STRING,
@@ -74,10 +71,6 @@ class GeminiProvider(LLMProvider):
                 raise ValueError("GOOGLE_API_KEY is not configured")
             self._client = genai.Client(api_key=self._api_key)
         return self._client
-
-    @property
-    def capabilities(self) -> LLMCapabilities:
-        return FULL_CAPABILITIES
 
     @staticmethod
     def _to_parts(content: str | list[ContentPart]) -> list[types.Part]:

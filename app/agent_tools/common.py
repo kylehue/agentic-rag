@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import io
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
 
 from app.core.config import settings
-from app.models.chunk import RetrievedChunk
 from app.store_file.base import FileStorage
 from app.store_sql.base import SqlStorage
 
@@ -17,10 +16,6 @@ QUERY_TABLE_MAX_ROWS = 100
 # How many rows to read when inferring a table's schema from its file (the
 # fallback for tables ingested before the schema was stored in metadata).
 SCHEMA_INFER_ROWS = 20
-
-# The retrieval path the search tool runs through: query in, finalized
-# chunks out (the same path the RAG service exposes, plugins included).
-Retrieve = Callable[[str], Awaitable[Sequence[RetrievedChunk]]]
 
 
 def object_schema(properties: dict, required: list[str] | None = None) -> dict:

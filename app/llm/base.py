@@ -102,23 +102,6 @@ class ChatResult:
     tool_calls: list[ToolCall] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class LLMCapabilities:
-    """What a provider's model supports.
-
-    This app assumes full native support -- there is no silent fallback; if
-    the model cannot comply, the error propagates to the caller.
-
-    - ``tool_calling``: native function/tool calling.
-    - ``structured_outputs``: native JSON-schema response format.
-    - ``vision``: the model accepts image content in messages.
-    """
-
-    tool_calling: bool = True
-    structured_outputs: bool = True
-    vision: bool = True
-
-
 def _extract_json(content: str):
     """Parse JSON from a model reply, tolerating a wrapping code fence."""
     content = content.strip()
@@ -138,8 +121,7 @@ class LLMProvider(abc.ABC):
     """Provider-neutral LLM interface.
 
     Providers implement one raw primitive, `stream_complete` (a token-level
-    stream of `RawDelta`s), and declare `capabilities` (assumed fully
-    supported). Everything else is concrete here: `complete` accumulates the
+    stream of `RawDelta`s). Everything else is concrete here: `complete` accumulates the
     stream into one `RawResult` (one execution, two consumers, like the
     agent's `ask_stream`/`ask`), and `answer` (plain text), `chat` (native
     tool calling), and `structured` (native JSON-schema output, validated
@@ -150,11 +132,6 @@ class LLMProvider(abc.ABC):
     Messages carry text and image parts (vision); no other binary
     attachments are ever sent to the LLM.
     """
-
-    @property
-    @abc.abstractmethod
-    def capabilities(self) -> LLMCapabilities:
-        """What the configured model supports natively."""
 
     # --- public API ---
 

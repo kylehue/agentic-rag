@@ -1,19 +1,24 @@
 import asyncio
 import io
 
-import pytest
-
-from app.agent.tools import AgentTool, AgentTools
-from app.agent_tools import build_rag_tools
+from app.agent_tools import (
+    InspectTableTool,
+    ListTablesTool,
+    QueryChunksTool,
+    QueryTableTool,
+    SearchDocumentTool,
+    tools_outline,
+)
 from app.core.config import settings
 from app.models.chunk import RetrievedChunk
 from app.plugin.registry import PluginRegistry
 from app.retrievers.base import Retriever
 from app.services.ingestion import IngestionService
+from app.services.rag_agent import execute_tool
 from app.store_file.local import LocalFileStorage
 from app.store_sql.local import LocalSqlStorage
 
-from fakes import FakeEmbedder, FakeLLM, FakeVectorStorage
+from fakes import FakeEmbedder, FakeLLM, FakeVectorStorage, build_rag_service
 
 CSV_BYTES = b"region,amount\nnorth,10\nsouth,25\n"
 COLLIDING_CSV_BYTES = b"region,amount\nwest,5\n"
@@ -199,18 +204,25 @@ def build_tools(
 
     asyncio.run(setup())
 
-    tools = AgentTools(
-        build_rag_tools(
-            retrieve=retriever.retrieve,
-            sql_storage=sql_storage,
-            file_storage=file_storage,
-        )
+    rag_service = build_rag_service(
+        FakeLLM(),
+        retriever,
+        sql_storage=sql_storage,
+        file_storage=file_storage,
     )
-    return tools, retriever
+    tools = [
+        SearchDocumentTool(),
+        ListTablesTool(),
+        InspectTableTool(),
+        QueryTableTool(),
+        QueryChunksTool(),
+    ]
+    executors = {tool.name: tool.create_executor(rag_service) for tool in tools}
+    return executors, retriever
 
 
-def execute(tools, name: str, **arguments) -> str:
-    return asyncio.run(tools.execute(name, arguments))
+def execute(executors, name: str, **arguments) -> str:
+    return asyncio.run(execute_tool(executors, name, arguments))
 
 
 # --- search_documents ---
@@ -228,8 +240,10 @@ def test_search_documents_returns_ranked_evidence(tmp_path):
     output = execute(tools, "search_documents", query="evidence?")
 
     assert retriever.queries == ["evidence?"]
-    assert "[1] source=s1 chunk=c1 plugin=text\nfirst evidence" in output
-    assert "[2] source=s1 chunk=c2 plugin=table\nsecond evidence" in output
+    # Each chunk carries its source and chunk ids; the tool knows nothing
+    # about the citation format (that is the agent service's concern).
+    assert "[1] source=s1 chunk=c1 first evidence" in output
+    assert "[2] source=s1 chunk=c2 second evidence" in output
 
 
 def test_search_documents_reports_no_evidence(tmp_path):
@@ -416,28 +430,34 @@ def test_query_chunks_rejects_cte_wrapped_queries(tmp_path):
     assert output == "Error: only read-only SELECT queries are allowed."
 
 
-# --- AgentTools ---
+# --- tool definitions ---
 
 
-def test_specs_carry_name_description_and_parameters(tmp_path):
-    tools, _ = build_tools(tmp_path)
+def rag_tools():
+    return [
+        SearchDocumentTool(),
+        ListTablesTool(),
+        InspectTableTool(),
+        QueryTableTool(),
+        QueryChunksTool(),
+    ]
 
-    specs = {spec.name: spec for spec in tools.specs()}
 
-    assert set(specs) == {
+def test_tool_definitions_carry_name_description_and_parameters():
+    tools = rag_tools()
+
+    assert {tool.name for tool in tools} == {
         "search_documents",
         "list_tables",
         "inspect_table",
         "query_table",
         "query_chunks",
     }
-    assert specs["query_table"].parameters["required"] == ["table", "sql"]
+    assert QueryTableTool().parameters["required"] == ["table", "sql"]
 
 
-def test_outline_summarizes_each_tool_from_its_definition(tmp_path):
-    tools, _ = build_tools(tmp_path)
-
-    outline = tools.outline()
+def test_outline_summarizes_each_tool_from_its_definition():
+    outline = tools_outline(rag_tools())
 
     # Every tool, with its description...
     for name in (
@@ -460,21 +480,6 @@ def test_outline_summarizes_each_tool_from_its_definition(tmp_path):
 
 
 def test_unknown_tool_returns_an_error_string(tmp_path):
-    tools, _ = build_tools(tmp_path)
+    executors, _ = build_tools(tmp_path)
 
-    assert execute(tools, "nope") == "Error: unknown tool 'nope'."
-
-
-def test_duplicate_tool_names_are_rejected():
-    async def never(arguments: dict) -> str:
-        return ""
-
-    tool = AgentTool(
-        name="dup",
-        description="d",
-        parameters={"type": "object", "properties": {}},
-        execute=never,
-    )
-
-    with pytest.raises(ValueError):
-        AgentTools([tool, tool])
+    assert execute(executors, "nope") == "Error: unknown tool 'nope'."

@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from app.api_schemas.rag import RagAnswerRequestSchema, RagAnswerSchema
-from app.container import agent_service
+from app.container import rag_agent_service
 from app.models.rag import RagAnswer
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
@@ -23,7 +23,7 @@ def _sse(event: str, data: dict) -> str:
 
 @router.post("/answer", response_model=RagAnswerSchema)
 async def answer(request: RagAnswerRequestSchema):
-    result = await agent_service.answer(request.query, history=_history(request))
+    result = await rag_agent_service.ask(request.query, history=_history(request))
     return RagAnswerSchema.model_validate(result)
 
 
@@ -35,11 +35,11 @@ async def answer_stream(request: RagAnswerRequestSchema):
     conversation. Emits an `answer_delta` frame per streamed token, a
     `tool_call` frame per tool the agent requests and a `tool_result` frame
     per result it reads, then one final `answer` frame carrying the full
-    RagAnswer (text plus the evidence chunks).
+    RagAnswer (text plus the cited chunk refs).
     """
 
     async def generate():
-        async for event in agent_service.answer_stream(
+        async for event in rag_agent_service.ask_stream(
             request.query, history=_history(request)
         ):
             if event.name == "answer" and isinstance(event.payload, RagAnswer):

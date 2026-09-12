@@ -9,14 +9,11 @@ from app.core.config import Settings
 from app.llm.base import (
     ChatMessage,
     ContentPart,
-    LLMCapabilities,
     LLMProvider,
     RawDelta,
     ToolCall,
     ToolSpec,
 )
-
-FULL_CAPABILITIES = LLMCapabilities()
 
 
 class OpenAIProvider(LLMProvider):
@@ -40,10 +37,6 @@ class OpenAIProvider(LLMProvider):
                 base_url=self._base_url,
             )
         return self._client
-
-    @property
-    def capabilities(self) -> LLMCapabilities:
-        return FULL_CAPABILITIES
 
     async def stream_complete(
         self,

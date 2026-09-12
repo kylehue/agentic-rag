@@ -36,11 +36,11 @@ def preview(text: str) -> str:
     )
 
 
-def show_evidence(data: dict) -> None:
-    chunks = data["chunks"]
-    print(f"evidence: {len(chunks)} chunk(s)")
-    for chunk in chunks:
-        print(f"  - {chunk['source_id']}:{chunk['chunk_id']} ({chunk['plugin']})")
+def show_chunk_refs(data: dict) -> None:
+    refs = data["chunk_refs"]
+    print(f"cited chunks: {len(refs)}")
+    for ref in refs:
+        print(f"  - {ref}")
 
 
 def show(event: str, data: dict) -> None:
@@ -52,7 +52,7 @@ def show(event: str, data: dict) -> None:
             print(f"   {line}")
     elif event == "answer":
         print(f"\n{data['answer']}\n")
-        show_evidence(data)
+        show_chunk_refs(data)
     else:
         print(f"? {event}: {data}")
 
@@ -89,10 +89,10 @@ def turn(question: str, history: list[dict]) -> str | None:
                 elif event == "answer":
                     if streamed:
                         # The answer already typed itself out; finish the
-                        # line and print the evidence under it.
+                        # line and print the cited chunks under it.
                         print()
                         print()
-                        show_evidence(data)
+                        show_chunk_refs(data)
                     else:
                         show("answer", data)
                     answer = data["answer"]

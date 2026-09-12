@@ -30,6 +30,12 @@ class RagService:
         for plugin in (plugins if plugins is not None else []):
             registry.register(plugin)
 
+        self._llm = llm
+        self._embedder = embedder
+        self._retriever = retriever
+        self._vector_storage = vector_storage
+        self._sql_storage = sql_storage
+        self._file_storage = file_storage
         self._ingestion_service = IngestionService(
             registry=registry,
             llm=llm,
@@ -43,6 +49,30 @@ class RagService:
             llm=llm,
             registry=registry,
         )
+
+    @property
+    def llm(self) -> LLMProvider:
+        return self._llm
+
+    @property
+    def embedder(self) -> Embedder:
+        return self._embedder
+
+    @property
+    def retriever(self) -> Retriever:
+        return self._retriever
+
+    @property
+    def vector_storage(self) -> VectorStorage:
+        return self._vector_storage
+
+    @property
+    def sql_storage(self) -> SqlStorage:
+        return self._sql_storage
+
+    @property
+    def file_storage(self) -> FileStorage:
+        return self._file_storage
 
     async def initialize(self) -> None:
         await self._ingestion_service.initialize()

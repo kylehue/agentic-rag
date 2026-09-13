@@ -430,6 +430,8 @@ Domain-specific errors (`InvalidDocumentError` for unsupported/invalid uploads).
 ### `app/embedders`
 
 - `app/embedders/base.py` - the `Embedder` interface.
+- `app/embedders/fastembed.py` - local embeddings via fastembed.
+- `app/embedders/sentence-transformers.py` - local embeddings via huggingface.
 - `app/embedders/gemini.py` - the Gemini embedding implementation.
 
 ### `app/retrievers`

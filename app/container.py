@@ -24,6 +24,8 @@ from app.store_file.local import LocalFileStorage
 from app.store_vector.local import LocalVectorStorage
 from app.store_sql.local import LocalSqlStorage
 
+from app.services.auth import AuthService
+from app.services.chat import ChatService
 from app.services.rag import RagService
 from app.services.rag_agent import RagAgentService
 
@@ -79,6 +81,11 @@ rag_service = RagService(
     ],
 )
 
+# Auth and chats: decoupled from the RAG services; they only need SQL
+# storage.
+auth_service = AuthService(sql_storage=sql_storage)
+chat_service = ChatService(sql_storage=sql_storage)
+
 rag_agent_service = RagAgentService(
     rag_service=rag_service,
     tools=[
@@ -88,14 +95,23 @@ rag_agent_service = RagAgentService(
         QueryTableTool(),
         QueryChunksTool(),
     ],
+    checkpoint_dir=settings.AGENT_LOCAL_STORAGE_DIR,
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await rag_service.initialize()
+    # Initialize top-down: the agent service initializes the RAG service it
+    # wraps (the system tables); auth and chat manage their own tables.
+    await rag_agent_service.initialize()
+    await auth_service.initialize()
+    await chat_service.initialize()
 
     yield
 
+    # The composition root closes every database: the checkpoint connection
+    # (through the agent service, whose only own resource it is) and the SQL
+    # and vector stores.
+    await rag_agent_service.close()
     await sql_storage.close()
     await vector_storage.close()

@@ -4,9 +4,11 @@ import asyncio
 import re
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
+import aiosqlite
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -14,6 +16,10 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import StreamWriter
@@ -35,6 +41,9 @@ from app.services.rag import RagService
 from app.utils.string import render_template
 
 DEFAULT_MAX_TOOL_ROUNDS = 8
+
+# The checkpoint database's file name, inside the agent storage dir.
+CHECKPOINT_DB_FILENAME = "checkpoints.sqlite"
 
 
 # --- the run's event trace ---
@@ -163,6 +172,7 @@ def _build_graph(
     specs: list[ToolSpec],
     executors: dict[str, ToolExecutor],
     max_tool_rounds: int,
+    checkpointer: BaseCheckpointSaver,
 ):
     """Compile the agent's orchestration graph.
 
@@ -170,6 +180,10 @@ def _build_graph(
     the LLM requests tool calls, the tools node executes them and feeds the
     results back. Once `max_tool_rounds` rounds are used up, the LLM is
     called without tools and must answer, so the loop always terminates.
+
+    The `checkpointer` persists each thread's state (one thread per
+    chat), so a conversation continues across runs and restarts, and an
+    interrupted run can resume.
     """
 
     async def model_node(state: AgentState, writer: StreamWriter) -> dict:
@@ -249,26 +263,20 @@ def _build_graph(
     graph.add_edge(START, "model")
     graph.add_conditional_edges("model", route, {"tools": "tools", END: END})
     graph.add_edge("tools", "model")
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
-def _initial_state(
+def _run_input(
+    existing_messages: Sequence[BaseMessage],
     question: str,
-    history: Sequence[tuple[str, str]],
     system_prompt: str,
 ) -> AgentState:
-    """The graph's starting state for one question.
-
-    `history` is the prior conversation, oldest first, as (role, content)
-    pairs with role "user" or "assistant". It is placed between the system
-    prompt and the current question, so the agent can answer follow-ups.
-    """
-    messages: list = [SystemMessage(system_prompt)]
-    for role, content in history:
-        if role == "user":
-            messages.append(HumanMessage(content))
-        else:
-            messages.append(AIMessage(content))
+    """The graph input for a new question on a thread: the question (plus
+    the system prompt on a fresh thread) and a reset tool budget. The prior
+    conversation is already in the thread's checkpointed state."""
+    messages: list = []
+    if not existing_messages:
+        messages.append(SystemMessage(system_prompt))
     messages.append(HumanMessage(question))
     return {
         "messages": messages,
@@ -378,7 +386,16 @@ def extract_chunk_refs(answer: str) -> dict[str, dict[str, str]]:
 
 
 class RagAgentService:
-    """Answers questions with a tool-calling agent over the RAG service."""
+    """Answers questions with a tool-calling agent over the RAG service.
+
+    Takes the RAG service and the tools at initialization (plugin-style).
+    Answers are chat-scoped: each `chat_id` is a thread on the graph's
+    checkpointer, so a conversation continues across questions and server
+    restarts (with a durable checkpointer), and an interrupted run can
+    resume. Each run compiles a fresh graph whose tool executors are scoped
+    to the chat's chunks. `ask` is a projection of `ask_stream`: one
+    execution, two consumers.
+    """
 
     def __init__(
         self,
@@ -386,6 +403,8 @@ class RagAgentService:
         rag_service: RagService,
         tools: Sequence[AgentTool],
         max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
+        checkpointer: BaseCheckpointSaver | None = None,
+        checkpoint_dir: str | None = None,
     ) -> None:
         seen = set()
         for tool in tools:
@@ -408,29 +427,97 @@ class RagAgentService:
             RAG_AGENT_SYSTEM_PROMPT_TEMPLATE, {"tools": tools_outline(tools)}
         )
 
-    def _create_run(self):
-        """Compile a fresh graph for one answer, with per-answer tool
-        executors."""
+        # Checkpoint storage: a provided saver, else a durable SQLite saver
+        # created on first use from the agent storage dir (or in-memory when
+        # neither is given).
+        self._checkpointer = checkpointer
+        self._checkpoint_db_path = (
+            str(Path(checkpoint_dir) / CHECKPOINT_DB_FILENAME)
+            if checkpoint_dir
+            else None
+        )
+        self._checkpoint_conn: aiosqlite.Connection | None = None
+        self._checkpointer_lock = asyncio.Lock()
+
+    async def _ensure_checkpointer(self) -> BaseCheckpointSaver:
+        async with self._checkpointer_lock:
+            if self._checkpointer is None:
+                if self._checkpoint_db_path is None:
+                    self._checkpointer = MemorySaver()
+                else:
+                    Path(self._checkpoint_db_path).parent.mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    self._checkpoint_conn = await aiosqlite.connect(
+                        self._checkpoint_db_path
+                    )
+                    self._checkpointer = AsyncSqliteSaver(self._checkpoint_conn)
+            return self._checkpointer
+
+    async def initialize(self) -> None:
+        """Initialize the services this one wraps (the RAG system tables)
+        and open the checkpoint database."""
+        await self._rag_service.initialize()
+        await self._ensure_checkpointer()
+
+    async def close(self) -> None:
+        """Close the checkpoint database connection: the only resource this
+        service creates itself. The wrapped RAG service's storages are closed
+        by the composition root."""
+        if self._checkpoint_conn is not None:
+            await self._checkpoint_conn.close()
+            self._checkpoint_conn = None
+            self._checkpointer = None
+
+    def _create_run(
+        self,
+        chat_id: str | None,
+        checkpointer: BaseCheckpointSaver,
+    ):
+        """Compile the graph for one run: tool executors scoped to `chat_id`,
+        on the shared checkpointer."""
         executors = {
-            tool.name: tool.create_executor(self._rag_service) for tool in self._tools
+            tool.name: tool.create_executor(self._rag_service, chat_id)
+            for tool in self._tools
         }
         return _build_graph(
             self._rag_service.llm,
             self._specs,
             executors,
             self._max_tool_rounds,
+            checkpointer,
         )
+
+    async def _prepare_run(
+        self,
+        question: str,
+        chat_id: str,
+    ) -> tuple[Any, AgentState | None, RunnableConfig]:
+        """The compiled graph, the run input, and the thread config.
+
+        When the thread has a pending step (a run that stopped before
+        answering), the input is None and the run resumes from its
+        checkpoint; otherwise the question starts a new run on the thread.
+        """
+        checkpointer = await self._ensure_checkpointer()
+        graph = self._create_run(chat_id, checkpointer)
+        config: RunnableConfig = {"configurable": {"thread_id": chat_id}}
+
+        state = await graph.aget_state(config)
+        if state.next:
+            return graph, None, config
+        messages = state.values.get("messages") or []
+        return graph, _run_input(messages, question, self._system_prompt), config
 
     async def _run_events(
         self,
         graph: Any,
-        question: str,
-        history: Sequence[tuple[str, str]],
+        input_state: AgentState | None,
+        config: RunnableConfig,
     ) -> AsyncIterator[AgentEvent]:
         """Run the graph and project it into the run's event trace."""
         async for mode, data in graph.astream(
-            _initial_state(question, history, self._system_prompt),
-            stream_mode=["updates", "custom"],
+            input_state, config, stream_mode=["updates", "custom"]
         ):
             if mode == "custom":
                 # The model node's token stream, emitted as it happens.
@@ -448,17 +535,19 @@ class RagAgentService:
     async def ask(
         self,
         question: str,
-        history: Sequence[tuple[str, str]] = (),
+        *,
+        chat_id: str,
     ) -> RagAnswer:
-        """Ask a question and return the answer.
+        """Ask a question on a chat's thread and return the answer.
 
-        The answer's `chunk_refs` are the chunks it cites (parsed from the
-        `#[source_id:chunk_id]` references in the answer text; none, if it
-        cites nothing). `history` is the prior conversation.
+        The chat's prior conversation lives in the thread's checkpointed
+        state, and `chat_id` bounds the run's tools to that chat's chunks.
+        The answer's `chunk_refs` are the chunks it cites (none, if it cites
+        nothing).
         """
-        graph = self._create_run()
+        graph, input_state, config = await self._prepare_run(question, chat_id)
         answer = None
-        async for event in self._run_events(graph, question, history):
+        async for event in self._run_events(graph, input_state, config):
             if isinstance(event, AnswerEvent):
                 answer = event.content
         if answer is None:
@@ -472,32 +561,70 @@ class RagAgentService:
     async def ask_stream(
         self,
         question: str,
-        history: Sequence[tuple[str, str]] = (),
+        *,
+        chat_id: str,
     ) -> AsyncIterator[StreamEvent]:
-        """Ask a question and stream the run as it happens.
+        """Ask a question on a chat's thread and stream the run as it
+        happens.
 
         Yields neutral `StreamEvent`s: `answer_delta` per streamed token,
         `tool_call` per tool the model requests, `tool_result` per result it
         reads back, then the single `answer` event carrying the `RagAnswer`
         (whose `chunk_refs` are the citations in the answer). Raises if the
-        run ends without an answer. `history` is the prior conversation.
+        run ends without an answer. `chat_id` bounds the run's tools to that
+        chat's chunks.
         """
-        graph = self._create_run()
-        async for event in self._run_events(graph, question, history):
+        graph, input_state, config = await self._prepare_run(question, chat_id)
+        # The stream is consumed to completion before the terminal frame is
+        # yielded: stopping early would cancel the run and skip its final
+        # checkpoint, losing the answer from the chat's history.
+        answer = None
+        async for event in self._run_events(graph, input_state, config):
             if isinstance(event, AnswerEvent):
-                yield StreamEvent(
-                    "answer",
-                    RagAnswer(
-                        query=question,
-                        answer=event.content,
-                        chunk_refs=extract_chunk_refs(event.content),
-                    ),
-                )
-                return
+                answer = event.content
+                continue
             item = to_stream_event(event)
             if item is not None:
                 yield item
-        raise RuntimeError("The agent produced no final answer.")
+        if answer is None:
+            raise RuntimeError("The agent produced no final answer.")
+        yield StreamEvent(
+            "answer",
+            RagAnswer(
+                query=question,
+                answer=answer,
+                chunk_refs=extract_chunk_refs(answer),
+            ),
+        )
+
+    async def chat_history(self, chat_id: str) -> list[dict]:
+        """The conversation of a chat, read from the checkpointer.
+
+        Returns the user and assistant turns in order (tool traffic and the
+        system prompt stay internal). An unknown or finished-with-nothing
+        thread yields an empty list.
+        """
+        # Straight from the checkpointer: the thread's latest checkpoint
+        # holds the conversation, no graph or run needed for a read.
+        checkpointer = await self._ensure_checkpointer()
+        config: RunnableConfig = {"configurable": {"thread_id": chat_id}}
+        snapshot = await checkpointer.aget_tuple(config)
+        if snapshot is None:
+            return []
+        values = snapshot.checkpoint.get("channel_values") or {}
+        messages = values.get("messages") or []
+
+        history: list[dict] = []
+        for message in messages:
+            if isinstance(message, HumanMessage):
+                history.append({"role": "user", "content": str(message.content)})
+            elif isinstance(message, AIMessage) and message.content:
+                text = to_content(message.content)
+                if isinstance(text, list):
+                    text = " ".join(part for part in text if isinstance(part, str))
+                if text:
+                    history.append({"role": "assistant", "content": text})
+        return history
 
 
 def to_stream_event(item: AgentEvent | RagAnswer) -> StreamEvent | None:

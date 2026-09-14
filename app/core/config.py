@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     VECTOR_COLLECTION_NAME: str = "document_chunks"
     CHUNK_TABLE_NAME: str = "__chunks__"
     DOCUMENT_METADATA_TABLE_NAME: str = "__documents__"
+    USERS_TABLE_NAME: str = "__users__"
+    AUTH_TOKENS_TABLE_NAME: str = "__auth_tokens__"
+    CHATS_TABLE_NAME: str = "__chats__"
+    AGENT_LOCAL_STORAGE_DIR: str = "./.storage/agent"
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",

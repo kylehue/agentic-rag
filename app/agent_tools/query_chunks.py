@@ -1,11 +1,16 @@
 import json
+import re
 
 from app.agent_tools.base import AgentTool
 from app.agent_tools.common import object_schema
 from app.core.config import settings
 
 # Row cap keeps tool output small enough for the model's context.
-QUERY_CHUNKS_MAX_ROWS = 20
+QUERY_CHUNKS_MAX_ROWS = 5
+
+# Chat ids are system-generated (uuid4 hex); this guard keeps the value that
+# gets inlined into the wrapped query free of SQL metacharacters.
+_CHAT_ID_SHAPE = re.compile(r"[\w-]+")
 
 
 class QueryChunksTool(AgentTool):
@@ -21,9 +26,11 @@ class QueryChunksTool(AgentTool):
             "Run a read-only SELECT query against the document database. "
             f"Tables: {settings.CHUNK_TABLE_NAME} (columns: id, chunk_id, "
             "source_id, parent_source_id, origin_source_id, plugin, text, "
-            f"metadata) and {settings.DOCUMENT_METADATA_TABLE_NAME} (columns: "
-            "id, source_id, file_path, file_content_type, file_filename, "
-            "file_orig_filename, is_origin)."
+            "metadata, chat_id) and "
+            f"{settings.DOCUMENT_METADATA_TABLE_NAME} (columns: id, "
+            "source_id, file_path, file_content_type, file_filename, "
+            "file_orig_filename, is_origin, chat_id). Select chat_id so the "
+            "results stay within the current chat."
         )
 
     @property
@@ -44,7 +51,7 @@ class QueryChunksTool(AgentTool):
             ["sql"],
         )
 
-    def create_executor(self, rag_service):
+    def create_executor(self, rag_service, chat_id=None):
         sql_storage = rag_service.sql_storage
 
         async def execute(arguments: dict) -> str:
@@ -61,6 +68,18 @@ class QueryChunksTool(AgentTool):
             except (TypeError, ValueError):
                 limit = QUERY_CHUNKS_MAX_ROWS
             limit = max(1, min(limit, QUERY_CHUNKS_MAX_ROWS))
+
+            if chat_id is not None:
+                if not _CHAT_ID_SHAPE.fullmatch(chat_id):
+                    return "Error: invalid chat scope."
+                # Bound the result to the chat. The query must select
+                # chat_id; without it the wrapped query fails with a SQL
+                # error the model can adapt to, so no row can leak the
+                # scope.
+                sql = (
+                    f"SELECT * FROM ({sql}) AS scoped "
+                    f"WHERE scoped.chat_id = '{chat_id}'"
+                )
 
             rows = await sql_storage.query(sql, limit)
             if not rows:

@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import chromadb
 
@@ -31,11 +31,14 @@ class LocalVectorStorage(VectorStorage):
         self,
         ids: Sequence[str],
         embeddings: Sequence[Sequence[float]],
+        metadatas: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         if len(ids) != len(embeddings):
             raise ValueError("ids and embeddings must have the same length")
         if not ids:
             return
+        if metadatas is not None and len(metadatas) != len(ids):
+            raise ValueError("ids and metadatas must have the same length")
 
         # Delete first so re-indexing an existing ID also removes legacy Chroma
         # documents and metadata from versions that stored chunk payloads here.
@@ -47,12 +50,14 @@ class LocalVectorStorage(VectorStorage):
             self._collection.upsert,
             ids=list(ids),
             embeddings=vectors,
+            metadatas=list(metadatas) if metadatas is not None else None,
         )
 
     async def search(
         self,
         query_embedding: list[float],
         top_k: int = 5,
+        where: dict[str, Any] | None = None,
     ) -> list[VectorSearchResult]:
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
@@ -65,6 +70,7 @@ class LocalVectorStorage(VectorStorage):
             self._collection.query,
             query_embeddings=query_vectors,
             n_results=min(top_k, collection_count),
+            where=where,
             include=["distances"],
         )
         ids = result["ids"][0]

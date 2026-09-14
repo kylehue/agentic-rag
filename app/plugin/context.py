@@ -31,12 +31,15 @@ class IngestionContext:
     ``file`` is the file of this run; ``parent_file`` is the file that emitted
     it (``None`` for top-level ingestion); ``origin_file`` is the top-most file
     in the emission chain -- the file the whole tree of emitted files traces
-    back to (``file`` itself for top-level ingestion).
+    back to (``file`` itself for top-level ingestion). ``chat_id`` is the chat
+    this ingestion belongs to (``None`` for chat-less ingestion); every file
+    in the emission tree shares it.
     """
 
     file: IngestionFile
     origin_file: IngestionFile
     parent_file: IngestionFile | None = None
+    chat_id: str | None = None
 
 
 @dataclass(frozen=True)

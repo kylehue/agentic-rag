@@ -83,16 +83,28 @@ class RagService:
         filename: str,
         content_type: str,
         description: str | None = None,
-    ) -> list[IngestedChunk]:
-        """Store and index a file."""
+        chat_id: str | None = None,
+    ) -> tuple[str, list[IngestedChunk]]:
+        """Store and index a file into `chat_id`; return its origin source
+        id and chunks."""
         file = IngestionFile(
             filename=filename,
             content_type=content_type,
             file_bytes=file_bytes,
             description=description,
         )
-        return await self._ingestion_service.ingest(file)
+        chunks = await self._ingestion_service.ingest(file, chat_id)
+        return file.source_id, chunks
 
-    async def retrieve(self, user_query: str) -> list[RetrievedChunk]:
-        """Return evidence without asking the agent."""
-        return await self._retrieval_service.retrieve(user_query)
+    async def retrieve(
+        self,
+        user_query: str,
+        chat_id: str | None = None,
+    ) -> list[RetrievedChunk]:
+        """Return evidence without asking the agent.
+
+        `chat_id` bounds the corpus to that chat's chunks (mapped to the
+        retrievers' `where` condition); None searches the whole store.
+        """
+        where = {"chat_id": chat_id} if chat_id is not None else None
+        return await self._retrieval_service.retrieve(user_query, where)

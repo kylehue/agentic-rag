@@ -113,17 +113,21 @@ class FakeEmbedder(Embedder):
 
 class FakeVectorStorage(VectorStorage):
     def __init__(self) -> None:
-        self.added: list[tuple[list[str], list[list[float]]]] = []
+        self.added: list[
+            tuple[list[str], list[list[float]], list[dict] | None]
+        ] = []
 
     async def close(self) -> None:
         pass
 
-    async def add(self, ids, embeddings) -> None:
+    async def add(self, ids, embeddings, metadatas=None) -> None:
         if len(ids) != len(embeddings):
             raise ValueError("ids and embeddings must have the same length")
-        self.added.append((list(ids), [list(e) for e in embeddings]))
+        self.added.append(
+            (list(ids), [list(e) for e in embeddings], list(metadatas) if metadatas else None)
+        )
 
-    async def search(self, query_embedding, top_k=5):
+    async def search(self, query_embedding, top_k=5, where=None):
         return []
 
     async def delete(self, ids) -> None:
@@ -161,7 +165,7 @@ class FakeSqlStorage(SqlStorage):
     async def query(self, sql_query, limit):
         return []
 
-    async def search(self, table_name, search_query, limit):
+    async def search(self, table_name, search_query, limit, condition=None):
         return []
 
     @staticmethod
@@ -369,7 +373,7 @@ def make_tool(name, output="tool result", calls=None):
         def parameters(self) -> dict:
             return {"type": "object", "properties": {}}
 
-        def create_executor(self, rag_service):
+        def create_executor(self, rag_service, chat_id=None):
             async def execute(arguments):
                 if calls is not None:
                     calls.append((name, arguments))

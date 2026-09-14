@@ -22,13 +22,16 @@ class VectorRetriever(Retriever):
     async def retrieve(
         self,
         user_query: str,
+        where: dict | None = None,
     ) -> list[RetrievedChunk]:
-        # Retrieve from vector database.
+        # Retrieve from the vector database. The where map is the index's
+        # own metadata filter (the chunks' stored metadata, e.g. their chat).
         query_embedding = await self._embedder.embed_query(user_query)
 
         vector_results = await self._vector_storage.search(
             query_embedding,
             self._top_k,
+            where=where,
         )
 
         if not vector_results:

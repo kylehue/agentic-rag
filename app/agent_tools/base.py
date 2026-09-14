@@ -35,11 +35,17 @@ class AgentTool(ABC):
         """The tool's JSON schema parameters."""
 
     @abstractmethod
-    def create_executor(self, rag_service: RagService) -> ToolExecutor:
+    def create_executor(
+        self,
+        rag_service: RagService,
+        chat_id: str | None = None,
+    ) -> ToolExecutor:
         """Return the async execute function the agent uses for this tool.
 
-        Called once per answer with the RAG service; the returned closure
-        may capture whatever it needs from the service.
+        Called once per answer with the RAG service and the chat the answer
+        runs in (None means no chat scope). The returned closure may capture
+        whatever it needs; chat-scoped tools bound their lookups to that
+        chat's chunks.
         """
 
 

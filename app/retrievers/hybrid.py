@@ -16,8 +16,10 @@ class HybridRetriever(Retriever):
         self._retrievers = retrievers
         self._top_k = top_k
 
-    async def retrieve(self, user_query):
-        tasks = [retriever.retrieve(user_query) for retriever in self._retrievers]
+    async def retrieve(self, user_query, where: dict | None = None):
+        tasks = [
+            retriever.retrieve(user_query, where) for retriever in self._retrievers
+        ]
 
         results = await asyncio.gather(*tasks)
 

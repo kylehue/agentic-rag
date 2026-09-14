@@ -40,7 +40,7 @@ class NoopRetriever(Retriever):
     def __init__(self, chunks: list[RetrievedChunk] | None = None) -> None:
         self._chunks = chunks or []
 
-    async def retrieve(self, user_query) -> list[RetrievedChunk]:
+    async def retrieve(self, user_query, where=None):
         return self._chunks
 
 
@@ -82,14 +82,16 @@ def test_ask_uses_a_tool_then_answers():
         llm, [make_tool("search_documents", "found: garden plan", calls)]
     )
 
-    result = asyncio.run(agent.ask("Where is the garden plan?"))
+    result = asyncio.run(agent.ask("Where is the garden plan?", chat_id="s1"))
 
     assert result.answer == FULL_ANSWER
     assert calls == [("search_documents", {"query": "garden"})]
     # The first LLM call was made with the tool spec; the tool result was
     # fed back before the final call.
     assert [spec.name for spec in llm.tools[0]] == ["search_documents"]
-    assert any("found: garden plan" in str(message.content) for message in llm.calls[1])
+    assert any(
+        "found: garden plan" in str(message.content) for message in llm.calls[1]
+    )
 
 
 def test_ask_answers_without_tools_when_none_are_requested():
@@ -97,7 +99,9 @@ def test_ask_answers_without_tools_when_none_are_requested():
     llm = FakeLLM(RawResult(content="Direct answer."))
     agent = make_agent(llm, [make_tool("search_documents", calls=calls)])
 
-    assert asyncio.run(agent.ask("hi")).answer == "Direct answer."
+    result = asyncio.run(agent.ask("hi", chat_id="s1"))
+
+    assert result.answer == "Direct answer."
     assert calls == []
 
 
@@ -105,7 +109,7 @@ def test_ask_executes_several_tool_rounds():
     calls: list = []
     llm = FakeLLM(
         tool_call_response("list_tables"),
-        tool_call_response("query_table", {"table": "sales", "sql": "SELECT 1"}),
+        tool_call_response("query_table", {"source_id": "tbl-src", "sql": "SELECT 1"}),
         RawResult(content="The total is 35."),
     )
     agent = make_agent(
@@ -116,7 +120,9 @@ def test_ask_executes_several_tool_rounds():
         ],
     )
 
-    assert asyncio.run(agent.ask("total?")).answer == "The total is 35."
+    result = asyncio.run(agent.ask("total?", chat_id="s1"))
+
+    assert result.answer == "The total is 35."
     assert [name for name, _ in calls] == ["list_tables", "query_table"]
 
 
@@ -127,7 +133,7 @@ def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
             content="",
             tool_calls=(
                 ToolCall(id="c1", name="list_tables", arguments={}),
-                ToolCall(id="c2", name="inspect_table", arguments={"table": "sales"}),
+                ToolCall(id="c2", name="inspect_table", arguments={"source_id": "tbl-src"}),
             ),
         ),
         RawResult(content="Done."),
@@ -140,7 +146,9 @@ def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
         ],
     )
 
-    assert asyncio.run(agent.ask("describe the sales table")).answer == "Done."
+    result = asyncio.run(agent.ask("describe the sales table", chat_id="s1"))
+
+    assert result.answer == "Done."
     # Both calls of the one round executed...
     assert [name for name, _ in calls] == ["list_tables", "inspect_table"]
     # ...and only two LLM calls happened: the round, then the final answer.
@@ -168,34 +176,67 @@ def test_ask_stops_at_the_tool_budget():
         max_tool_rounds=1,
     )
 
-    assert asyncio.run(agent.ask("loop?")).answer == "Best effort answer."
+    result = asyncio.run(agent.ask("loop?", chat_id="s1"))
+
+    assert result.answer == "Best effort answer."
     # The first round used the tool; the budgeted-out call went to the LLM
     # without tools and produced the final answer.
     assert len(calls) == 1
     assert llm.tools[-1] == []
 
 
-def test_ask_with_history_passes_the_conversation_through():
-    llm = FakeLLM(RawResult(content="Follow-up answer."))
+def test_ask_continues_the_conversation_on_a_chat():
+    llm = FakeLLM(
+        RawResult(content="First answer."),
+        RawResult(content="Second answer."),
+    )
     agent = make_agent(llm)
 
-    result = asyncio.run(
-        agent.ask(
-            "And the south?",
-            history=[("user", "North sales?"), ("assistant", "10 units.")],
-        )
-    )
+    asyncio.run(agent.ask("tell me about sales", chat_id="s1"))
+    result = asyncio.run(agent.ask("now about the south?", chat_id="s1"))
 
-    assert result.answer == "Follow-up answer."
-    conversation = [
-        (message.role, message.content)
-        for message in llm.calls[0]
-        if message.role != "system"
-    ]
-    assert conversation == [
-        ("user", "North sales?"),
-        ("assistant", "10 units."),
-        ("user", "And the south?"),
+    assert result.answer == "Second answer."
+    # The second run's LLM call carries the first exchange from the thread.
+    assert [m.role for m in llm.calls[1]] == ["system", "user", "assistant", "user"]
+
+
+def test_ask_isolated_between_chats():
+    llm = FakeLLM(
+        RawResult(content="A."),
+        RawResult(content="B."),
+    )
+    agent = make_agent(llm)
+
+    asyncio.run(agent.ask("first", chat_id="s1"))
+    asyncio.run(agent.ask("second", chat_id="s2"))
+
+    # The s2 run has no s1 history.
+    assert [m.role for m in llm.calls[1]] == ["system", "user"]
+
+
+def test_ask_resumes_an_interrupted_run():
+    # Run 1: the model requests a tool, then the next LLM call crashes.
+    llm = FakeLLM(
+        tool_call_response("search_documents"),
+        RuntimeError("boom"),
+        RawResult(content="Recovered."),
+    )
+    agent = make_agent(llm)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(agent.ask("why?", chat_id="s1"))
+
+    # Asking again resumes the interrupted run from its checkpoint (the
+    # question is not appended twice).
+    result = asyncio.run(agent.ask("why?", chat_id="s1"))
+
+    assert result.answer == "Recovered."
+    final_messages = llm.calls[-1]
+    assert [m.role for m in final_messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
     ]
 
 
@@ -206,7 +247,9 @@ def test_ask_tool_errors_are_seen_by_the_model_not_raised():
     )
     agent = make_agent(llm, [make_tool("search_documents")])
 
-    assert asyncio.run(agent.ask("q")).answer == "Recovered."
+    result = asyncio.run(agent.ask("q", chat_id="s1"))
+
+    assert result.answer == "Recovered."
     # The unknown tool call came back as an error string for the model.
     feedback = [m for m in llm.calls[1] if "unknown tool" in str(m.content)]
     assert len(feedback) == 1
@@ -221,7 +264,7 @@ def test_ask_reports_only_the_cited_chunks():
     )
     agent = make_agent(llm, [SearchDocumentTool()], retriever=NoopRetriever(chunks))
 
-    result = asyncio.run(agent.ask("what?"))
+    result = asyncio.run(agent.ask("what?", chat_id="s1"))
 
     assert result.query == "what?"
     assert result.answer == "Grounded answer. #[s1:c2]"
@@ -235,23 +278,12 @@ def test_ask_without_citations_reports_no_chunk_refs():
     llm = FakeLLM(RawResult(content="No tools needed."))
     agent = make_agent(llm, [SearchDocumentTool()], retriever=NoopRetriever([chunk]))
 
-    result = asyncio.run(agent.ask("what?"))
+    result = asyncio.run(agent.ask("what?", chat_id="s1"))
 
     # The answer cites nothing, so it reports no chunk refs even though the
     # retriever holds chunks.
     assert result.answer == "No tools needed."
     assert result.chunk_refs == {}
-
-
-def test_extract_chunk_refs_parses_citations():
-    answer = "It is here #[s1:c1], again #[s1:c1], and also #[s2:c2]."
-    assert extract_chunk_refs(answer) == {
-        "#[s1:c1]": {"source_id": "s1", "chunk_id": "c1"},
-        "#[s2:c2]": {"source_id": "s2", "chunk_id": "c2"},
-    }
-    # Plain brackets, ranks, and links are not citations (no leading #).
-    assert extract_chunk_refs("[1] source=s1 chunk=c1") == {}
-    assert extract_chunk_refs("see [s1:c1] or [a](http://x)") == {}
 
 
 def test_ask_raises_when_the_run_never_answers():
@@ -265,7 +297,7 @@ def test_ask_raises_when_the_run_never_answers():
     )
 
     with pytest.raises(RuntimeError):
-        asyncio.run(agent.ask("loop?"))
+        asyncio.run(agent.ask("loop?", chat_id="s1"))
 
 
 def test_duplicate_tool_names_are_rejected():
@@ -283,7 +315,7 @@ def test_system_prompt_is_built_from_the_tools_outline():
     llm = FakeLLM(RawResult(content="ok"))
     agent = make_agent(llm, RAG_TOOLS)
 
-    asyncio.run(agent.ask("q"))
+    asyncio.run(agent.ask("q", chat_id="s1"))
 
     system_prompt = llm.calls[0][0].content
     # The persona and rules...
@@ -315,6 +347,17 @@ def test_to_stream_event_translates_domain_items():
     assert to_stream_event(AnswerEvent("a")) is None
 
 
+def test_extract_chunk_refs_parses_citations():
+    answer = "It is here #[s1:c1], again #[s1:c1], and also #[s2:c2]."
+    assert extract_chunk_refs(answer) == {
+        "#[s1:c1]": {"source_id": "s1", "chunk_id": "c1"},
+        "#[s2:c2]": {"source_id": "s2", "chunk_id": "c2"},
+    }
+    # Plain brackets, ranks, and links are not citations (no leading #).
+    assert extract_chunk_refs("[1] source=s1 chunk=c1") == {}
+    assert extract_chunk_refs("see [s1:c1] or [a](http://x)") == {}
+
+
 # --- ask_stream ---
 
 
@@ -325,7 +368,9 @@ def test_ask_stream_yields_the_run_as_events():
     )
     agent = make_agent(llm)
 
-    items = asyncio.run(drain(agent.ask_stream("Where is the garden plan?")))
+    items = asyncio.run(
+        drain(agent.ask_stream("Where is the garden plan?", chat_id="s1"))
+    )
 
     # The answer streams as deltas, then the canonical answer terminates the
     # run.
@@ -355,7 +400,9 @@ def test_ask_stream_yields_the_answer_token_by_token():
     )
     agent = make_agent(llm)
 
-    items = asyncio.run(drain(agent.ask_stream("Where is the garden plan?")))
+    items = asyncio.run(
+        drain(agent.ask_stream("Where is the garden plan?", chat_id="s1"))
+    )
 
     deltas = [item for item in items if item.name == "answer_delta"]
     # The tokens arrive in order and compose the answer...
@@ -372,7 +419,7 @@ def test_ask_stream_parallel_calls_yield_every_step_in_order():
             content="",
             tool_calls=(
                 ToolCall(id="c1", name="list_tables", arguments={}),
-                ToolCall(id="c2", name="inspect_table", arguments={"table": "sales"}),
+                ToolCall(id="c2", name="inspect_table", arguments={"source_id": "tbl-src"}),
             ),
         ),
         RawResult(content="Done."),
@@ -385,12 +432,14 @@ def test_ask_stream_parallel_calls_yield_every_step_in_order():
         ],
     )
 
-    items = asyncio.run(drain(agent.ask_stream("describe the sales table")))
+    items = asyncio.run(
+        drain(agent.ask_stream("describe the sales table", chat_id="s1"))
+    )
 
     assert items[:5] == [
         StreamEvent("tool_call", {"name": "list_tables", "arguments": {}}),
         StreamEvent(
-            "tool_call", {"name": "inspect_table", "arguments": {"table": "sales"}}
+            "tool_call", {"name": "inspect_table", "arguments": {"source_id": "tbl-src"}}
         ),
         StreamEvent(
             "tool_result", {"name": "list_tables", "content": "one table: sales"}
@@ -418,7 +467,7 @@ def test_ask_stream_streams_tool_turn_commentary_before_the_call():
     )
     agent = make_agent(llm, [make_tool("search_documents", "found")])
 
-    items = asyncio.run(drain(agent.ask_stream("q")))
+    items = asyncio.run(drain(agent.ask_stream("q", chat_id="s1")))
 
     assert items[:4] == [
         StreamEvent("answer_delta", {"content": "che"}),
@@ -443,7 +492,7 @@ def test_ask_stream_carries_tool_errors_as_steps():
     )
     agent = make_agent(llm, [make_tool("search_documents")])
 
-    items = asyncio.run(drain(agent.ask_stream("q")))
+    items = asyncio.run(drain(agent.ask_stream("q", chat_id="s1")))
 
     error = [
         item
@@ -463,7 +512,7 @@ def test_ask_stream_raises_when_the_run_never_answers():
     )
 
     async def go():
-        await drain(agent.ask_stream("loop?"))
+        await drain(agent.ask_stream("loop?", chat_id="s1"))
 
     with pytest.raises(RuntimeError):
         asyncio.run(go())

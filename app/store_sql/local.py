@@ -246,6 +246,27 @@ class LocalSqlStorage(SqlStorage):
 
         async with self._engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
+            # Migrate an existing table: add declared columns it is missing.
+            existing = {
+                row[1]
+                for row in (
+                    await conn.execute(text(f'PRAGMA table_info("{table_name}")'))
+                ).fetchall()
+            }
+            for column in columns:
+                if column.name in existing:
+                    continue
+                if not column.nullable and column.default is None:
+                    raise ValueError(
+                        f"Cannot add required column '{column.name}' to the "
+                        f"existing table '{table_name}'."
+                    )
+                await conn.execute(
+                    text(
+                        f'ALTER TABLE "{table_name}" '
+                        f"ADD COLUMN {column.compile(dialect=conn.dialect)}"
+                    )
+                )
 
     async def upsert(
         self,
@@ -386,6 +407,7 @@ class LocalSqlStorage(SqlStorage):
         table_name: str,
         search_query: str,
         limit: int | None,
+        condition: ConditionBuilder | None = None,
     ) -> Sequence[dict[str, Any]]:
         self._validate_table_name(table_name)
 
@@ -405,12 +427,27 @@ class LocalSqlStorage(SqlStorage):
         fts_table = f"{table_name}_fts"
         limit_clause = "" if limit is None else "LIMIT :limit"
 
+        condition_clause = ""
+        if condition is not None:
+            # Rendered with literal binds: SQLAlchemy quotes the values, and
+            # the conditions in use are system-generated column filters.
+            table = await self._load_table(table_name)
+            rendered = condition(table).compile(
+                dialect=self._engine.dialect,
+                compile_kwargs={"literal_binds": True},
+            )
+            condition_clause = f"AND {rendered}"
+
+        # The table is referenced by its real name (not an alias) so that
+        # the compiled condition, which is built against the real table,
+        # resolves against this query.
         statement = text(f"""
-            SELECT source.*
-            FROM "{table_name}" AS source
+            SELECT "{table_name}".*
+            FROM "{table_name}"
             JOIN "{fts_table}" AS fts
-                ON source.id = fts.rowid
+                ON "{table_name}".id = fts.rowid
             WHERE "{fts_table}" MATCH :query
+            {condition_clause}
             ORDER BY bm25("{fts_table}")
             {limit_clause}
             """)

@@ -57,6 +57,7 @@ class IngestionService:
                 Column("plugin", String, nullable=False),
                 Column("text", Text, nullable=False),
                 Column("metadata", JSON),
+                Column("chat_id", String, nullable=True),
             ],
         )
 
@@ -70,11 +71,18 @@ class IngestionService:
                 Column("file_filename", String, nullable=False),
                 Column("file_orig_filename", String, nullable=False),
                 Column("is_origin", Boolean, nullable=False),
+                Column("chat_id", String, nullable=True),
             ],
         )
 
-    async def ingest(self, file: IngestionFile) -> list[IngestedChunk]:
-        """Ingest a file and everything its plugins emit."""
+    async def ingest(
+        self, file: IngestionFile, chat_id: str | None = None
+    ) -> list[IngestedChunk]:
+        """Ingest a file (and everything its plugins emit) into `chat_id`.
+
+        The whole emission tree is stamped with the chat id: it becomes the
+        group the retrieval layer can fetch natively.
+        """
 
         pending_sources: list[tuple[IngestionFile, bool]] = []
         pending_chunks: list[tuple[IngestionContext, IngestedChunk]] = []
@@ -114,6 +122,7 @@ class IngestionService:
                 file=file,
                 origin_file=origin_file,
                 parent_file=parent_file,
+                chat_id=chat_id,
             )
 
             runtime = IngestionRuntime(
@@ -170,7 +179,9 @@ class IngestionService:
                     inherited_metadata=children_metadata,
                 )
                 child_chunks.extend(subtree)
-                await self._registry.file_subprocessed(emitted, subtree, context, runtime)
+                await self._registry.file_subprocessed(
+                    emitted, subtree, context, runtime
+                )
 
             all_chunks = [*merged_own, *child_chunks]
 
@@ -197,7 +208,7 @@ class IngestionService:
             inherited_metadata={},
         )
 
-        await self._commit(pending_sources, pending_chunks)
+        await self._commit(pending_sources, pending_chunks, chat_id)
 
         # The very end: every file processed and everything committed.
         await self._registry.ingestion_completed(chunks, top_context, top_runtime)
@@ -208,11 +219,12 @@ class IngestionService:
         self,
         file: IngestionFile,
         is_origin: bool,
+        chat_id: str | None,
     ) -> str:
         """Store a file and record it in the documents table.
 
-        ``is_origin`` marks the file as a user upload (``True``) rather than a
-        file emitted by a plugin (``False``).
+        ``is_origin`` marks the file as a user upload (``True``) rather than
+        a file emitted by a plugin (``False``).
         """
         file_path = await self._file_storage.upload(
             file=BytesIO(file.file_bytes),
@@ -231,6 +243,7 @@ class IngestionService:
                     "file_filename": Path(file_path).name,
                     "file_orig_filename": file.filename,
                     "is_origin": is_origin,
+                    "chat_id": chat_id,
                 }
             ],
             ["id"],
@@ -242,10 +255,12 @@ class IngestionService:
         self,
         pending_sources: Sequence[tuple[IngestionFile, bool]],
         pending_chunks: Sequence[tuple[IngestionContext, IngestedChunk]],
+        chat_id: str | None,
     ) -> None:
-        """Persist everything collected during the walk."""
+        """Persist everything collected during the walk, stamped with the
+        chat the ingestion belongs to."""
         for file, is_origin in pending_sources:
-            await self._save_source(file, is_origin)
+            await self._save_source(file, is_origin, chat_id)
 
         if pending_chunks:
             await self._save_chunk_records(pending_chunks)
@@ -266,9 +281,16 @@ class IngestionService:
         embeddings = await self._embedder.embed_documents(
             [chunk.text for chunk in chunks]
         )
+        # The chat id travels as vector metadata so the vector leg of
+        # retrieval can be bounded to a chat at the index.
+        metadatas = [
+            {"chat_id": context.chat_id} if context.chat_id else {}
+            for context, _ in records
+        ]
         await self._vector_storage.add(
             [chunk.chunk_id for chunk in chunks],
             embeddings,
+            metadatas=metadatas,
         )
 
         rows = [
@@ -282,6 +304,7 @@ class IngestionService:
                 "plugin": chunk.plugin,
                 "text": chunk.text,
                 "metadata": chunk.metadata,
+                "chat_id": context.chat_id,
             }
             for context, chunk in records
         ]

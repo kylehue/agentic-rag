@@ -37,7 +37,7 @@ class NoopRetriever(Retriever):
     def __init__(self, chunks: list[RetrievedChunk] | None = None) -> None:
         self._chunks = chunks if chunks is not None else []
 
-    async def retrieve(self, user_query):
+    async def retrieve(self, user_query, where=None):
         return self._chunks
 
 
@@ -89,25 +89,32 @@ def test_ingest_end_to_end_through_the_wrapper():
             filename="sales.csv",
             content_type="text/csv",
             description="Acme Q3 sales pack.",
+            chat_id="chat-1",
         )
 
-    chunks = asyncio.run(flow())
+    origin_source_id, chunks = asyncio.run(flow())
 
     # The built-in plugin set (TextPlugin + TablePlugin) handled it.
     assert len(chunks) == 1
     assert chunks[0].plugin == "table"
+    assert origin_source_id
 
-    # The file was stored exactly once, with its original bytes.
+    # The file was stored exactly once, with its original bytes and chat.
     assert len(parts.file_storage.files) == 1
     (stored_path, stored_bytes), = parts.file_storage.files.items()
     assert stored_path.startswith("documents/")
     assert stored_bytes == CSV_BYTES
 
-    # The chunk was embedded, vector-added, and recorded.
+    # The chunk was embedded, vector-added (chat metadata), and recorded
+    # (chat column).
     assert parts.vector_storage.added[0][0] == [chunks[0].chunk_id]
+    assert parts.vector_storage.added[0][2] == [{"chat_id": "chat-1"}]
     rows = parts.sql_storage.tables[settings.CHUNK_TABLE_NAME]
     assert len(rows) == 1
-    assert rows[0]["origin_source_id"] == rows[0]["source_id"]
+    assert rows[0]["origin_source_id"] == rows[0]["source_id"] == origin_source_id
+    assert rows[0]["chat_id"] == "chat-1"
+    documents = parts.sql_storage.tables[settings.DOCUMENT_METADATA_TABLE_NAME]
+    assert documents[0]["chat_id"] == "chat-1"
 
     # The description reached the TablePlugin's LLM.
     assert any(
@@ -164,5 +171,61 @@ def test_retrieve_delegates_through_the_wrapper():
     results = asyncio.run(rag.retrieve("anything"))
 
     assert results == [chunk]
+
+
+class ScopedRetriever(Retriever):
+    """Stands in for the real retrievers: applies the where condition at
+    the index (what Vector/SparseRetriever do with the where map)."""
+
+    def __init__(self, chunks: list[RetrievedChunk]) -> None:
+        self._chunks = chunks
+        self.wheres: list = []
+
+    async def retrieve(self, user_query, where=None):
+        self.wheres.append(where)
+        if where is None:
+            return self._chunks
+        return [
+            chunk
+            for chunk in self._chunks
+            if all(getattr(chunk, column) == value for column, value in where.items())
+        ]
+
+
+def test_retrieve_scoped_to_a_chat():
+    chunks = [
+        RetrievedChunk(
+            chunk_id="c1",
+            source_id="s1",
+            origin_source_id="s1",
+            plugin="text",
+            text="one",
+            score=0.9,
+            chat_id="chat-a",
+        ),
+        RetrievedChunk(
+            chunk_id="c2",
+            source_id="s2",
+            origin_source_id="s2",
+            plugin="text",
+            text="two",
+            score=0.8,
+            chat_id="chat-b",
+        ),
+    ]
+    retriever = ScopedRetriever(chunks)
+    rag, _ = build_rag(retriever=retriever)
+
+    # A chat scope reaches the retriever and keeps only that chat's chunks...
+    scoped = asyncio.run(rag.retrieve("q", chat_id="chat-a"))
+    assert [chunk.chunk_id for chunk in scoped] == ["c1"]
+    # The chat id reached the retriever as the where condition map.
+    assert retriever.wheres == [{"chat_id": "chat-a"}]
+    # ...and no chat is unbounded.
+    assert [chunk.chunk_id for chunk in asyncio.run(rag.retrieve("q"))] == [
+        "c1",
+        "c2",
+    ]
+    assert retriever.wheres[-1] is None
 
 

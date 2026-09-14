@@ -36,10 +36,10 @@ class SearchDocumentTool(AgentTool):
             ["query"],
         )
 
-    def create_executor(self, rag_service):
+    def create_executor(self, rag_service, chat_id=None):
         async def execute(arguments: dict) -> str:
             query = str(arguments.get("query", ""))
-            chunks = list(await rag_service.retrieve(query))
+            chunks = list(await rag_service.retrieve(query, chat_id))
             if not chunks:
                 return "No evidence found."
 

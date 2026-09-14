@@ -75,10 +75,13 @@ class SqlStorage(ABC):
         table_name: str,
         search_query: str,
         limit: int | None,
+        condition: ConditionBuilder | None = None,
     ) -> Sequence[dict[str, Any]]:
         """
         Search a database table using FTS5
         Returns row results sorted by most relevant to least relevant.
+        `condition`, when given, further restricts the matched rows
+        (the same condition builder as get/get_all).
         """
 
     @staticmethod

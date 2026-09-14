@@ -20,8 +20,18 @@ class RetrievalService:
         self._llm = llm
         self._registry = registry
 
-    async def retrieve(self, user_query: str) -> list[RetrievedChunk]:
-        """Retrieves chunks given a user query."""
+    async def retrieve(
+        self,
+        user_query: str,
+        where: dict | None = None,
+    ) -> list[RetrievedChunk]:
+        """Retrieves chunks given a user query.
+
+        `where` is a simple `{column: value}` condition map the retrievers
+        apply at the index (for example `{"chat_id": ...}` to bound the
+        retrieval to one chat), so the top_k budget is spent on the matching
+        chunks instead of being filtered away afterwards.
+        """
 
         context = RetrievalContext(user_query=user_query)
 
@@ -30,7 +40,7 @@ class RetrievalService:
             llm=self._llm,
         )
 
-        chunks = await self._retriever.retrieve(user_query)
+        chunks = await self._retriever.retrieve(user_query, where)
 
         finalized: list[RetrievedChunk] = []
 

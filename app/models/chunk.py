@@ -24,7 +24,8 @@ class RetrievedChunk:
     """The retrieved document chunk during retrieval process.
 
     ``origin_source_id`` is always set (a top-level file is its own origin);
-    only ``parent_source_id`` is optional.
+    only ``parent_source_id`` is optional. ``chat_id`` is the chat the chunk
+    was ingested into (None for data predating chats).
     """
 
     chunk_id: str
@@ -35,11 +36,12 @@ class RetrievedChunk:
     score: float
     parent_source_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    chat_id: str | None = None
 
     @classmethod
     def from_dict(
         cls,
-        data: dict[str, Any],
+        data: dict,
         **overrides: Any,
     ) -> "RetrievedChunk":
         values = {
@@ -51,6 +53,7 @@ class RetrievedChunk:
             "metadata": data.get("metadata") or {},
             "score": data.get("score", 0.0),
             "parent_source_id": data.get("parent_source_id"),
+            "chat_id": data.get("chat_id"),
         }
 
         values.update(overrides)

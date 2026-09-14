@@ -1,12 +1,14 @@
 from app.agent_tools.base import AgentTool
 from app.agent_tools.common import (
+    CHUNK_ID_DESCRIPTION,
     SCHEMA_INFER_ROWS,
+    SOURCE_ID_DESCRIPTION,
     dataframe_schema,
     format_schema,
     object_schema,
     read_sheet_sample,
+    resolve_table,
     resolve_table_file,
-    resolve_table_row,
 )
 
 
@@ -21,41 +23,33 @@ class InspectTableTool(AgentTool):
     def description(self) -> str:
         return (
             "Read one stored table's structure without loading its data: its "
-            "shape and column names with types (schema). Use it to understand "
-            "a table before writing a SQL statement. The table's description "
-            "is not shown here."
+            "shape and column names with types (schema). Address the table "
+            "by its source id. Use it to understand a table before writing "
+            "a SQL statement. The table's description is not shown here."
         )
 
     @property
     def parameters(self) -> dict:
         return object_schema(
             {
-                "table": {
-                    "type": "string",
-                    "description": "The table name, as shown by list_tables.",
-                },
-                "source_id": {
-                    "type": "string",
-                    "description": (
-                        "Disambiguate when several sources store a table with "
-                        "this name; as shown by list_tables."
-                    ),
-                },
+                "source_id": {"type": "string", "description": SOURCE_ID_DESCRIPTION},
+                "chunk_id": {"type": "string", "description": CHUNK_ID_DESCRIPTION},
             },
-            ["table"],
+            ["source_id"],
         )
 
-    def create_executor(self, rag_service):
+    def create_executor(self, rag_service, chat_id=None):
         sql_storage = rag_service.sql_storage
         file_storage = rag_service.file_storage
 
         async def execute(arguments: dict) -> str:
-            table_name = str(arguments.get("table", ""))
-            raw_source_id = arguments.get("source_id")
-            source_id = str(raw_source_id) if raw_source_id else None
+            source_id = str(arguments.get("source_id", ""))
+            raw_chunk_id = arguments.get("chunk_id")
+            chunk_id = str(raw_chunk_id) if raw_chunk_id else None
 
-            row = await resolve_table_row(sql_storage, table_name, source_id)
+            row = await resolve_table(sql_storage, source_id, chunk_id, chat_id)
             metadata = row.get("metadata") or {}
+            name = metadata.get("table_name") or source_id
             schema = metadata.get("schema")
             row_count = metadata.get("row_count")
             column_count = metadata.get("column_count")
@@ -63,11 +57,11 @@ class InspectTableTool(AgentTool):
             if not schema:
                 # Last resort: infer it from a bounded peek at the sheet
                 # rather than loading the whole file.
-                file_path, file_bytes = await resolve_table_file(
-                    sql_storage, file_storage, table_name, source_id
+                file_path, file_bytes, sheet = await resolve_table_file(
+                    sql_storage, file_storage, source_id, chunk_id, chat_id
                 )
                 sample = read_sheet_sample(
-                    table_name, file_path, file_bytes, SCHEMA_INFER_ROWS
+                    sheet, file_path, file_bytes, SCHEMA_INFER_ROWS
                 )
                 schema = dataframe_schema(sample)
                 if row_count is None:
@@ -80,7 +74,7 @@ class InspectTableTool(AgentTool):
             if row_count is not None:
                 shape_parts.append(f"{row_count} rows")
             shape_parts.append(f"{column_count} columns")
-            parts = [f"Table '{table_name}' ({' x '.join(shape_parts)})"]
+            parts = [f"Table '{name}' ({' x '.join(shape_parts)})"]
             parts.append("Columns:")
             parts.append(format_schema(schema))
             return "\n".join(parts)

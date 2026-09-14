@@ -1,23 +1,17 @@
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict
 
-HistoryRole = Literal["user", "assistant"]
-
-
-class HistoryMessageSchema(BaseModel):
-    """One prior turn of the conversation."""
-
-    role: HistoryRole
-    content: str
+from app.api_schemas.chunk import IngestedChunkSchema, RetrievedChunkSchema
 
 
 class RagAnswerRequestSchema(BaseModel):
-    """The question, plus the prior conversation (oldest first) for
-    multi-turn answers."""
+    """The question, and the chat it belongs to.
+
+    A missing `chat_id` creates a new chat; the prior conversation lives in
+    the chat, not in the request.
+    """
 
     query: str
-    history: list[HistoryMessageSchema] = []
+    chat_id: str | None = None
 
 
 class RagAnswerSchema(BaseModel):
@@ -25,4 +19,21 @@ class RagAnswerSchema(BaseModel):
 
     query: str
     answer: str
+    # Only the chunks the answer actually cites, keyed by their
+    # #[source_id:chunk_id] reference.
     chunk_refs: dict[str, dict[str, str]]
+
+
+class ChatAnswerSchema(RagAnswerSchema):
+    # The chat the answer ran on (created if the request had none).
+    chat_id: str
+
+
+class IngestResponseSchema(BaseModel):
+    chat_id: str
+    chunks: list[IngestedChunkSchema]
+
+
+class RetrieveResponseSchema(BaseModel):
+    chat_id: str
+    chunks: list[RetrievedChunkSchema]

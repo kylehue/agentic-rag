@@ -4,7 +4,9 @@ import pandas as pd
 
 from app.agent_tools.base import AgentTool
 from app.agent_tools.common import (
+    CHUNK_ID_DESCRIPTION,
     QUERY_TABLE_MAX_ROWS,
+    SOURCE_ID_DESCRIPTION,
     object_schema,
     read_sheet,
     resolve_table_file,
@@ -37,38 +39,29 @@ class QueryTableTool(AgentTool):
     def parameters(self) -> dict:
         return object_schema(
             {
-                "table": {
-                    "type": "string",
-                    "description": "The table name, as shown by list_tables.",
-                },
-                "source_id": {
-                    "type": "string",
-                    "description": (
-                        "Disambiguate when several sources store a table with "
-                        "this name; as shown by list_tables."
-                    ),
-                },
+                "source_id": {"type": "string", "description": SOURCE_ID_DESCRIPTION},
+                "chunk_id": {"type": "string", "description": CHUNK_ID_DESCRIPTION},
                 "sql": {
                     "type": "string",
                     "description": "A read-only, targeted SQL SELECT query.",
                 },
             },
-            ["table", "sql"],
+            ["source_id", "sql"],
         )
 
-    def create_executor(self, rag_service):
+    def create_executor(self, rag_service, chat_id=None):
         sql_storage = rag_service.sql_storage
         file_storage = rag_service.file_storage
 
         async def execute(arguments: dict) -> str:
-            table_name = str(arguments.get("table", ""))
+            source_id = str(arguments.get("source_id", ""))
+            raw_chunk_id = arguments.get("chunk_id")
+            chunk_id = str(raw_chunk_id) if raw_chunk_id else None
             sql = str(arguments.get("sql", ""))
-            raw_source_id = arguments.get("source_id")
-            source_id = str(raw_source_id) if raw_source_id else None
-            file_path, file_bytes = await resolve_table_file(
-                sql_storage, file_storage, table_name, source_id
+            file_path, file_bytes, sheet = await resolve_table_file(
+                sql_storage, file_storage, source_id, chunk_id, chat_id
             )
-            dataframe = read_sheet(table_name, file_path, file_bytes)
+            dataframe = read_sheet(sheet, file_path, file_bytes)
 
             # Read-only by construction: the table lives in a throw-away
             # in-memory database, loaded and closed around one query.
@@ -88,7 +81,7 @@ class QueryTableTool(AgentTool):
                 else ""
             )
             return (
-                f"Result of the SQL query against table '{table_name}' "
+                f"Result of the SQL query against table '{sheet or source_id}' "
                 f"(the table is named `data` in the query):\n{csv}{note}"
             )
 

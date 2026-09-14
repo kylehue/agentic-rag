@@ -18,7 +18,7 @@ class FakeRetriever(Retriever):
     def __init__(self, chunks: list[RetrievedChunk]) -> None:
         self._chunks = chunks
 
-    async def retrieve(self, user_query):
+    async def retrieve(self, user_query, where=None):
         return self._chunks
 
 
@@ -147,3 +147,85 @@ def test_retrieval_completed_fires_with_finalized_chunks():
     # The event carries the per-run retrieval context and runtime.
     assert context.user_query == "q"
     assert runtime.context is context
+
+
+class RecordingRetriever(Retriever):
+    def __init__(self):
+        self.wheres: list = []
+
+    async def retrieve(self, user_query, where=None):
+        self.wheres.append(where)
+        return []
+
+
+def test_retrieve_passes_the_where_condition_to_the_retriever():
+    registry = PluginRegistry()
+    retriever = RecordingRetriever()
+    service = build_service(registry, retriever)
+
+    asyncio.run(service.retrieve("q", where={"chat_id": "c1"}))
+    asyncio.run(service.retrieve("q"))
+
+    assert retriever.wheres == [{"chat_id": "c1"}, None]
+
+
+def test_sparse_retriever_applies_the_where_condition_in_the_real_fts_search(
+    tmp_path,
+):
+    """Regression: the FTS search used to alias the table while the
+    condition was compiled against the real name, so any scoped lexical
+    search failed with 'no such column'."""
+    from sqlalchemy import Column, Integer, String, Text
+
+    from app.core.config import settings
+    from app.retrievers.sparse import SparseRetriever
+    from app.store_sql.local import LocalSqlStorage
+
+    async def flow():
+        storage = LocalSqlStorage(storage_dir=tmp_path)
+        await storage.ensure_table(
+            settings.CHUNK_TABLE_NAME,
+            [
+                Column("id", Integer, primary_key=True, autoincrement=True),
+                Column("chunk_id", String, nullable=False, unique=True),
+                Column("source_id", String, nullable=False),
+                Column("origin_source_id", String, nullable=False),
+                Column("plugin", String, nullable=False),
+                Column("text", Text, nullable=False),
+                Column("chat_id", String, nullable=True),
+            ],
+        )
+        await storage.upsert(
+            settings.CHUNK_TABLE_NAME,
+            [
+                {
+                    "chunk_id": "c1",
+                    "source_id": "s1",
+                    "origin_source_id": "s1",
+                    "plugin": "text",
+                    "text": "the tomatoes weighed forty pounds",
+                    "chat_id": "chat-a",
+                },
+                {
+                    "chunk_id": "c2",
+                    "source_id": "s2",
+                    "origin_source_id": "s2",
+                    "plugin": "text",
+                    "text": "the tomatoes weighed thirty pounds",
+                    "chat_id": "chat-b",
+                },
+            ],
+        )
+        try:
+            retriever = SparseRetriever(sql_storage=storage, top_k=5)
+            scoped = await retriever.retrieve("weighed", where={"chat_id": "chat-a"})
+            unscoped = await retriever.retrieve("weighed")
+            return scoped, unscoped
+        finally:
+            await storage.close()
+
+    scoped, unscoped = asyncio.run(flow())
+
+    assert [chunk.chunk_id for chunk in scoped] == ["c1"]
+    assert {chunk.chat_id for chunk in scoped} == {"chat-a"}
+    assert {chunk.chunk_id for chunk in unscoped} == {"c1", "c2"}

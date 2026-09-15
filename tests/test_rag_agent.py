@@ -220,6 +220,75 @@ def test_ask_isolated_between_chats():
     assert [m.role for m in llm.calls[1]] == ["system", "user"]
 
 
+def test_delete_chat_removes_the_history_and_the_rag_data(tmp_path):
+    from app.core.config import settings
+    from app.services.rag import RagService
+    from app.store_file.local import LocalFileStorage
+    from app.store_sql.local import LocalSqlStorage
+
+    from fakes import FakeEmbedder, FakeVectorStorage
+    from test_file_management import seed_tree
+
+    sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
+    file_storage = LocalFileStorage(storage_dir=tmp_path / "file")
+    vector_storage = FakeVectorStorage()
+    rag = RagService(
+        llm=FakeLLM("ok"),
+        embedder=FakeEmbedder(),
+        retriever=NoopRetriever(),
+        vector_storage=vector_storage,
+        sql_storage=sql_storage,
+        file_storage=file_storage,
+    )
+    agent = RagAgentService(rag_service=rag, tools=[make_tool("search_documents")])
+
+    async def flow():
+        await rag.initialize()
+        await seed_tree(sql_storage, file_storage, vector_storage)
+        # A conversation on chat-1, so the checkpointer has a thread.
+        await agent.ask("hi", chat_id="chat-1")
+        before = await agent.chat_history("chat-1")
+        await agent.delete_chat("chat-1")
+        after = await agent.chat_history("chat-1")
+        chunk_rows = await sql_storage.get_all(
+            settings.CHUNK_TABLE_NAME, condition=lambda t: t.c.chat_id == "chat-1"
+        )
+        doc_rows = await sql_storage.get_all(
+            settings.DOCUMENT_METADATA_TABLE_NAME,
+            condition=lambda t: t.c.chat_id == "chat-1",
+        )
+        await sql_storage.close()
+        return before, after, chunk_rows, doc_rows
+
+    before, after, chunk_rows, doc_rows = asyncio.run(flow())
+
+    # The conversation existed, then the thread was deleted.
+    assert [turn["role"] for turn in before] == ["user", "assistant"]
+    assert after == []
+    # The chat's RAG data is gone too.
+    assert chunk_rows == []
+    assert doc_rows == []
+    # Its vectors were removed.
+    assert sorted(vector_storage.deleted[0]) == ["c1", "c2"]
+
+
+def test_delete_chat_with_no_history_on_a_durable_checkpointer(tmp_path):
+    # A SQLite checkpointer creates its tables lazily; deleting a chat that
+    # never had a conversation must not fail on a missing table.
+    agent = RagAgentService(
+        rag_service=build_rag_service(FakeLLM("ok"), NoopRetriever()),
+        tools=[make_tool("search_documents")],
+        checkpoint_dir=str(tmp_path / "ckpts"),
+    )
+
+    async def flow():
+        await agent.initialize()
+        await agent.delete_chat("never-asked")
+        assert await agent.chat_history("never-asked") == []
+
+    asyncio.run(flow())
+
+
 def test_ask_resumes_an_interrupted_run():
     # Run 1: the model requests a tool, then the next LLM call crashes.
     llm = FakeLLM(

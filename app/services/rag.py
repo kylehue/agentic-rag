@@ -108,3 +108,26 @@ class RagService:
         """
         where = {"chat_id": chat_id} if chat_id is not None else None
         return await self._retrieval_service.retrieve(user_query, where)
+
+    async def delete_file(
+        self, origin_source_id: str, chat_id: str | None = None
+    ) -> int:
+        """Reverse ingestion for one file (its whole emission tree), scoped to
+        the chat. Returns the number of files removed (0 = not in the chat)."""
+        return await self._ingestion_service.delete_file(origin_source_id, chat_id)
+
+    async def delete_chat(self, chat_id: str) -> None:
+        """Reverse ingestion for a whole chat: its files, chunks, and vectors."""
+        await self._ingestion_service.delete_chat(chat_id)
+
+    async def list_files(self, chat_id: str | None = None) -> list[dict]:
+        """The origin files (user uploads) in the chat, excluding emitted files."""
+        return await self._ingestion_service.list_files(chat_id)
+
+    async def list_file_chunks(
+        self, origin_source_id: str, chat_id: str | None = None
+    ) -> list[dict]:
+        """All chunks of a file's emission tree (origin + emitted descendants)."""
+        return await self._ingestion_service.list_file_chunks(
+            origin_source_id, chat_id
+        )

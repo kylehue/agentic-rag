@@ -2,8 +2,9 @@
 with no auth friction.
 
 Authentication is automatic: the client logs in as a test user (default
-"stream_agent", auto-created on first use, token cached in the OS temp
-directory). Set RAG_TOKEN to use your own credentials instead.
+"stream_agent", auto-created on first use; the session cookie is cached in
+the OS temp directory). Set RAG_TOKEN to use an existing session token
+instead.
 
 Usage:
     python stream_agent.py                 # interactive conversation
@@ -19,51 +20,55 @@ Interactive commands:
     /exit, /quit   leave
 
 RAG_BASE_URL points the client at another server; RAG_CHAT starts in a
-given chat; RAG_TEST_USER / RAG_TEST_PASSWORD override the test account;
-RAG_SQL_DB / RAG_CHECKPOINT_DB override the databases /del operates on
-(needed when the server runs with non-default storage settings).
+given chat; RAG_TEST_USER / RAG_TEST_PASSWORD override the test account.
 """
 
+from http import cookiejar
 import json
 import os
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 BASE_URL = os.environ.get("RAG_BASE_URL", "http://127.0.0.1:8000")
+HOST = urllib.parse.urlparse(BASE_URL).hostname or "127.0.0.1"
 TOKEN = os.environ.get("RAG_TOKEN", "")
 TEST_USER = os.environ.get("RAG_TEST_USER", "stream_agent")
 TEST_PASSWORD = os.environ.get("RAG_TEST_PASSWORD", "stream_agent_test_password")
+# The session cookie the server sets at login (must match app/api/auth.py).
+COOKIE_NAME = "auth_token"
 # In the OS temp dir so the project directory stays clean.
-TOKEN_CACHE = Path(tempfile.gettempdir()) / "stream_agent_token"
+SESSION_CACHE = Path(tempfile.gettempdir()) / "stream_agent_session"
 RESULT_PREVIEW_CHARS = 400
 
+# --- HTTP helpers (cookie-carrying) ---
 
-# --- HTTP helpers ---
+COOKIE_JAR = cookiejar.CookieJar()
+OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(COOKIE_JAR))
 
 
-def http(method, path, body=None, token=None):
-    """A small JSON HTTP helper; returns (status, parsed body)."""
+def http(method, path, body=None):
+    """A small JSON HTTP helper; returns (status, parsed body). The session
+    cookie travels with every request via the shared cookie jar."""
     data = None
     headers = {}
     if body is not None:
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         BASE_URL + path, data=data, headers=headers, method=method
     )
     try:
-        with urllib.request.urlopen(request, timeout=300) as response:
+        with OPENER.open(request, timeout=300) as response:
             text = response.read().decode()
             content_type = response.headers.get("Content-Type", "")
             return response.status, (
-                json.loads(text) if "json" in content_type else text
+                json.loads(text) if text and "json" in content_type else text
             )
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode()
@@ -78,35 +83,69 @@ def http(method, path, body=None, token=None):
         sys.exit(1)
 
 
-# --- authentication (test account, token cached) ---
+# --- authentication (test account, session cookie cached) ---
 
 
-def obtain_token() -> str:
-    """A token for the test account: RAG_TOKEN if set, else the cached one
-    if still valid, else login (registering the user on first use)."""
+def _session_cookie(value: str) -> cookiejar.Cookie:
+    """A cookie for the session token, addressed at this server's host."""
+    return cookiejar.Cookie(
+        version=0,
+        name=COOKIE_NAME,
+        value=value,
+        port=None,
+        port_specified=False,
+        domain=HOST,
+        domain_specified=True,
+        domain_initial_dot=False,
+        path="/",
+        path_specified=True,
+        secure=False,
+        expires=None,
+        discard=False,
+        comment=None,
+        comment_url=None,
+        rest={},
+        rfc2109=False,
+    )
+
+
+def ensure_session() -> None:
+    """A valid session for the test account: RAG_TOKEN if set, else the
+    cached one if still valid, else login (registering the user on first
+    use). The session lives in the auth_token cookie."""
     if TOKEN:
-        return TOKEN
-    if TOKEN_CACHE.exists():
-        cached = TOKEN_CACHE.read_text().strip()
-        status, _ = http("GET", "/auth/me", token=cached)
+        COOKIE_JAR.set_cookie(_session_cookie(TOKEN))
+        status, _ = http("GET", "/auth/me")
+        if status != 200:
+            print(f"[RAG_TOKEN was rejected by {BASE_URL}]")
+            sys.exit(1)
+        return
+    if SESSION_CACHE.exists():
+        COOKIE_JAR.set_cookie(_session_cookie(SESSION_CACHE.read_text().strip()))
+        status, _ = http("GET", "/auth/me")
         if status == 200:
-            return cached
+            return
+        COOKIE_JAR.clear()
     http("POST", "/auth/register", {"username": TEST_USER, "password": TEST_PASSWORD})
     status, body = http(
         "POST", "/auth/login", {"username": TEST_USER, "password": TEST_PASSWORD}
     )
-    if status != 200 or not isinstance(body, dict) or "token" not in body:
+    if status != 200:
         print(f"[could not log in as '{TEST_USER}': {body}]")
         sys.exit(1)
-    TOKEN_CACHE.write_text(body["token"])
-    return body["token"]
+    cookies = [cookie for cookie in COOKIE_JAR if cookie.name == COOKIE_NAME]
+    value = cookies[0].value if cookies else None
+    if value is None:
+        print("[the server did not set a session cookie]")
+        sys.exit(1)
+    SESSION_CACHE.write_text(value)
 
 
 # --- chat management ---
 
 
-def list_chats(token: str) -> list[dict]:
-    status, body = http("GET", "/chats", token=token)
+def list_chats() -> list[dict]:
+    status, body = http("GET", "/chats")
     if status != 200 or not isinstance(body, list):
         print(f"[could not list chats: {status} {body}]")
         return []
@@ -135,98 +174,18 @@ def confirm(prompt):
     return answer in {"y", "yes"}
 
 
-def delete_chats_local(chat_ids: list[str]) -> None:
-    """Delete chats straight in the app's databases (there is no delete
-    endpoint). Removes the chat rows, the documents and chunks ingested
-    into them, their vectors, and the checkpointed conversation.
-
-    Refuses to act unless every chat is present in the target database, so
-    a mismatched storage path can never delete the wrong data. Override the
-    paths with RAG_SQL_DB / RAG_CHECKPOINT_DB if the server runs with
-    non-default storage settings.
-    """
-    try:
-        from app.core.config import settings
-        from app.services.rag_agent import CHECKPOINT_DB_FILENAME
-
-        import sqlite3
-    except ImportError:
-        print("[deletion needs the app config; run this from the project venv]")
-        return
-    sql_db = Path(
-        os.environ.get(
-            "RAG_SQL_DB", str(Path(settings.SQL_LOCAL_STORAGE_DIR) / "database.db")
-        )
-    )
-    checkpoint_db = Path(
-        os.environ.get(
-            "RAG_CHECKPOINT_DB",
-            str(Path(settings.AGENT_LOCAL_STORAGE_DIR) / CHECKPOINT_DB_FILENAME),
-        )
-    )
-    if not sql_db.exists():
-        print(f"[no database at {sql_db}; nothing deleted]")
-        return
-    try:
-        with sqlite3.connect(sql_db, timeout=10) as con:
-            for chat_id in chat_ids:
-                present = con.execute(
-                    f"SELECT 1 FROM {settings.CHATS_TABLE_NAME} " "WHERE chat_id = ?",
-                    (chat_id,),
-                ).fetchone()
-                if present is None:
-                    print(
-                        f"[chat {chat_id[:12]} not in {sql_db}; "
-                        "refusing (wrong database?)]"
-                    )
-                    return
-            # Vector ids to delete, before the chunk rows go.
-            chunk_ids = [
-                row[0]
-                for row in con.execute(
-                    f"SELECT chunk_id FROM {settings.CHUNK_TABLE_NAME} "
-                    "WHERE chat_id IN (" + ",".join("?" * len(chat_ids)) + ")",
-                    chat_ids,
-                )
-            ]
-            placeholders = ",".join("?" * len(chat_ids))
-            con.execute(
-                f"DELETE FROM {settings.CHUNK_TABLE_NAME} "
-                f"WHERE chat_id IN ({placeholders})",
-                chat_ids,
-            )
-            con.execute(
-                f"DELETE FROM {settings.DOCUMENT_METADATA_TABLE_NAME} "
-                f"WHERE chat_id IN ({placeholders})",
-                chat_ids,
-            )
-            con.execute(
-                f"DELETE FROM {settings.CHATS_TABLE_NAME} "
-                f"WHERE chat_id IN ({placeholders})",
-                chat_ids,
-            )
-        if chunk_ids:
-            import chromadb
-
-            collection = chromadb.PersistentClient(
-                path=settings.VECTOR_LOCAL_STORAGE_DIR
-            ).get_collection(settings.VECTOR_COLLECTION_NAME)
-            collection.delete(ids=list(chunk_ids))
-        if checkpoint_db.exists():
-            with sqlite3.connect(checkpoint_db, timeout=10) as con:
-                placeholders = ",".join("?" * len(chat_ids))
-                con.execute(
-                    f"DELETE FROM writes WHERE thread_id IN ({placeholders})",
-                    chat_ids,
-                )
-                con.execute(
-                    f"DELETE FROM checkpoints WHERE thread_id IN ({placeholders})",
-                    chat_ids,
-                )
-    except Exception as exc:
-        print(f"[deletion failed: {exc}]")
-        return
-    print(f"deleted {len(chat_ids)} chat(s)")
+def delete_chats(chat_ids: list[str]) -> None:
+    """Delete chats through the server (DELETE /chats/{id}), which removes
+    each chat's conversation history, ingested documents/chunks/vectors, and
+    the chat row. Ownership is enforced server-side."""
+    for chat_id in chat_ids:
+        status, body = http("DELETE", f"/chats/{chat_id}")
+        if status == 204:
+            print(f"deleted {chat_id[:12]}")
+        elif status == 404:
+            print(f"[chat {chat_id[:12]} not found]")
+        else:
+            print(f"[could not delete {chat_id[:12]}: {status} {body}]")
 
 
 def fmt_time(stamp: float) -> str:
@@ -256,16 +215,16 @@ HELP_TEXT = """commands:
   /exit, /quit     leave"""
 
 
-def handle_command(line: str, token: str, chat_id: str | None) -> tuple[str | None, bool]:
+def handle_command(line: str, chat_id: str | None) -> tuple[str | None, bool]:
     """A REPL command; returns (new chat_id, should_exit)."""
     parts = line.split()
     command = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else None
 
     if command in ("/chats", "/ls", "/list"):
-        print_chats(list_chats(token), chat_id)
+        print_chats(list_chats(), chat_id)
     elif command in ("/use", "/switch") and arg:
-        target = resolve_chat(list_chats(token), arg)
+        target = resolve_chat(list_chats(), arg)
         if target is not None:
             print(f"switched to {target['chat_id'][:12]}")
             chat_id = target["chat_id"]
@@ -273,18 +232,18 @@ def handle_command(line: str, token: str, chat_id: str | None) -> tuple[str | No
         chat_id = None
         print("(a new chat will be created with the next question)")
     elif command == "/del" and arg:
-        target = resolve_chat(list_chats(token), arg)
+        target = resolve_chat(list_chats(), arg)
         if target is not None and confirm(
             f"delete chat {target['chat_id'][:12]} "
             "(conversation + ingested documents/chunks/vectors)?"
         ):
-            delete_chats_local([target["chat_id"]])
+            delete_chats([target["chat_id"]])
             if chat_id == target["chat_id"]:
                 chat_id = None
     elif command == "/delall":
-        chats = list_chats(token)
+        chats = list_chats()
         if chats and confirm(f"delete all {len(chats)} chat(s)?"):
-            delete_chats_local([c["chat_id"] for c in chats])
+            delete_chats([c["chat_id"] for c in chats])
             chat_id = None
     elif command == "/help":
         print(HELP_TEXT)
@@ -341,7 +300,7 @@ def show(event: str, data: dict) -> None:
         print(f"? {event}: {data}")
 
 
-def turn(question: str, chat_id: str | None, token: str) -> tuple[str | None, str | None]:
+def turn(question: str, chat_id: str | None) -> tuple[str | None, str | None]:
     """Run one turn against the server.
 
     Streams the run to the terminal as it happens (tool steps and the
@@ -353,14 +312,11 @@ def turn(question: str, chat_id: str | None, token: str) -> tuple[str | None, st
     request = urllib.request.Request(
         f"{BASE_URL}/rag/answer/stream",
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        },
+        headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=300) as response:
+        with OPENER.open(request, timeout=300) as response:
             answer = None
             chat = chat_id
             streamed = ""
@@ -394,8 +350,8 @@ def turn(question: str, chat_id: str | None, token: str) -> tuple[str | None, st
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             print(
-                "\n[unauthorized: the token is no longer valid; delete "
-                f"{TOKEN_CACHE} and retry]"
+                "\n[unauthorized: the session is no longer valid; delete "
+                f"{SESSION_CACHE} and retry]"
             )
         else:
             print(f"\n[request failed: HTTP {exc.code}]")
@@ -409,8 +365,8 @@ def turn(question: str, chat_id: str | None, token: str) -> tuple[str | None, st
 # --- entry points ---
 
 
-def interactive(token: str) -> None:
-    status, me = http("GET", "/auth/me", token=token)
+def interactive() -> None:
+    status, me = http("GET", "/auth/me")
     who = me.get("username") if status == 200 and isinstance(me, dict) else TEST_USER
     chat_id = os.environ.get("RAG_CHAT") or None
     print(f"Testing the agent at {BASE_URL} as '{who}' (auth handled for you).")
@@ -430,9 +386,9 @@ def interactive(token: str) -> None:
             break
         try:
             if line.startswith("/"):
-                chat_id, _ = handle_command(line, token, chat_id)
+                chat_id, _ = handle_command(line, chat_id)
                 continue
-            answer, chat_id = turn(line, chat_id, token)
+            answer, chat_id = turn(line, chat_id)
         except KeyboardInterrupt:
             print("\n[interrupted]")
             continue
@@ -442,12 +398,12 @@ def interactive(token: str) -> None:
 
 
 def main() -> None:
-    token = obtain_token()
+    ensure_session()
     if len(sys.argv) > 1:
         question = " ".join(sys.argv[1:])
-        answer, _ = turn(question, os.environ.get("RAG_CHAT") or None, token)
+        answer, _ = turn(question, os.environ.get("RAG_CHAT") or None)
         sys.exit(0 if answer is not None else 1)
-    interactive(token)
+    interactive()
 
 
 if __name__ == "__main__":

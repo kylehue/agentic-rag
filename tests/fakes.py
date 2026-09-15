@@ -116,6 +116,7 @@ class FakeVectorStorage(VectorStorage):
         self.added: list[
             tuple[list[str], list[list[float]], list[dict] | None]
         ] = []
+        self.deleted: list[list[str]] = []
 
     async def close(self) -> None:
         pass
@@ -131,7 +132,7 @@ class FakeVectorStorage(VectorStorage):
         return []
 
     async def delete(self, ids) -> None:
-        pass
+        self.deleted.append(list(ids))
 
 
 class FakeSqlStorage(SqlStorage):

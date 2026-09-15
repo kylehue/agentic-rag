@@ -36,3 +36,17 @@ async def chat_messages(chat_id: str, user: str = Depends(require_user)):
         ChatMessage(**message)
         for message in await rag_agent_service.chat_history(chat_id)
     ]
+
+
+@router.delete("/{chat_id}", status_code=204)
+async def delete_chat(chat_id: str, user: str = Depends(require_user)):
+    """Delete a chat entirely: its files, chunks, vectors, and conversation
+    history."""
+    owner = await chat_service.username_of(chat_id)
+    if owner is None:
+        raise ChatNotFoundError(chat_id)
+    if owner != user:
+        raise ChatForbiddenError(chat_id)
+    # The RAG data and conversation history, then the chat's own row.
+    await rag_agent_service.delete_chat(chat_id)
+    await chat_service.delete(chat_id)

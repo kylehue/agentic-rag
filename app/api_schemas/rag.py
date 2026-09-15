@@ -37,3 +37,42 @@ class IngestResponseSchema(BaseModel):
 class RetrieveResponseSchema(BaseModel):
     chat_id: str
     chunks: list[RetrievedChunkSchema]
+
+
+class FileSchema(BaseModel):
+    """An origin file the user ingested (not a plugin-emitted file)."""
+
+    source_id: str
+    filename: str
+    content_type: str
+    chat_id: str | None
+
+
+class ListFilesResponseSchema(BaseModel):
+    chat_id: str
+    files: list[FileSchema]
+
+
+class StoredChunkSchema(BaseModel):
+    """A stored chunk row (from the SQL store, not a retrieval result)."""
+
+    chunk_id: str
+    source_id: str
+    parent_source_id: str | None
+    origin_source_id: str
+    plugin: str
+    text: str
+    metadata: dict
+    chat_id: str | None
+
+
+class ListFileChunksResponseSchema(BaseModel):
+    chat_id: str
+    origin_source_id: str
+    chunks: list[StoredChunkSchema]
+
+
+class DeleteFileResponseSchema(BaseModel):
+    chat_id: str
+    origin_source_id: str
+    deleted_files: int

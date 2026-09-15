@@ -450,7 +450,12 @@ class RagAgentService:
                     self._checkpoint_conn = await aiosqlite.connect(
                         self._checkpoint_db_path
                     )
-                    self._checkpointer = AsyncSqliteSaver(self._checkpoint_conn)
+                    saver = AsyncSqliteSaver(self._checkpoint_conn)
+                    # Create the tables now (the saver defers this to the
+                    # first write), so reads and deletes work before any
+                    # conversation has happened.
+                    await saver.setup()
+                    self._checkpointer = saver
             return self._checkpointer
 
     async def initialize(self) -> None:
@@ -624,6 +629,13 @@ class RagAgentService:
                 if text:
                     history.append({"role": "assistant", "content": text})
         return history
+
+    async def delete_chat(self, chat_id: str) -> None:
+        """Delete a chat entirely: its RAG data (files, chunks, vectors) and
+        its conversation history (the checkpointer thread)."""
+        await self._rag_service.delete_chat(chat_id)
+        checkpointer = await self._ensure_checkpointer()
+        await checkpointer.adelete_thread(chat_id)
 
 
 def to_stream_event(item: AgentEvent | RagAnswer) -> StreamEvent | None:

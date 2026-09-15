@@ -1,12 +1,12 @@
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, Column, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, ColumnElement, Integer, String, Table, Text
 
 from app.core.config import settings
 from app.embedders.base import Embedder
@@ -214,6 +214,123 @@ class IngestionService:
         await self._registry.ingestion_completed(chunks, top_context, top_runtime)
 
         return chunks
+
+    async def delete_file(
+        self, origin_source_id: str, chat_id: str | None = None
+    ) -> int:
+        """Reverse ingestion: remove a file's whole emission tree.
+
+        Deletes the file's chunks (located by ``origin_source_id``), their
+        vectors, the SQL chunk and document records, and the stored file
+        bytes -- for the origin file and every file it emitted. ``chat_id``,
+        when given, bounds the deletion to that chat, so one chat's files
+        can never be removed through another. Returns the number of files
+        (documents) removed; 0 means the file was not found in the chat.
+        """
+        chunk_condition = self._chat_scoped(
+            lambda t: t.c.origin_source_id == origin_source_id, chat_id
+        )
+        chunk_rows = list(
+            await self._sql_storage.get_all(
+                settings.CHUNK_TABLE_NAME, condition=chunk_condition
+            )
+        )
+        chunk_ids = [row["chunk_id"] for row in chunk_rows]
+        # Every file in the tree is either the origin or the source of a chunk.
+        source_ids = {row["source_id"] for row in chunk_rows}
+        source_ids.add(origin_source_id)
+
+        if chunk_ids:
+            await self._vector_storage.delete(chunk_ids)
+        if chunk_rows:
+            await self._sql_storage.delete(
+                settings.CHUNK_TABLE_NAME, condition=chunk_condition
+            )
+
+        doc_condition = self._chat_scoped(
+            lambda t: t.c.source_id.in_(source_ids), chat_id
+        )
+        doc_rows = list(
+            await self._sql_storage.get_all(
+                settings.DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
+            )
+        )
+        for doc in doc_rows:
+            await self._file_storage.delete(doc["file_path"])
+        if doc_rows:
+            await self._sql_storage.delete(
+                settings.DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
+            )
+
+        return len(doc_rows)
+
+    async def delete_chat(self, chat_id: str) -> None:
+        """Reverse ingestion for a whole chat: remove every chunk, vector,
+        document record, and stored file that belongs to it."""
+        chunk_condition = lambda t: t.c.chat_id == chat_id
+        chunk_rows = list(
+            await self._sql_storage.get_all(
+                settings.CHUNK_TABLE_NAME, condition=chunk_condition
+            )
+        )
+        chunk_ids = [row["chunk_id"] for row in chunk_rows]
+        if chunk_ids:
+            await self._vector_storage.delete(chunk_ids)
+        if chunk_rows:
+            await self._sql_storage.delete(
+                settings.CHUNK_TABLE_NAME, condition=chunk_condition
+            )
+
+        doc_condition = lambda t: t.c.chat_id == chat_id
+        doc_rows = list(
+            await self._sql_storage.get_all(
+                settings.DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
+            )
+        )
+        for doc in doc_rows:
+            await self._file_storage.delete(doc["file_path"])
+        if doc_rows:
+            await self._sql_storage.delete(
+                settings.DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
+            )
+
+    async def list_files(self, chat_id: str | None = None) -> list[dict]:
+        """The origin files in the chat (what the user uploaded), excluding
+        the files plugins emitted during ingestion (``is_origin``)."""
+        condition = self._chat_scoped(lambda t: t.c.is_origin.is_(True), chat_id)
+        return list(
+            await self._sql_storage.get_all(
+                settings.DOCUMENT_METADATA_TABLE_NAME, condition=condition
+            )
+        )
+
+    async def list_file_chunks(
+        self, origin_source_id: str, chat_id: str | None = None
+    ) -> list[dict]:
+        """All chunks of a file's emission tree: the origin file's chunks plus
+        every emitted descendant's, located via ``origin_source_id``."""
+        condition = self._chat_scoped(
+            lambda t: t.c.origin_source_id == origin_source_id, chat_id
+        )
+        return list(
+            await self._sql_storage.get_all(
+                settings.CHUNK_TABLE_NAME, condition=condition
+            )
+        )
+
+    @staticmethod
+    def _chat_scoped(
+        base: Callable[[Table], ColumnElement[bool]],
+        chat_id: str | None,
+    ) -> Callable[[Table], ColumnElement[bool]]:
+        """AND a chat scope into a condition builder when ``chat_id`` is set."""
+        if chat_id is None:
+            return base
+
+        def condition(table: Table) -> ColumnElement[bool]:
+            return base(table) & (table.c.chat_id == chat_id)
+
+        return condition
 
     async def _save_source(
         self,

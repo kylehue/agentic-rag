@@ -44,6 +44,13 @@ class ChatService:
         )
         return chat_id
 
+    async def delete(self, chat_id: str) -> None:
+        """Remove the chat's row (its data and history are deleted separately)."""
+        await self._sql_storage.delete(
+            settings.CHATS_TABLE_NAME,
+            condition=lambda t: t.c.chat_id == chat_id,
+        )
+
     async def get_or_create(self, username: str, chat_id: str | None = None) -> str:
         """The chat id to use: the given one (verified as this user's) or a
         new one."""

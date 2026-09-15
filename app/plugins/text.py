@@ -47,7 +47,7 @@ TRANSPARENT_ELEMENT_TYPES = (PageBreak, PageNumber, Header, Footer)
 # The Unstructured Platform API endpoint (fixed by Unstructured; see
 # docs.unstructured.io). It is job-based, and requires
 # unstructured-client>=0.46.2 to resolve correctly.
-UNSTRUCTURED_API_URL = "https://platform-api.transform.unstructured.io/api/v1"
+UNSTRUCTURED_API_URL = "https://platform.unstructuredapp.io/api/v1"
 
 # How often to poll a running API job for its status.
 API_JOB_POLL_INTERVAL_SECONDS = 10
@@ -335,9 +335,7 @@ def _partition_via_api(
     )
     job_info = create_response.job_information
     if job_info is None or job_info.id is None:
-        raise RuntimeError(
-            "Unstructured API job creation returned no job information."
-        )
+        raise RuntimeError("Unstructured API job creation returned no job information.")
     job_id = job_info.id
 
     while True:
@@ -360,9 +358,7 @@ def _partition_via_api(
         raise RuntimeError("Unstructured API job returned no output files")
 
     download_response = client.jobs.download_job_output(
-        request=DownloadJobOutputRequest(
-            job_id=job_id, file_id=output_files[0].file_id
-        )
+        request=DownloadJobOutputRequest(job_id=job_id, file_id=output_files[0].file_id)
     )
     # The output is the file's elements as a JSON list.
     if not isinstance(download_response.any, list):

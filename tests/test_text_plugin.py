@@ -536,8 +536,9 @@ def test_partition_via_api_runs_the_job_flow():
             self.create_request = None
             self.download_request = None
 
-        def create_job(self, request):
+        def create_job(self, request, retries=None):
             self.create_request = request
+            assert retries is None  # one-shot: no backoff-retry on a permanent 5xx
             return SimpleNamespace(job_information=SimpleNamespace(id="job-1"))
 
         def get_job(self, request):

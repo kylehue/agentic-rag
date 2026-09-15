@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     AUTH_TOKENS_TABLE_NAME: str = "__auth_tokens__"
     CHATS_TABLE_NAME: str = "__chats__"
     AGENT_LOCAL_STORAGE_DIR: str = "./.storage/agent"
+
+    # Comma-separated list of allowed browser origins for CORS, or "*" for any.
+    CORS_ORIGINS: str = "*"
+    # Set when the app is served over HTTPS only; the session cookie then
+    # gets the Secure attribute.
+    SESSION_COOKIE_SECURE: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",

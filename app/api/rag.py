@@ -1,45 +1,84 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 
 from app.api.auth import require_user
-from app.api_schemas.chunk import IngestedChunkSchema, RetrievedChunkSchema
+from app.api.sse import sse_frame
+from app.api_schemas.chunk import RetrievedChunkSchema
 from app.api_schemas.rag import (
     DeleteFileResponseSchema,
     FileSchema,
-    IngestResponseSchema,
+    IngestJobSchema,
     ListFileChunksResponseSchema,
     ListFilesResponseSchema,
     RetrieveResponseSchema,
     StoredChunkSchema,
 )
 from app.container import chat_service, rag_service
+from app.plugin.context import IngestionFile
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
 
 
 @router.post(
     "/ingest",
-    response_model=IngestResponseSchema,
+    response_model=IngestJobSchema,
 )
-async def ingest_document(
-    file: UploadFile = File(...),
+async def ingest_documents(
+    files: list[UploadFile] | None = File(None),
+    file: UploadFile | None = File(None),
     chat_id: str | None = Query(None),
     user: str = Depends(require_user),
 ):
-    # The HTTP boundary is the only place that touches UploadFile; the RAG
-    # core ingests plain bytes. The chat is created if not given; ingesting
-    # stamps the chat id onto the file and its chunks, so nothing else needs
-    # to record it.
+    """Queue one or more files for background ingestion and return the job.
+
+    Send multiple files as repeated `files` parts (a single legacy `file`
+    part is also accepted). The response carries the `job_id`; watch progress
+    with `GET /rag/ingest/stream?job_id=...`. The chat is created if not
+    given; ingesting stamps the chat id onto the files and their chunks.
+    """
+    uploads = (files or []) + ([file] if file is not None else [])
+    if not uploads:
+        raise HTTPException(status_code=400, detail="No files provided.")
     chat_id = await chat_service.get_or_create(user, chat_id)
-    _origin_source_id, chunks = await rag_service.ingest(
-        file_bytes=await file.read(),
-        filename=file.filename or "",
-        content_type=file.content_type or "",
+    ingestion_files = [
+        IngestionFile(
+            filename=upload.filename or "",
+            content_type=upload.content_type or "",
+            file_bytes=await upload.read(),
+        )
+        for upload in uploads
+    ]
+    job = rag_service.enqueue_ingest(ingestion_files, chat_id)
+    return IngestJobSchema(
         chat_id=chat_id,
+        job_id=job.job_id,
+        status=job.status,
+        files=[f.filename for f in ingestion_files],
     )
-    return IngestResponseSchema(
-        chat_id=chat_id,
-        chunks=[IngestedChunkSchema.model_validate(chunk) for chunk in chunks],
-    )
+
+
+@router.get("/ingest/stream")
+async def ingest_stream(job_id: str, user: str = Depends(require_user)):
+    """An ingest job's progress as a server-sent event stream.
+
+    Frames: a `chat` frame naming the chat, a `queued` frame per file, then
+    per file a `started` frame, `stage` frames (processing / saving /
+    embedding), `plugin_state` frames (the plugins' fine-grained states), and
+    a `file_done` frame; the stream ends with a `done` frame (or an `error`
+    frame). Late subscribers replay the frames already emitted.
+    """
+    job = rag_service.get_ingest_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Ingest job not found.")
+    owner = await chat_service.username_of(job.chat_id)
+    if owner != user:
+        raise HTTPException(status_code=403, detail="Not your ingest job.")
+
+    async def generate():
+        async for event in job.events.subscribe():
+            yield sse_frame(event.name, event.payload)
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @router.post(

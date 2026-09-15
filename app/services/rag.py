@@ -1,8 +1,12 @@
 from collections.abc import Sequence
 
+from app.core.config import settings
 from app.embedders.base import Embedder
+from app.ingest.events import ProgressEmitter
+from app.ingest.queue import IngestJob, IngestQueue
 from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk, RetrievedChunk
+from app.models.ingest import INGEST_DONE, IngestEvent
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionFile
 from app.plugin.registry import PluginRegistry
@@ -48,6 +52,12 @@ class RagService:
             retriever=retriever,
             llm=llm,
             registry=registry,
+        )
+        # Background ingest queue: ingest requests are enqueued here and run
+        # on a worker pool, reporting progress through each job's events.
+        self._ingest_queue = IngestQueue(
+            process_job=self._process_ingest_job,
+            workers=settings.INGEST_WORKERS,
         )
 
     @property
@@ -96,6 +106,45 @@ class RagService:
         chunks = await self._ingestion_service.ingest(file, chat_id)
         return file.source_id, chunks
 
+    # --- background ingest (queue + progress) ---
+
+    async def start_ingest_queue(self) -> None:
+        """Start the ingest worker pool (called at application startup)."""
+        await self._ingest_queue.start()
+
+    async def stop_ingest_queue(self) -> None:
+        """Stop the ingest worker pool (called at application shutdown)."""
+        await self._ingest_queue.stop()
+
+    def enqueue_ingest(self, files: Sequence[IngestionFile], chat_id: str) -> IngestJob:
+        """Queue one or more files for background ingestion into `chat_id`
+        and return the job (its id addresses the progress stream)."""
+        return self._ingest_queue.enqueue(chat_id, files)
+
+    def get_ingest_job(self, job_id: str) -> IngestJob | None:
+        """A queued/running/finished ingest job, or None."""
+        return self._ingest_queue.get(job_id)
+
+    async def _process_ingest_job(self, job: IngestJob) -> None:
+        """The worker's job: ingest each file (reporting progress) then mark
+        the job done."""
+        emitter = ProgressEmitter(job.events)
+        total_chunks = 0
+        for file in job.files:
+            emitter.started(file.filename)
+            chunks = await self._ingestion_service.ingest(file, job.chat_id, emitter)
+            total_chunks += len(chunks)
+            emitter.file_done(file.filename, len(chunks))
+        job.events.publish(
+            IngestEvent(
+                name=INGEST_DONE,
+                payload={
+                    "files": [file.filename for file in job.files],
+                    "total_chunks": total_chunks,
+                },
+            )
+        )
+
     async def retrieve(
         self,
         user_query: str,
@@ -128,6 +177,4 @@ class RagService:
         self, origin_source_id: str, chat_id: str | None = None
     ) -> list[dict]:
         """All chunks of a file's emission tree (origin + emitted descendants)."""
-        return await self._ingestion_service.list_file_chunks(
-            origin_source_id, chat_id
-        )
+        return await self._ingestion_service.list_file_chunks(origin_source_id, chat_id)

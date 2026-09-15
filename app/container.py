@@ -106,12 +106,15 @@ async def lifespan(app: FastAPI):
     await rag_agent_service.initialize()
     await auth_service.initialize()
     await chat_service.initialize()
+    # Then start the background ingest workers.
+    await rag_service.start_ingest_queue()
 
     yield
 
-    # The composition root closes every database: the checkpoint connection
-    # (through the agent service, whose only own resource it is) and the SQL
-    # and vector stores.
+    # Stop the ingest workers, then close every database: the checkpoint
+    # connection (through the agent service, whose only own resource it is)
+    # and the SQL and vector stores.
+    await rag_service.stop_ingest_queue()
     await rag_agent_service.close()
     await sql_storage.close()
     await vector_storage.close()

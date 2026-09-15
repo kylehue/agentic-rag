@@ -350,7 +350,7 @@ Tools:
 Rules:
 - Answer only from what the tools return. If the evidence is insufficient, say so plainly.
 - Keep tool output lean: fetch only what the question needs.
-- Cite factual claims as #[source_id:chunk_id].
+- Cite factual claims as #[origin_source_id:chunk_id].
 - Keep the answer concise and direct.
 """
 
@@ -360,23 +360,26 @@ Rules:
 CHUNK_REF_PATTERN = re.compile(r"#\[([^\[\]:]+):([^\[\]:]+)\]")
 
 
-def format_chunk_ref(source_id: str, chunk_id: str) -> str:
-    """The citation reference for one chunk: `#[source_id:chunk_id]`."""
-    return f"#[{source_id}:{chunk_id}]"
+def format_chunk_ref(origin_source_id: str, chunk_id: str) -> str:
+    """The citation reference for one chunk: `#[origin_source_id:chunk_id]`."""
+    return f"#[{origin_source_id}:{chunk_id}]"
 
 
 def extract_chunk_refs(answer: str) -> dict[str, dict[str, str]]:
     """The chunk references cited in an answer.
 
-    Keyed by the reference string (`#[source_id:chunk_id]`), in first-seen
-    order, each mapped to its structured `{source_id, chunk_id}` parts.
+    Keyed by the reference string (`#[origin_source_id:chunk_id]`), in
+    first-seen order, each mapped to its structured
+    `{origin_source_id, chunk_id}` parts. The origin id is the top-level file
+    the user uploaded (not the chunk's own source), so citations point at the
+    user's documents, including tables embedded in them.
     """
     refs: dict[str, dict[str, str]] = {}
     for match in CHUNK_REF_PATTERN.finditer(answer):
-        source_id, chunk_id = match.group(1), match.group(2)
+        origin_source_id, chunk_id = match.group(1), match.group(2)
         refs.setdefault(
-            format_chunk_ref(source_id, chunk_id),
-            {"source_id": source_id, "chunk_id": chunk_id},
+            format_chunk_ref(origin_source_id, chunk_id),
+            {"origin_source_id": origin_source_id, "chunk_id": chunk_id},
         )
     return refs
 

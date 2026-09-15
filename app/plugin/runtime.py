@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any
 
 from app.embedders.base import Embedder
 from app.llm.base import LLMProvider
@@ -10,7 +11,13 @@ from app.store_sql.base import SqlStorage
 from app.store_vector.base import VectorStorage
 
 if TYPE_CHECKING:
+    from app.ingest.events import ProgressEmitter
     from app.plugin.registry import PluginRegistry
+
+# The plugin currently executing, set by the registry per fan-out task. Lets
+# a plugin's `runtime.report_state(...)` be attributed without the plugin
+# having to pass its own name.
+current_plugin: ContextVar[str | None] = ContextVar("current_plugin", default=None)
 
 
 class IngestionRuntime:
@@ -34,6 +41,7 @@ class IngestionRuntime:
         vector_storage: VectorStorage,
         sql_storage: SqlStorage,
         file_storage: FileStorage,
+        emitter: ProgressEmitter | None = None,
     ) -> None:
         self._context = context
         self._registry = registry
@@ -42,6 +50,7 @@ class IngestionRuntime:
         self._vector_storage = vector_storage
         self._sql_storage = sql_storage
         self._file_storage = file_storage
+        self._emitter = emitter
         self._emitted: list[IngestionFile] = []
 
     @property
@@ -101,6 +110,20 @@ class IngestionRuntime:
         emitted = self._emitted
         self._emitted = []
         return emitted
+
+    async def report_state(self, state: str, **detail: Any) -> None:
+        """Report a fine-grained progress state for this run (e.g. a plugin
+        announcing "partitioning"). No-op when the run has no progress
+        emitter (direct/test ingestion). The plugin is attributed
+        automatically by the registry."""
+        if self._emitter is None:
+            return
+        self._emitter.plugin_state(
+            file=self._context.file.filename,
+            plugin=current_plugin.get(),
+            state=state,
+            **detail,
+        )
 
 
 class RetrievalRuntime:

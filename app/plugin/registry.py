@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from app.models.chunk import IngestedChunk, RetrievedChunk
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionContext, IngestionFile, RetrievalContext
+from app.plugin.runtime import current_plugin
 
 if TYPE_CHECKING:
     from app.plugin.runtime import IngestionRuntime, RetrievalRuntime
@@ -28,9 +29,7 @@ class PluginRegistry:
 
     def register(self, plugin: Plugin) -> None:
         if plugin.name in self._plugins_by_name:
-            raise ValueError(
-                f"Plugin name '{plugin.name}' is already registered."
-            )
+            raise ValueError(f"Plugin name '{plugin.name}' is already registered.")
 
         self._plugins.append(plugin)
         self._plugins_by_name[plugin.name] = plugin
@@ -65,9 +64,7 @@ class PluginRegistry:
         context: IngestionContext,
         runtime: IngestionRuntime,
     ) -> None:
-        await self._fan(
-            lambda p: p.on_file_emitted(emitted_file, context, runtime)
-        )
+        await self._fan(lambda p: p.on_file_emitted(emitted_file, context, runtime))
 
     async def file_subprocessed(
         self,
@@ -122,4 +119,15 @@ class PluginRegistry:
     async def _fan(self, action) -> list[Any]:
         if not self._plugins:
             return []
-        return list(await asyncio.gather(*(action(plugin) for plugin in self._plugins)))
+
+        async def call(plugin: Plugin) -> Any:
+            # Attribute this task's `report_state` calls to the plugin. Each
+            # gathered task gets its own context, so concurrent plugins don't
+            # cross-talk.
+            token = current_plugin.set(plugin.name)
+            try:
+                return await action(plugin)
+            finally:
+                current_plugin.reset(token)
+
+        return list(await asyncio.gather(*(call(plugin) for plugin in self._plugins)))

@@ -6,11 +6,21 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, Column, ColumnElement, Integer, String, Table, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    ColumnElement,
+    Integer,
+    String,
+    Table,
+    Text,
+)
 
 from app.core.config import settings
 from app.embedders.base import Embedder
 from app.errors.document import InvalidDocumentError
+from app.ingest.events import ProgressEmitter
 from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk
 from app.plugin.context import IngestionContext, IngestionFile
@@ -76,12 +86,17 @@ class IngestionService:
         )
 
     async def ingest(
-        self, file: IngestionFile, chat_id: str | None = None
+        self,
+        file: IngestionFile,
+        chat_id: str | None = None,
+        emitter: ProgressEmitter | None = None,
     ) -> list[IngestedChunk]:
         """Ingest a file (and everything its plugins emit) into `chat_id`.
 
         The whole emission tree is stamped with the chat id: it becomes the
-        group the retrieval layer can fetch natively.
+        group the retrieval layer can fetch natively. When `emitter` is given
+        (a queued ingest), pipeline stages and plugin states are reported to
+        it as they happen; otherwise nothing is reported.
         """
 
         pending_sources: list[tuple[IngestionFile, bool]] = []
@@ -133,6 +148,7 @@ class IngestionService:
                 vector_storage=self._vector_storage,
                 sql_storage=self._sql_storage,
                 file_storage=self._file_storage,
+                emitter=emitter,
             )
 
             plugins = self._registry.accepting_plugins(context)
@@ -201,6 +217,9 @@ class IngestionService:
 
             return context, runtime, all_chunks
 
+        if emitter:
+            emitter.stage(file.filename, "processing")
+
         top_context, top_runtime, chunks = await _ingest(
             file=file,
             parent_file=None,
@@ -208,7 +227,16 @@ class IngestionService:
             inherited_metadata={},
         )
 
-        await self._commit(pending_sources, pending_chunks, chat_id)
+        if emitter:
+            emitter.stage(file.filename, "saving")
+
+        await self._commit(
+            pending_sources,
+            pending_chunks,
+            chat_id,
+            file.filename,
+            emitter,
+        )
 
         # The very end: every file processed and everything committed.
         await self._registry.ingestion_completed(chunks, top_context, top_runtime)
@@ -373,6 +401,8 @@ class IngestionService:
         pending_sources: Sequence[tuple[IngestionFile, bool]],
         pending_chunks: Sequence[tuple[IngestionContext, IngestedChunk]],
         chat_id: str | None,
+        origin_filename: str,
+        emitter: ProgressEmitter | None = None,
     ) -> None:
         """Persist everything collected during the walk, stamped with the
         chat the ingestion belongs to."""
@@ -380,6 +410,10 @@ class IngestionService:
             await self._save_source(file, is_origin, chat_id)
 
         if pending_chunks:
+            if emitter:
+                emitter.stage(
+                    origin_filename, "embedding", chunk_count=len(pending_chunks)
+                )
             await self._save_chunk_records(pending_chunks)
 
     async def _save_chunk_records(

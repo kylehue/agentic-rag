@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict
 
-from app.api_schemas.chunk import IngestedChunkSchema, RetrievedChunkSchema
+from app.api_schemas.chunk import RetrievedChunkSchema
 
 
 class RagAnswerRequestSchema(BaseModel):
@@ -20,7 +20,7 @@ class RagAnswerSchema(BaseModel):
     query: str
     answer: str
     # Only the chunks the answer actually cites, keyed by their
-    # #[source_id:chunk_id] reference.
+    # #[origin_source_id:chunk_id] reference.
     chunk_refs: dict[str, dict[str, str]]
 
 
@@ -29,9 +29,14 @@ class ChatAnswerSchema(RagAnswerSchema):
     chat_id: str
 
 
-class IngestResponseSchema(BaseModel):
+class IngestJobSchema(BaseModel):
+    """The acknowledgement for a queued (background) ingestion: the job id
+    addresses the progress stream, not the (not-yet-done) chunks."""
+
     chat_id: str
-    chunks: list[IngestedChunkSchema]
+    job_id: str
+    status: str
+    files: list[str]
 
 
 class RetrieveResponseSchema(BaseModel):

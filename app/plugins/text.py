@@ -119,6 +119,7 @@ class TextPlugin(Plugin):
         if not self.accepts(context):
             return []
 
+        await runtime.report_state("partitioning")
         elements = await asyncio.to_thread(
             self._partition,
             context,
@@ -162,6 +163,9 @@ class TextPlugin(Plugin):
 
         stem = Path(context.file.filename).stem
         table_index = 0
+
+        if runs:
+            await runtime.report_state("parsing_tables", tables=len(runs))
 
         for run in runs:
             merged_tables = merge_table_fragments([fragment for _, fragment in run])

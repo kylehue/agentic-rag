@@ -1,9 +1,8 @@
-import json
-
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from app.api.auth import require_user
+from app.api.sse import sse_frame
 from app.api_schemas.rag import (
     ChatAnswerSchema,
     RagAnswerRequestSchema,
@@ -48,7 +47,7 @@ async def answer_stream(
     chat_id = await chat_service.get_or_create(user, request.chat_id)
 
     async def generate():
-        yield _sse("chat", {"chat_id": chat_id})
+        yield sse_frame("chat", {"chat_id": chat_id})
         async for event in rag_agent_service.ask_stream(
             request.query, chat_id=chat_id
         ):
@@ -59,11 +58,6 @@ async def answer_stream(
                 payload["chat_id"] = chat_id
             else:
                 payload = event.payload
-            yield _sse(event.name, payload)
+            yield sse_frame(event.name, payload)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
-
-
-def _sse(event: str, data: dict) -> str:
-    """One server-sent event frame."""
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"

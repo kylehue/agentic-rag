@@ -13,9 +13,10 @@ class SearchDocumentTool(AgentTool):
     def description(self) -> str:
         return (
             "Search the ingested document corpus for evidence relevant to a "
-            "query. Returns ranked chunks, each with its source id, chunk id, "
-            "and text (for tables, the text is the table's description and a "
-            "sample, not the full data)."
+            "query. Returns ranked chunks, each with its origin source id, "
+            "chunk id, and text (for tables, the text is the table's "
+            "description and a sample, not the full data). Cite a chunk as "
+            "#[origin:chunk] using the ids shown here."
         )
 
     @property
@@ -46,8 +47,8 @@ class SearchDocumentTool(AgentTool):
             lines = []
             for rank, chunk in enumerate(chunks, start=1):
                 lines.append(
-                    f"[{rank}] source={chunk.source_id} chunk={chunk.chunk_id} "
-                    f"{chunk.text}"
+                    f"[{rank}] origin={chunk.origin_source_id} "
+                    f"chunk={chunk.chunk_id} {chunk.text}"
                 )
             return "\n\n".join(lines)
 

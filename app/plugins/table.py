@@ -78,6 +78,7 @@ class TablePlugin(Plugin):
         if not self.accepts(context):
             return []
 
+        await runtime.report_state("reading_tables")
         tables = await asyncio.to_thread(
             self._read_tables,
             context,
@@ -92,6 +93,7 @@ class TablePlugin(Plugin):
         # The LLM generates retrieval-optimized descriptions only.
         # Schema and relationship discovery is left to the agent that
         # queries the stored tables.
+        await runtime.report_state("analyzing_tables", tables=len(tables))
         workbook_description, table_analyses = await self._analyze_workbook(
             runtime.llm,
             catalog,

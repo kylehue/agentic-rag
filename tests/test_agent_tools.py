@@ -269,10 +269,10 @@ def test_search_documents_returns_ranked_evidence(tmp_path):
     output = execute(tools, "search_documents", query="evidence?")
 
     assert retriever.queries == ["evidence?"]
-    # Each chunk carries its source and chunk ids; the tool knows nothing
-    # about the citation format (that is the agent service's concern).
-    assert "[1] source=s1 chunk=c1 first evidence" in output
-    assert "[2] source=s1 chunk=c2 second evidence" in output
+    # Each chunk carries its origin source id and chunk id (the ids the model
+    # cites); the tool knows nothing about the citation format itself.
+    assert "[1] origin=s1 chunk=c1 first evidence" in output
+    assert "[2] origin=s1 chunk=c2 second evidence" in output
 
 
 def test_search_documents_reports_no_evidence(tmp_path):
@@ -626,7 +626,7 @@ def test_search_documents_scoped_to_the_chat(tmp_path):
     )
 
     assert (
-        "[1] source=s1 chunk=c1 evidence"
+        "[1] origin=s1 chunk=c1 evidence"
         in execute(executors_a, "search_documents", query="q")
     )
     assert "chunk=c2" not in execute(executors_a, "search_documents", query="q")

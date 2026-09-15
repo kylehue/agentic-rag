@@ -344,7 +344,7 @@ def test_ask_reports_only_the_cited_chunks():
     assert result.query == "what?"
     assert result.answer == "Grounded answer. #[s1:c2]"
     assert result.chunk_refs == {
-        "#[s1:c2]": {"source_id": "s1", "chunk_id": "c2"}
+        "#[s1:c2]": {"origin_source_id": "s1", "chunk_id": "c2"}
     }
 
 
@@ -425,11 +425,11 @@ def test_to_stream_event_translates_domain_items():
 def test_extract_chunk_refs_parses_citations():
     answer = "It is here #[s1:c1], again #[s1:c1], and also #[s2:c2]."
     assert extract_chunk_refs(answer) == {
-        "#[s1:c1]": {"source_id": "s1", "chunk_id": "c1"},
-        "#[s2:c2]": {"source_id": "s2", "chunk_id": "c2"},
+        "#[s1:c1]": {"origin_source_id": "s1", "chunk_id": "c1"},
+        "#[s2:c2]": {"origin_source_id": "s2", "chunk_id": "c2"},
     }
     # Plain brackets, ranks, and links are not citations (no leading #).
-    assert extract_chunk_refs("[1] source=s1 chunk=c1") == {}
+    assert extract_chunk_refs("[1] origin=s1 chunk=c1") == {}
     assert extract_chunk_refs("see [s1:c1] or [a](http://x)") == {}
 
 

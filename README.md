@@ -100,30 +100,30 @@ docker compose up --build
 
 ### Talking to it
 
-The RAG endpoints are per-user and per-chat. First register and log in (see [Users and Chats](#users-and-chats)):
-
-```bash
-TOKEN=$(curl -s -X POST localhost:8000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username": "you", "password": "your-password"}' | python -c "import sys, json; print(json.load(sys.stdin)['token'])")
-```
-
-- **Ingest a document** (a new chat is created when none is given; the response includes the `chat_id`):
-
-  ```bash
-  curl -X POST localhost:8000/rag/ingest -H "Authorization: Bearer $TOKEN" \
-    -F "file=@example_docs/your.pdf"
-  ```
+The RAG endpoints are per-user and per-chat, authenticated by a session cookie. `stream_agent.py` handles all of that for you: on first use it registers and logs in a test account and keeps the session cookie in the OS temp dir, so you just run it.
 
 - **Ask a question and watch the agent work:**
 
   ```bash
-  RAG_TOKEN=$TOKEN python stream_agent.py "your question"
+  python stream_agent.py "your question"
   ```
 
   The script prints each tool call and result as it happens, types out the answer token by token, and lists the chunks the answer cites at the end. Run it without arguments for an interactive conversation with chat management built in (`/chats`, `/use`, `/del`, ...; see `/help` in the script); follow-up questions continue the server-side chat, and `RAG_CHAT=<chat_id>` continues a previous one.
 
-- **JSON endpoints:** `POST /rag/ingest` (multipart upload), `POST /rag/retrieve?user_query=...`, `POST /rag/answer` (JSON body `{"query", "chat_id"}`), and `POST /rag/answer/stream` (same body, returned as a server-sent event stream). All take an optional `chat_id` (created automatically when absent) and require the Bearer token.
+- **Ingest a document with curl** (a new chat is created when none is given; the response includes the `chat_id`):
+
+  ```bash
+  # Log in once: -c saves the session cookie the server sets.
+  curl -c cookies.txt -X POST localhost:8000/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"username": "you", "password": "your-password"}'
+
+  # -c sends it; the same file works for any number of requests.
+  curl -b cookies.txt -X POST localhost:8000/rag/ingest \
+    -F "file=@example_docs/your.pdf"
+  ```
+
+- **JSON endpoints:** `POST /rag/ingest` (multipart upload), `POST /rag/retrieve?user_query=...`, `POST /rag/answer` (JSON body `{"query", "chat_id"}`), and `POST /rag/answer/stream` (same body, returned as a server-sent event stream). All take an optional `chat_id` (created automatically when absent) and require the session cookie.
 
 ## Architecture
 
@@ -248,13 +248,14 @@ The layers, so each concern has one home:
 
 ### Authentication
 
-A small, self-contained auth domain (its own service, tables, and API module, decoupled from the RAG services):
+A small, self-contained auth domain (its own service, tables, and API module, decoupled from the RAG services). Sessions are cookie based:
 
 - `POST /auth/register` with `{"username", "password"}` creates a user (passwords stored as bcrypt hashes).
-- `POST /auth/login` verifies the credentials and returns an opaque bearer `token` (stored as a bcrypt hash, looked up by a unique token prefix).
-- `GET /auth/me` returns the user a token belongs to.
+- `POST /auth/login` verifies the credentials and sets the `auth_token` session cookie (HttpOnly, SameSite=Lax, Secure when `SESSION_COOKIE_SECURE`). The token it carries is opaque and stored only as a bcrypt hash, looked up by a unique token prefix; it never appears in a response body.
+- `POST /auth/logout` clears the cookie.
+- `GET /auth/me` returns the user of the session.
 
-The RAG and chat endpoints require `Authorization: Bearer <token>` (the `require_user` dependency in `app/api/auth.py` is the only seam between the auth domain and the rest of the API).
+The RAG and chat endpoints require the session cookie (the `require_user` dependency in `app/api/auth.py` is the only seam between the auth domain and the rest of the API).
 
 ### Chats
 
@@ -421,20 +422,22 @@ Storing the schema is what lets the agent inspect a table without reading its da
 
 ### `app/api`
 
-Contains the FastAPI HTTP routes, split by domain: auth in `auth.py` (which also holds the `require_user` dependency), chats in `chats.py`, the RAG routes (ingest/retrieve) in `rag.py`, and the answer routes in `rag_agent.py`. The RAG and chat routes require the Bearer token; every RAG route takes an optional `chat_id` (created automatically when absent) and returns it.
+Contains the FastAPI HTTP routes, split by domain: auth in `auth.py` (which also holds the `require_user` dependency and the session cookie), chats in `chats.py`, the RAG routes (ingest/retrieve) in `rag.py`, and the answer routes in `rag_agent.py`. The RAG and chat routes require the session cookie; every RAG route takes an optional `chat_id` (created automatically when absent) and returns it.
 
 #### `app/api/auth.py`
 
 - `POST /auth/register`: creates a user.
-- `POST /auth/login`: verifies credentials, returns a bearer token.
-- `GET /auth/me`: the user a token belongs to.
-- `require_user`: the FastAPI dependency the other routers use for authentication.
+- `POST /auth/login`: verifies credentials, sets the session cookie.
+- `POST /auth/logout`: clears the session cookie.
+- `GET /auth/me`: the user of the session.
+- `require_user`: the FastAPI dependency the other routers use for authentication (reads the session cookie).
 
 #### `app/api/chats.py`
 
 - `GET /chats`: the caller's chats (with their ingested sources) — how a user goes back to an old chat.
 - `POST /chats`: starts a new chat explicitly.
 - `GET /chats/{chat_id}/messages`: the chat's conversation history (user and assistant turns), read from the agent's checkpointer.
+- `DELETE /chats/{chat_id}`: deletes a chat entirely — its files, chunks, vectors, and conversation history (then its row). Ownership-checked.
 
 #### `app/api/rag.py`
 
@@ -442,6 +445,9 @@ Contains the RAG endpoints, backed by the `RagService`:
 
 - `/rag/ingest`: uploads and ingests a document (the only place that touches FastAPI's `UploadFile`); ingestion stamps the chat id onto the file and its chunks, and the response returns the `chat_id` with the chunks.
 - `/rag/retrieve`: retrieves relevant chunks bounded to the chat's corpus.
+- `/rag/files` (GET): the origin files ingested into the chat (user uploads, not the files plugins emitted), each with its `source_id`.
+- `/rag/files/{origin_source_id}/chunks` (GET): all chunks of one file's emission tree (its own chunks plus every emitted descendant's), found via `origin_source_id`.
+- `/rag/files/{origin_source_id}` (DELETE): reverse ingestion for one file's whole emission tree (its chunks, vectors, SQL records, and stored files). Returns 404 when the file is not in the chat.
 
 #### `app/api/rag_agent.py`
 
@@ -497,11 +503,11 @@ Internal application models.
 ### `app/services`
 
 - `app/services/auth.py` - the auth domain (decoupled from the RAG services; needs only SQL storage): `register`, `login` (bcrypt-hashed passwords, opaque hashed tokens), and `verify_token`.
-- `app/services/chat.py` - user chats: `get_or_create` (ownership-checked), `create`, `username_of`, and `list_chats` (a chat's ingested sources are derived from the documents table, so there is no separate bookkeeping).
-- `app/services/ingestion.py` - the pipeline driver: offers each file to all plugins, builds context/runtime (carrying the chat id), runs `on_ingestion_process` on every plugin, persists everything (source files, chunk records, vectors) stamped with the chat id, and re-ingests emitted files.
+- `app/services/chat.py` - user chats: `get_or_create` (ownership-checked), `create`, `delete`, `username_of`, and `list_chats` (a chat's ingested sources are derived from the documents table, so there is no separate bookkeeping).
+- `app/services/ingestion.py` - the pipeline driver: offers each file to all plugins, builds context/runtime (carrying the chat id), runs `on_ingestion_process` on every plugin, persists everything (source files, chunk records, vectors) stamped with the chat id, and re-ingests emitted files. It also manages stored files: `list_files(chat_id)` (origin uploads only), `list_file_chunks(origin_source_id, chat_id)` (a file's whole emission tree via `origin_source_id`), `delete_file(origin_source_id, chat_id)` (reverse ingestion for one file's tree: its chunks, vectors, SQL records, and stored files), and `delete_chat(chat_id)` (reverse ingestion for a whole chat: its chunks, vectors, document records, and stored files).
 - `app/services/retrieval.py` - runs the hybrid retriever (bounded to a chat when given) and runs `on_retrieval_finalize` on every plugin for each chunk.
-- `app/services/rag.py` - the wrapper for ingestion and retrieval. It builds the `PluginRegistry` from the `plugins` option and the ingestion and retrieval services (which take the registry) from the collaborators it is given, and exposes those collaborators as public properties so the agent's tools can use them. `initialize()` creates the system tables at startup; `ingest(file_bytes, filename, content_type, description=None, chat_id=None)` builds the `IngestionFile` and delegates, returning the origin source id with the chunks; `retrieve(user_query, chat_id=None)` returns evidence bounded to that chat's chunks when given.
-- `app/services/rag_agent.py` - the `RagAgentService`: takes the RAG service and the tools at initialization, and owns the orchestration graph (built on a checkpointer, one thread per chat), the per-run chat scoping, the run's events, `chat_history` (a chat's conversation read from the checkpointer), the system prompt (a template whose tools section is generated from the tool definitions via `tools_outline`), the citation format (`CHUNK_REF_PATTERN`, `extract_chunk_refs`: the single source of truth for `#[source_id:chunk_id]`), and the translation of a run into neutral `StreamEvent`s. `ask(question, chat_id=)` returns the `RagAnswer`; `ask_stream(...)` yields the run ending with it; interrupted runs resume from their checkpoint.
+- `app/services/rag.py` - the wrapper for ingestion and retrieval. It builds the `PluginRegistry` from the `plugins` option and the ingestion and retrieval services (which take the registry) from the collaborators it is given, and exposes those collaborators as public properties so the agent's tools can use them. `initialize()` creates the system tables at startup; `ingest(file_bytes, filename, content_type, description=None, chat_id=None)` builds the `IngestionFile` and delegates, returning the origin source id with the chunks; `retrieve(user_query, chat_id=None)` returns evidence bounded to that chat's chunks when given. It also delegates the file-management methods: `list_files`, `list_file_chunks`, `delete_file`, and `delete_chat`.
+- `app/services/rag_agent.py` - the `RagAgentService`: takes the RAG service and the tools at initialization, and owns the orchestration graph (built on a checkpointer, one thread per chat), the per-run chat scoping, the run's events, `chat_history` (a chat's conversation read from the checkpointer), the system prompt (a template whose tools section is generated from the tool definitions via `tools_outline`), the citation format (`CHUNK_REF_PATTERN`, `extract_chunk_refs`: the single source of truth for `#[source_id:chunk_id]`), and the translation of a run into neutral `StreamEvent`s. `ask(question, chat_id=)` returns the `RagAnswer`; `ask_stream(...)` yields the run ending with it; interrupted runs resume from their checkpoint. `delete_chat(chat_id)` deletes a chat's RAG data (via the RAG service) and its conversation history (the checkpointer thread).
 
 ### `app/store_file`, `app/store_sql`, `app/store_vector`
 

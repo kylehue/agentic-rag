@@ -2,31 +2,28 @@ import json
 import re
 
 from app.agent_tools.base import AgentTool
-from app.agent_tools.common import object_schema
+from app.agent_tools.common import QUERY_DOCUMENTS_MAX_ROWS, object_schema
 from app.core.config import settings
-
-# Row cap keeps tool output small enough for the model's context.
-QUERY_CHUNKS_MAX_ROWS = 5
 
 # Chat ids are system-generated (uuid4 hex); this guard keeps the value that
 # gets inlined into the wrapped query free of SQL metacharacters.
 _CHAT_ID_SHAPE = re.compile(r"[\w-]+")
 
 
-class QueryChunksTool(AgentTool):
+class SqlQueryDocumentsTool(AgentTool):
     """Query the chunk/document metadata database (read-only SELECT)."""
 
     @property
     def name(self) -> str:
-        return "query_chunks"
+        return "sql_query_documents"
 
     @property
     def description(self) -> str:
         return (
             "Run a read-only SELECT query against the document database. "
             f"Tables: {settings.CHUNK_TABLE_NAME} (columns: id, chunk_id, "
-            "source_id, parent_source_id, origin_source_id, plugin, text, "
-            "metadata, chat_id) and "
+            "source_id, parent_source_id, origin_source_id, text, metadata, "
+            "chat_id) and "
             f"{settings.DOCUMENT_METADATA_TABLE_NAME} (columns: id, "
             "source_id, file_path, file_content_type, file_filename, "
             "file_orig_filename, is_origin, chat_id). Select chat_id so the "
@@ -44,7 +41,7 @@ class QueryChunksTool(AgentTool):
                 "limit": {
                     "type": "integer",
                     "description": (
-                        f"Maximum rows to return (default {QUERY_CHUNKS_MAX_ROWS})."
+                        f"Maximum rows to return (default {QUERY_DOCUMENTS_MAX_ROWS})."
                     ),
                 },
             },
@@ -64,10 +61,10 @@ class QueryChunksTool(AgentTool):
                 return "Error: only read-only SELECT queries are allowed."
 
             try:
-                limit = int(arguments.get("limit") or QUERY_CHUNKS_MAX_ROWS)
+                limit = int(arguments.get("limit") or QUERY_DOCUMENTS_MAX_ROWS)
             except (TypeError, ValueError):
-                limit = QUERY_CHUNKS_MAX_ROWS
-            limit = max(1, min(limit, QUERY_CHUNKS_MAX_ROWS))
+                limit = QUERY_DOCUMENTS_MAX_ROWS
+            limit = max(1, min(limit, QUERY_DOCUMENTS_MAX_ROWS))
 
             if chat_id is not None:
                 if not _CHAT_ID_SHAPE.fullmatch(chat_id):

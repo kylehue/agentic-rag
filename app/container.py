@@ -3,11 +3,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.agent_tools import (
+    InspectTableRelationshipsTool,
     InspectTableTool,
-    ListTablesTool,
-    QueryChunksTool,
-    QueryTableTool,
     SearchDocumentTool,
+    SqlQueryDocumentsTool,
+    SqlQueryTableTool,
 )
 from app.core.config import settings
 
@@ -90,10 +90,10 @@ rag_agent_service = RagAgentService(
     rag_service=rag_service,
     tools=[
         SearchDocumentTool(),
-        ListTablesTool(),
         InspectTableTool(),
-        QueryTableTool(),
-        QueryChunksTool(),
+        InspectTableRelationshipsTool(),
+        SqlQueryTableTool(),
+        SqlQueryDocumentsTool(),
     ],
     checkpoint_dir=settings.AGENT_LOCAL_STORAGE_DIR,
 )

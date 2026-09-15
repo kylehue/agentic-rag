@@ -18,6 +18,7 @@ The application is designed around separate ingestion, retrieval, and answer-gen
     - [Ingestion Pipeline](#ingestion-pipeline)
     - [Retrieval Pipeline](#retrieval-pipeline)
     - [Answer Generation](#answer-generation)
+  - [Users and Chats](#users-and-chats)
   - [Plugin Lifecycle](#plugin-lifecycle)
   - [Context and Runtime](#context-and-runtime)
   - [File Emission and Subprocess](#file-emission-and-subprocess)
@@ -99,21 +100,30 @@ docker compose up --build
 
 ### Talking to it
 
-- **Ingest a document:**
+The RAG endpoints are per-user and per-chat. First register and log in (see [Users and Chats](#users-and-chats)):
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "you", "password": "your-password"}' | python -c "import sys, json; print(json.load(sys.stdin)['token'])")
+```
+
+- **Ingest a document** (a new chat is created when none is given; the response includes the `chat_id`):
 
   ```bash
-  curl -X POST localhost:8000/rag/ingest -F "file=@example_docs/your.pdf"
+  curl -X POST localhost:8000/rag/ingest -H "Authorization: Bearer $TOKEN" \
+    -F "file=@example_docs/your.pdf"
   ```
 
 - **Ask a question and watch the agent work:**
 
   ```bash
-  python stream_agent.py "your question"
+  RAG_TOKEN=$TOKEN python stream_agent.py "your question"
   ```
 
-  The script prints each tool call and result as it happens, types out the answer token by token, and lists the chunks the answer cites at the end. Run it without arguments for an interactive conversation; the memory stays in the process for the session, so follow-up questions work.
+  The script prints each tool call and result as it happens, types out the answer token by token, and lists the chunks the answer cites at the end. Run it without arguments for an interactive conversation with chat management built in (`/chats`, `/use`, `/del`, ...; see `/help` in the script); follow-up questions continue the server-side chat, and `RAG_CHAT=<chat_id>` continues a previous one.
 
-- **JSON endpoints:** `POST /rag/ingest` (multipart upload), `POST /rag/retrieve?user_query=...`, `POST /rag/answer` (JSON body `{"query", "history"}`), and `POST /rag/answer/stream` (same body, returned as a server-sent event stream).
+- **JSON endpoints:** `POST /rag/ingest` (multipart upload), `POST /rag/retrieve?user_query=...`, `POST /rag/answer` (JSON body `{"query", "chat_id"}`), and `POST /rag/answer/stream` (same body, returned as a server-sent event stream). All take an optional `chat_id` (created automatically when absent) and require the Bearer token.
 
 ## Architecture
 
@@ -214,25 +224,46 @@ flowchart TD
 
 Answering runs an agent built on langgraph. The agent loops between two steps: it asks the LLM (with the tools available), and when the LLM requests tools, it runs them and feeds the results back. Once the loop reached the max limits, the LLM is called without tools and must answer, so the loop always terminates.
 
-The agent's tools are read-only lookups over the RAG system:
+The agent's tools are read-only lookups over the RAG system. They know nothing about plugins: a stored chunk is a table when its metadata carries a schema, and tables are addressed by their `source_id`.
 
 - `search_documents`: hybrid retrieval over the corpus, through the same path the `/rag/retrieve` endpoint uses; each result carries its source id, chunk id, and text.
-- `list_tables`: the stored tables' names, ids, and row/column counts.
-- `inspect_table`: a table's schema (columns and types) and shape, read from stored metadata with no file read.
-- `query_table`: runs the model's SQL over one table in a throwaway in-memory database and returns at most 100 rows. The only tool that reads table data.
-- `query_chunks`: read-only SELECT over the chunk and document records.
+- `inspect_table`: one csv table's full record by its `source_id` (the document and chunk lineage plus its entire metadata: schema, row/column counts, ...) and its text (the table's description and a sample). Non-csv sources are rejected.
+- `inspect_table_relationships`: given a table's `source_id`, the other tables ingested from the same origin document (the sibling tables embedded in the same document, or the sheets of the same workbook), each with its source id, description, and schema. The join candidates for a multi-table query.
+- `sql_query_table`: runs the model's targeted SQL (sqlite dialect) against one csv table, loaded as `data` in a throwaway in-memory database; related csv tables can be loaded for JOINs via `table_relationships` (alias -> source id). At most 5 result rows are returned. The only tool that reads table data.
+- `sql_query_documents`: read-only SELECT over the chunk and document records, bounded to the chat.
 
 The system prompt's tools section is generated from the tool definitions (`tools_outline()`), so the prompt can never list a tool the agent does not have or miss one it does. The agent answers only from tool output; the prompt tells it to cite factual claims as `#[source_id:chunk_id]` using the source and chunk ids the search tool returns (the citation format is owned by the agent service, the tools do not know about it). When the answer is done, those references are parsed out of the answer text: `RagAnswer.chunk_refs` holds exactly the chunks the answer cites (keyed by `#[source_id:chunk_id]`), not everything it retrieved along the way.
 
 **Streaming.** The LLM providers stream natively, and the run is forwarded as events: a token event per streamed token, a tool-call event per tool the model requests, a tool-result event per result, and a final answer event. `POST /rag/answer/stream` serves these as server-sent events (`answer_delta` frames as the answer types out, `tool_call` / `tool_result` frames while the agent works, then a final `answer` frame with the full answer JSON).
 
-**Conversation.** Both answer endpoints take a JSON body `{"query": ..., "history": [...]}`. The prior turns (oldest first) are placed between the system prompt and the current question, so follow-ups resolve against the earlier conversation. The server stays stateless; the memory belongs to the caller.
+**Conversation.** The conversation lives in the chat, not in the request: each chat is a durable thread on the agent's checkpointer, so follow-ups resolve against earlier turns even after a server restart (see [Users and Chats](#users-and-chats)).
 
 The layers, so each concern has one home:
 
 - `app/services/rag_agent.py`: the `RagAgentService`. It takes the RAG service and the tools at initialization, owns the orchestration graph and the run events, composes a fresh run per answer, parses the answer's `chunk_refs` from its citations, and exposes `ask()` and `ask_stream()`.
 - `app/agent_tools/`: the RAG tools, one module each (an `AgentTool` subclass per tool).
 - `app/api/rag_agent.py`: the answer endpoints.
+
+## Users and Chats
+
+### Authentication
+
+A small, self-contained auth domain (its own service, tables, and API module, decoupled from the RAG services):
+
+- `POST /auth/register` with `{"username", "password"}` creates a user (passwords stored as bcrypt hashes).
+- `POST /auth/login` verifies the credentials and returns an opaque bearer `token` (stored as a bcrypt hash, looked up by a unique token prefix).
+- `GET /auth/me` returns the user a token belongs to.
+
+The RAG and chat endpoints require `Authorization: Bearer <token>` (the `require_user` dependency in `app/api/auth.py` is the only seam between the auth domain and the rest of the API).
+
+### Chats
+
+A chat is a user's working space, and the unit of both the corpus and the conversation:
+
+- **Ownership and auto-creation.** Every RAG endpoint takes an optional `chat_id`; without one, a chat is created for the calling user, and the response returns the id. Using someone else's chat id is a 403.
+- **Corpus scope.** Ingesting into a chat stamps the chat id onto the file's records and its chunks (and the chunks' vector metadata), so retrieval is bounded to the chat natively: the vector leg filters the index by chat and the lexical leg filters the SQL rows. No chat id means the whole store. A fresh chat has an empty corpus.
+- **Conversation thread.** The chat id is the agent's langgraph thread id. The graph runs on a checkpointer (durable SQLite via `langgraph-checkpoint-sqlite`, in `AGENT_LOCAL_STORAGE_DIR`, `.storage/agent` by default), so a conversation's messages persist across questions and server restarts. `GET /chats` lists a user's chats (with their ingested sources, derived from the documents table) so they can go back to an old one; `POST /chats` starts a new one explicitly; `GET /chats/{chat_id}/messages` returns the conversation history (user and assistant turns) read from the checkpointer.
+- **Resume.** If a run stops before answering (for example the process dies), the next ask on that chat resumes from the checkpoint instead of starting over.
 
 ## Plugin Lifecycle
 
@@ -356,9 +387,9 @@ Each reassembled table is emitted as a CSV with a header row (generated `col_N` 
 
 ### `app/agent_tools`
 
-The RAG agent's tools, plugin-style: one module per tool (`search_documents.py`, `list_tables.py`, `inspect_table.py`, `query_table.py`, `query_chunks.py`), plus `base.py` (the `AgentTool` base class and the `RagServiceView` protocol its executor receives) and `common.py` (the shared table-resolution and schema helpers).
+The RAG agent's tools, plugin-style: one module per tool (`search_documents.py`, `inspect_table.py`, `inspect_table_relationships.py`, `sql_query_table.py`, `sql_query_documents.py`), plus `base.py` (the `AgentTool` base class) and `common.py` (the shared table-resolution, csv loading, and schema-formatting helpers). The tools are decoupled from the plugins: they only know the `rag_service` (and the `chat_id`), and treat a stored chunk as a table when its metadata carries a schema.
 
-`AgentTool` declares the tool's `name`, `description`, and `parameters` (the JSON schema the model sees) and implements `create_executor(rag_service)`, which returns the async execute function the agent uses (a closure over the RAG service pieces it needs; the RAG service exposes its collaborators as public properties for this). Tools are read-only and token-lean: `inspect_table` reads the schema/shape from chunk metadata (no file read; the description lives in the chunk text), and `query_table` reads only the target sheet and caps output at 100 rows. `tools_outline()` renders the set as the system prompt's tools section.
+`AgentTool` declares the tool's `name`, `description`, and `parameters` (the JSON schema the model sees) and implements `create_executor(rag_service, chat_id)`, which returns the async execute function the agent uses (a closure over the RAG service pieces it needs; the RAG service exposes its collaborators as public properties for this). Tools are read-only and token-lean: `inspect_table` returns a table's stored metadata with no data read, and `sql_query_table` loads only csv tables (the main one as `data`, plus any `table_relationships` for JOINs) into a throwaway database and caps output at 5 rows. `tools_outline()` renders the set as the system prompt's tools section.
 
 ### `app/plugin`
 
@@ -386,25 +417,38 @@ It asks the LLM for one workbook-level pass that produces retrieval-optimized de
 - **searchable text**: the table name, workbook context, the table's description, and a small sample of its rows.
 - **metadata**: `table_name`, the precomputed `schema` (column names and inferred types), `row_count`, and `column_count`. For tables embedded in a parent document, the metadata also carries the `source_page_number` inherited from the parent's chunks. The description is not duplicated into the metadata; it is already in the text.
 
-Storing the schema is what lets the agent inspect and query a table without reading its file. The table data itself stays a file (the uploaded spreadsheet, or the emitted CSV for embedded tables), linked from the chunk record; the agent reads it through `query_table`. The plugin does not emit or store any file of its own, and table rows are not loaded into SQL at ingestion.
+Storing the schema is what lets the agent inspect a table without reading its data. The table data itself stays a file (the uploaded spreadsheet, or the emitted CSV for embedded tables), linked from the chunk record. The agent reads it through `sql_query_table`, which is csv-only: a directly ingested csv or an embedded table's emitted csv is queryable (and joinable via `inspect_table_relationships`), while a multi-sheet workbook's sheets are inspectable through their shared source but not directly queryable. The plugin does not emit or store any file of its own, and table rows are not loaded into SQL at ingestion.
 
 ### `app/api`
 
-Contains the FastAPI HTTP routes, split by service: the RAG routes (ingest/retrieve) in `rag.py`, the agent routes (answer) in `agent.py`.
+Contains the FastAPI HTTP routes, split by domain: auth in `auth.py` (which also holds the `require_user` dependency), chats in `chats.py`, the RAG routes (ingest/retrieve) in `rag.py`, and the answer routes in `rag_agent.py`. The RAG and chat routes require the Bearer token; every RAG route takes an optional `chat_id` (created automatically when absent) and returns it.
+
+#### `app/api/auth.py`
+
+- `POST /auth/register`: creates a user.
+- `POST /auth/login`: verifies credentials, returns a bearer token.
+- `GET /auth/me`: the user a token belongs to.
+- `require_user`: the FastAPI dependency the other routers use for authentication.
+
+#### `app/api/chats.py`
+
+- `GET /chats`: the caller's chats (with their ingested sources) — how a user goes back to an old chat.
+- `POST /chats`: starts a new chat explicitly.
+- `GET /chats/{chat_id}/messages`: the chat's conversation history (user and assistant turns), read from the agent's checkpointer.
 
 #### `app/api/rag.py`
 
 Contains the RAG endpoints, backed by the `RagService`:
 
-- `/rag/ingest`: uploads and ingests a document. The endpoint is the only place that touches FastAPI's `UploadFile`; it reads the upload and hands the plain bytes, filename, and content type to the RAG service, which builds the `IngestionFile`.
-- `/rag/retrieve`: retrieves relevant chunks without generating a final answer.
+- `/rag/ingest`: uploads and ingests a document (the only place that touches FastAPI's `UploadFile`); ingestion stamps the chat id onto the file and its chunks, and the response returns the `chat_id` with the chunks.
+- `/rag/retrieve`: retrieves relevant chunks bounded to the chat's corpus.
 
 #### `app/api/rag_agent.py`
 
-Contains the answer endpoints, backed by the `RagAgent` service:
+Contains the answer endpoints, backed by the `RagAgentService`:
 
-- `/rag/answer`: JSON body `{"query", "history"}`; generates the final LLM answer for the question plus its prior conversation.
-- `/rag/answer/stream`: the same body; the agent run as a server-sent event stream (an `answer_delta` frame per streamed token, a `tool_call` frame per tool it requests, a `tool_result` frame per result it reads, and one final `answer` frame carrying the JSON `RagAnswer`).
+- `/rag/answer`: JSON body `{"query", "chat_id"}`; the answer for the question on that chat's conversation thread and retrieval scope.
+- `/rag/answer/stream`: the same body; a `chat` frame naming the chat, then the agent run as a server-sent event stream (an `answer_delta` frame per streamed token, a `tool_call` frame per tool it requests, a `tool_result` frame per result it reads, and one final `answer` frame carrying the JSON `RagAnswer`).
 
 ### `app/api_schemas`
 
@@ -414,12 +458,12 @@ Contains Pydantic models used specifically at the API boundary. These are separa
 
 Application-wide configuration and core infrastructure.
 
-- `app/core/config.py` - settings (API keys, model names, storage paths, collection names).
+- `app/core/config.py` - settings (API keys, model names, storage paths, collection names, the auth/chat table names, and the agent storage directory).
 - `app/core/exceptions.py` - exception handlers registered on the FastAPI app.
 
 ### `app/errors`
 
-Domain-specific errors (`InvalidDocumentError` for unsupported/invalid uploads).
+Domain-specific errors: `InvalidDocumentError` for unsupported/invalid uploads, `UserExistsError` / `AuthError` for auth, and `ChatNotFoundError` / `ChatForbiddenError` for chats. `app/core/exceptions.py` maps them to HTTP status codes (409, 401, 404, 403).
 
 ### `app/llm`
 
@@ -436,34 +480,36 @@ Domain-specific errors (`InvalidDocumentError` for unsupported/invalid uploads).
 
 ### `app/retrievers`
 
-- `app/retrievers/base.py` - the `Retriever` interface.
-- `app/retrievers/vector.py` - dense retrieval via Chroma, re-loading chunk records from SQL.
-- `app/retrievers/sparse.py` - lexical retrieval via FTS5.
+- `app/retrievers/base.py` - the `Retriever` interface (`retrieve(user_query, chat_id=None)`).
+- `app/retrievers/vector.py` - dense retrieval via Chroma (bounded to a chat through the stored `chat_id` vector metadata), re-loading chunk records from SQL.
+- `app/retrievers/sparse.py` - lexical retrieval via FTS5 (bounded to a chat with a SQL filter).
 - `app/retrievers/hybrid.py` - runs retrievers concurrently and merges rankings with RRF.
 
 ### `app/models`
 
 Internal application models.
 
-- `app/models/chunk.py` - `IngestedChunk` and `RetrievedChunk`. Both carry `plugin` (the name of the plugin that produced the chunk), which is how retrieval routes chunks back to their finalizer.
+- `app/models/chunk.py` - `IngestedChunk` and `RetrievedChunk`. Both carry `plugin` (the name of the plugin that produced the chunk), which is how retrieval routes chunks back to their finalizer; `RetrievedChunk` also carries `chat_id` (the chat the chunk was ingested into).
 - `app/models/rag.py` - `RagAnswer` (query, answer, and `chunk_refs`: the chunks the answer cites, keyed by `#[source_id:chunk_id]`).
 - `app/models/stream.py` - `StreamEvent`: the neutral item the answer stream yields (a wire event name plus a payload), so the API never sees the agent's event types.
 - `app/models/vector.py` - `VectorSearchResult`.
 
 ### `app/services`
 
-- `app/services/ingestion.py` - the pipeline driver: offers each file to all plugins, builds context/runtime, runs `on_ingestion_process` on every plugin, persists everything (source files, chunk records, vectors), and re-ingests emitted files.
-- `app/services/retrieval.py` - runs the hybrid retriever and runs `on_retrieval_finalize` on every plugin for each chunk.
-- `app/services/rag.py` - the wrapper for ingestion and retrieval. It builds the `PluginRegistry` from the `plugins` option and the ingestion and retrieval services (which take the registry) from the collaborators it is given, and exposes those collaborators (plus `llm` and `embedder`) as public properties so the agent's tools can use them. `initialize()` creates the system tables at startup; `ingest(file_bytes, filename, content_type, description=None)` builds the `IngestionFile` and delegates; `retrieve` returns evidence.
-- `app/services/rag_agent.py` - the `RagAgentService`: takes the RAG service and the tools at initialization, builds the orchestration graph, and owns the run's events, the system prompt (a template whose tools section is generated from the tool definitions via `tools_outline`), the citation format (`CHUNK_REF_PATTERN`, `extract_chunk_refs`: the single source of truth for `#[source_id:chunk_id]`), the parsing of each answer's `chunk_refs` from its citations, and the translation of a run into neutral `StreamEvent`s. `ask()` returns the `RagAnswer`; `ask_stream()` yields the run ending with it.
+- `app/services/auth.py` - the auth domain (decoupled from the RAG services; needs only SQL storage): `register`, `login` (bcrypt-hashed passwords, opaque hashed tokens), and `verify_token`.
+- `app/services/chat.py` - user chats: `get_or_create` (ownership-checked), `create`, `username_of`, and `list_chats` (a chat's ingested sources are derived from the documents table, so there is no separate bookkeeping).
+- `app/services/ingestion.py` - the pipeline driver: offers each file to all plugins, builds context/runtime (carrying the chat id), runs `on_ingestion_process` on every plugin, persists everything (source files, chunk records, vectors) stamped with the chat id, and re-ingests emitted files.
+- `app/services/retrieval.py` - runs the hybrid retriever (bounded to a chat when given) and runs `on_retrieval_finalize` on every plugin for each chunk.
+- `app/services/rag.py` - the wrapper for ingestion and retrieval. It builds the `PluginRegistry` from the `plugins` option and the ingestion and retrieval services (which take the registry) from the collaborators it is given, and exposes those collaborators as public properties so the agent's tools can use them. `initialize()` creates the system tables at startup; `ingest(file_bytes, filename, content_type, description=None, chat_id=None)` builds the `IngestionFile` and delegates, returning the origin source id with the chunks; `retrieve(user_query, chat_id=None)` returns evidence bounded to that chat's chunks when given.
+- `app/services/rag_agent.py` - the `RagAgentService`: takes the RAG service and the tools at initialization, and owns the orchestration graph (built on a checkpointer, one thread per chat), the per-run chat scoping, the run's events, `chat_history` (a chat's conversation read from the checkpointer), the system prompt (a template whose tools section is generated from the tool definitions via `tools_outline`), the citation format (`CHUNK_REF_PATTERN`, `extract_chunk_refs`: the single source of truth for `#[source_id:chunk_id]`), and the translation of a run into neutral `StreamEvent`s. `ask(question, chat_id=)` returns the `RagAnswer`; `ask_stream(...)` yields the run ending with it; interrupted runs resume from their checkpoint.
 
 ### `app/store_file`, `app/store_sql`, `app/store_vector`
 
 Storage abstractions and local implementations:
 
 - `FileStorage` - upload/delete/read files. Local implementation stores everything under `.storage/file/documents/`: the original user uploads (`is_origin = True` in `__documents__`) and every file a plugin emits (`is_origin = False`). Each file is stored exactly once, when it goes through ingestion; there is no separate chunk-file storage.
-- `SqlStorage` - tables, upserts, read-only queries, FTS5 search. Local implementation is one SQLite database (`.storage/sqlite/spreadsheets.sqlite3/database.db`) holding the `__chunks__` and `__documents__` system tables.
-- `VectorStorage` - stores chunk IDs + embeddings, cosine search. Local implementation is a persistent Chroma collection.
+- `SqlStorage` - tables, upserts, read-only queries, FTS5 search (with an optional chat filter). Local implementation is one SQLite database holding the `__chunks__` and `__documents__` system tables (both carry a `chat_id` column). `ensure_table` also migrates existing tables by adding declared columns they are missing.
+- `VectorStorage` - stores chunk IDs + embeddings (+ optional metadata, for example the chat id), cosine search with an optional metadata filter. Local implementation is a persistent Chroma collection.
 
 ### `app/utils`
 
@@ -472,7 +518,7 @@ Storage abstractions and local implementations:
 
 ### `app/container.py`
 
-The composition root for the external collaborators. It builds the providers, storages, retrievers, and built-in plugins, then composes the `RagService` wrapper (which gets the plugins through its `plugins` option) and the `RagAgent` (which gets the RAG service and the RAG tools). It also exposes the FastAPI lifespan (`rag_service.initialize()`, storage shutdown). The pipeline internals (the plugin registry and the ingestion/retrieval services) are composed inside the `RagService`.
+The composition root for the external collaborators. It builds the providers, storages, retrievers, and built-in plugins, then composes the services: `AuthService` and `ChatService` (which get SQL storage), the `RagService` wrapper (which gets the plugins through its `plugins` option), and the `RagAgentService` (which gets the RAG service, the RAG tools, and the agent storage directory its checkpoint database lives in). It also exposes the FastAPI lifespan (initializing all system tables, closing the agent checkpoint database and the SQL and vector databases on shutdown). The pipeline internals (the plugin registry and the ingestion/retrieval services) are composed inside the `RagService`.
 
 ## Design Principles
 
@@ -482,9 +528,10 @@ The composition root for the external collaborators. It builds the providers, st
 - **Context and runtime, not globals.** Lifecycle methods receive everything they need per run: a read-only context (document details) plus a runtime (shared services such as the LLM, embedder, and storages, and `emit_file`). Plugin constructors take options only, never services.
 - **Decoupled stores and providers.** Storage and AI providers sit behind small interfaces (`FileStorage`, `SqlStorage`, `VectorStorage`, `LLMProvider`, `Embedder`).
 - **Native LLM capabilities, no silent fallbacks.** Both providers assume the model natively supports tool calling, structured outputs (JSON schema), and vision. There is no degraded prompt-based path: if the model or endpoint cannot comply, the error propagates to the caller.
-- **The wrappers compose, the container injects.** The container supplies the external collaborators (LLM, embedder, retriever, storages, plugins) and composes the services from them. `RagService` composes the ingestion/retrieval internals (the plugin registry and its two services), and `RagAgent` composes the answering agent (the RAG service plus the tools passed in at initialization). The API layer only ever talks to the services.
-- **The agent is part of the RAG service layer, and its tools are plugins.** The orchestration graph, the run events, and the system prompt live in `app/services/rag_agent.py`. Tools are `AgentTool` subclasses in `app/agent_tools/`, passed to `RagAgent` at initialization; each tool's executor is created per answer with the RAG service (whose public properties expose `llm`, `embedder`, `retriever`, and the storages). The RAG service itself never builds the agent, and the API consumes neutral `StreamEvent`s. Adding a tool means adding one `AgentTool` subclass and one line in the container; adding a document type still touches only `app/plugins/`.
-- **Tables are queried, not read.** A table's schema and shape are computed at ingestion and stored in its chunk metadata (the description stays in the chunk's text), so the agent inspects a table from metadata (no file read) and writes targeted SQL for `query_table`. Whole tables are never loaded into or returned to the model.
+- **The wrappers compose, the container injects.** The container supplies the external collaborators (LLM, embedder, retriever, storages, plugins) and composes the services from them. `AuthService` and `ChatService` are standalone (they need only SQL storage); `RagService` composes the ingestion/retrieval internals (the plugin registry and its two services); `RagAgentService` composes the answering agent (the RAG service plus the tools passed in at initialization). The API layer only ever talks to the services.
+- **Chats scope the data.** Everything a user does happens in a chat: ingestion stamps the chat id onto the file's records, chunks, and vector metadata, retrieval and the agent's tools are bounded to the chat natively (at the index, not by post-filtering), and the conversation is the chat's checkpointed thread. Auth is a separate domain (its own service, tables, and API module) that the other routers reach only through the `require_user` dependency.
+- **The agent is part of the RAG service layer, and its tools are plugins.** The orchestration graph, the run events, and the system prompt live in `app/services/rag_agent.py`. Tools are `AgentTool` subclasses in `app/agent_tools/`, passed to `RagAgentService` at initialization; each tool's executor is created per answer with the RAG service and the chat id. The RAG service itself never builds the agent, and the API consumes neutral `StreamEvent`s. Adding a tool means adding one `AgentTool` subclass and one line in the container; adding a document type still touches only `app/plugins/`.
+- **Tables are queried, not read.** A table's schema and shape are computed at ingestion and stored in its chunk metadata (the description stays in the chunk's text), so the agent inspects a table from metadata (no data read) and writes targeted SQL for `sql_query_table` (csv tables only, joinable via `table_relationships`). Whole tables are never dumped into the model's context; at most a handful of result rows are returned.
 - **Text and images to the LLM, nothing else.** Messages carry text and image parts (vision); no other binary attachments anywhere in the pipeline.
 
 ## Tests
@@ -495,7 +542,7 @@ The test suite lives in `tests/` and runs with:
 python -m pytest tests
 ```
 
-It exercises the plugin lifecycle, both built-in plugins, the ingestion and retrieval pipelines end to end (with real local storage and stubbed external calls), the LLM strategies, and the RAG agent (tools, the tool-calling loop, streaming, and citation parsing) with scripted fake LLMs.
+It exercises the auth and chat services (against real local SQLite), the plugin lifecycle, both built-in plugins, the ingestion and retrieval pipelines end to end (with real local storage and stubbed external calls), chat-scoped retrieval and tools, the LLM strategies, and the RAG agent (tools, the tool-calling loop, streaming, citation parsing, and chat continuity/resume on a checkpointer) with scripted fake LLMs.
 
 ## Extending the Application
 

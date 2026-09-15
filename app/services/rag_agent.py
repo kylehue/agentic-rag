@@ -349,7 +349,6 @@ Tools:
 
 Rules:
 - Answer only from what the tools return. If the evidence is insufficient, say so plainly.
-- For tabular data, derive your SQL from the table's description (in the chunk text the search tools return) and its schema (inspect a table's schema before querying it), then compute with SQL instead of estimating from sample rows or reading whole tables.
 - Keep tool output lean: fetch only what the question needs.
 - Cite factual claims as #[source_id:chunk_id].
 - Keep the answer concise and direct.

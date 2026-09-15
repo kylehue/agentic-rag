@@ -3,11 +3,11 @@ import asyncio
 import pytest
 
 from app.agent_tools import (
+    InspectTableRelationshipsTool,
     InspectTableTool,
-    ListTablesTool,
-    QueryChunksTool,
-    QueryTableTool,
     SearchDocumentTool,
+    SqlQueryDocumentsTool,
+    SqlQueryTableTool,
 )
 from app.llm.base import RawResult, ToolCall
 from app.models.chunk import RetrievedChunk
@@ -29,10 +29,10 @@ FULL_ANSWER = "The garden plan is in the report."
 
 RAG_TOOLS = [
     SearchDocumentTool(),
-    ListTablesTool(),
     InspectTableTool(),
-    QueryTableTool(),
-    QueryChunksTool(),
+    InspectTableRelationshipsTool(),
+    SqlQueryTableTool(),
+    SqlQueryDocumentsTool(),
 ]
 
 
@@ -108,22 +108,22 @@ def test_ask_answers_without_tools_when_none_are_requested():
 def test_ask_executes_several_tool_rounds():
     calls: list = []
     llm = FakeLLM(
-        tool_call_response("list_tables"),
-        tool_call_response("query_table", {"source_id": "tbl-src", "sql": "SELECT 1"}),
+        tool_call_response("inspect_table", {"source_id": "tbl-src"}),
+        tool_call_response("sql_query_table", {"source_id": "tbl-src", "sql": "SELECT 1"}),
         RawResult(content="The total is 35."),
     )
     agent = make_agent(
         llm,
         [
-            make_tool("list_tables", "one table: sales", calls),
-            make_tool("query_table", "total is 35", calls),
+            make_tool("inspect_table", "columns: region, amount", calls),
+            make_tool("sql_query_table", "total is 35", calls),
         ],
     )
 
     result = asyncio.run(agent.ask("total?", chat_id="s1"))
 
     assert result.answer == "The total is 35."
-    assert [name for name, _ in calls] == ["list_tables", "query_table"]
+    assert [name for name, _ in calls] == ["inspect_table", "sql_query_table"]
 
 
 def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
@@ -132,8 +132,8 @@ def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
         RawResult(
             content="",
             tool_calls=(
-                ToolCall(id="c1", name="list_tables", arguments={}),
-                ToolCall(id="c2", name="inspect_table", arguments={"source_id": "tbl-src"}),
+                ToolCall(id="c1", name="inspect_table", arguments={"source_id": "tbl-src"}),
+                ToolCall(id="c2", name="inspect_table_relationships", arguments={"source_id": "tbl-src"}),
             ),
         ),
         RawResult(content="Done."),
@@ -141,8 +141,8 @@ def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
     agent = make_agent(
         llm,
         [
-            make_tool("list_tables", "one table: sales", calls),
             make_tool("inspect_table", "columns: region, amount", calls),
+            make_tool("inspect_table_relationships", "no siblings", calls),
         ],
     )
 
@@ -150,18 +150,24 @@ def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
 
     assert result.answer == "Done."
     # Both calls of the one round executed...
-    assert [name for name, _ in calls] == ["list_tables", "inspect_table"]
+    assert [name for name, _ in calls] == [
+        "inspect_table",
+        "inspect_table_relationships",
+    ]
     # ...and only two LLM calls happened: the round, then the final answer.
     assert len(llm.calls) == 2
     # Both results were fed back in call order before the final call.
     tool_results = [m for m in llm.calls[1] if m.role == "tool"]
     assert [str(m.content) for m in tool_results] == [
-        "one table: sales",
         "columns: region, amount",
+        "no siblings",
     ]
     # The budget was not exhausted, so the final call still offered the
     # tools; the model simply chose to answer.
-    assert [spec.name for spec in llm.tools[1]] == ["list_tables", "inspect_table"]
+    assert [spec.name for spec in llm.tools[1]] == [
+        "inspect_table",
+        "inspect_table_relationships",
+    ]
 
 
 def test_ask_stops_at_the_tool_budget():
@@ -325,10 +331,10 @@ def test_system_prompt_is_built_from_the_tools_outline():
     assert "Tools:" in system_prompt
     for name in (
         "search_documents",
-        "list_tables",
         "inspect_table",
-        "query_table",
-        "query_chunks",
+        "inspect_table_relationships",
+        "sql_query_table",
+        "sql_query_documents",
     ):
         assert f"`{name}`" in system_prompt
     assert "Parameters: query (string, required)" in system_prompt
@@ -418,8 +424,8 @@ def test_ask_stream_parallel_calls_yield_every_step_in_order():
         RawResult(
             content="",
             tool_calls=(
-                ToolCall(id="c1", name="list_tables", arguments={}),
-                ToolCall(id="c2", name="inspect_table", arguments={"source_id": "tbl-src"}),
+                ToolCall(id="c1", name="inspect_table", arguments={"source_id": "tbl-src"}),
+                ToolCall(id="c2", name="inspect_table_relationships", arguments={"source_id": "tbl-src"}),
             ),
         ),
         RawResult(content="Done."),
@@ -427,8 +433,8 @@ def test_ask_stream_parallel_calls_yield_every_step_in_order():
     agent = make_agent(
         llm,
         [
-            make_tool("list_tables", "one table: sales"),
             make_tool("inspect_table", "columns: region, amount"),
+            make_tool("inspect_table_relationships", "no siblings"),
         ],
     )
 
@@ -437,16 +443,23 @@ def test_ask_stream_parallel_calls_yield_every_step_in_order():
     )
 
     assert items[:5] == [
-        StreamEvent("tool_call", {"name": "list_tables", "arguments": {}}),
         StreamEvent(
             "tool_call", {"name": "inspect_table", "arguments": {"source_id": "tbl-src"}}
         ),
         StreamEvent(
-            "tool_result", {"name": "list_tables", "content": "one table: sales"}
+            "tool_call",
+            {
+                "name": "inspect_table_relationships",
+                "arguments": {"source_id": "tbl-src"},
+            },
         ),
         StreamEvent(
             "tool_result",
             {"name": "inspect_table", "content": "columns: region, amount"},
+        ),
+        StreamEvent(
+            "tool_result",
+            {"name": "inspect_table_relationships", "content": "no siblings"},
         ),
         StreamEvent("answer_delta", {"content": "Done."}),
     ]

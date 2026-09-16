@@ -72,9 +72,9 @@ async def ingest_stream(job_id: str, user: str = Depends(require_user)):
     frame). Late subscribers replay the frames already emitted.
     """
     job = rag_service.get_ingest_job(job_id)
-    if job is None:
+    if job is None or job.group is None:
         raise HTTPException(status_code=404, detail="Ingest job not found.")
-    owner = await chat_service.username_of(job.chat_id)
+    owner = await chat_service.username_of(job.group)
     if owner != user:
         raise HTTPException(status_code=403, detail="Not your ingest job.")
 
@@ -106,7 +106,7 @@ async def list_ingest_jobs(
             IngestJobInfoSchema(
                 job_id=job.job_id,
                 status=job.status,
-                files=[f.filename for f in job.files],
+                files=[f.filename for f in job.payload],
                 created_at=job.created_at,
                 events=[
                     IngestJobEventSchema(name=event.name, payload=event.payload)

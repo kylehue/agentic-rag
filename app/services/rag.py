@@ -3,10 +3,14 @@ from collections.abc import Sequence
 from app.core.config import settings
 from app.embedders.base import Embedder
 from app.ingest.events import ProgressEmitter
-from app.ingest.queue import IngestJob, IngestQueue
 from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk, RetrievedChunk
-from app.models.ingest import INGEST_DONE, IngestEvent
+from app.models.ingest import (
+    INGEST_CHAT,
+    INGEST_DONE,
+    INGEST_ERROR,
+    INGEST_TERMINAL,
+)
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionFile
 from app.plugin.registry import PluginRegistry
@@ -16,6 +20,8 @@ from app.services.retrieval import RetrievalService
 from app.store_file.base import FileStorage
 from app.store_sql.base import SqlStorage
 from app.store_vector.base import VectorStorage
+from app.utils.events import Event, EventBus
+from app.utils.queue import Job, JobQueue
 
 
 class RagService:
@@ -54,10 +60,15 @@ class RagService:
             registry=registry,
         )
         # Background ingest queue: ingest requests are enqueued here and run
-        # on a worker pool, reporting progress through each job's events.
-        self._ingest_queue = IngestQueue(
+        # on a worker pool, reporting progress through each job's events. The
+        # queue is the generic app/utils JobQueue; the ingest-specific bits
+        # (the event names, the per-job bus terminal set, the error event) are
+        # supplied here.
+        self._ingest_queue = JobQueue(
             process_job=self._process_ingest_job,
+            events=lambda: EventBus(terminal=INGEST_TERMINAL),
             workers=settings.INGEST_WORKERS,
+            error_event=lambda exc: Event(name=INGEST_ERROR, payload={"error": str(exc)}),
         )
 
     @property
@@ -116,35 +127,42 @@ class RagService:
         """Stop the ingest worker pool (called at application shutdown)."""
         await self._ingest_queue.stop()
 
-    def enqueue_ingest(self, files: Sequence[IngestionFile], chat_id: str) -> IngestJob:
+    def enqueue_ingest(self, files: Sequence[IngestionFile], chat_id: str) -> Job:
         """Queue one or more files for background ingestion into `chat_id`
         and return the job (its id addresses the progress stream)."""
-        return self._ingest_queue.enqueue(chat_id, files)
+        job = self._ingest_queue.enqueue(payload=files, group=chat_id)
+        # Ingest-specific start events (the generic queue emits none).
+        job.events.publish(Event(name=INGEST_CHAT, payload={"chat_id": chat_id}))
+        emitter = ProgressEmitter(job.events)
+        for position, file in enumerate(job.payload):
+            emitter.queued(file.filename, position)
+        return job
 
-    def get_ingest_job(self, job_id: str) -> IngestJob | None:
+    def get_ingest_job(self, job_id: str) -> Job | None:
         """A queued/running/finished ingest job, or None."""
         return self._ingest_queue.get(job_id)
 
-    def list_ingest_jobs(self, chat_id: str) -> list[IngestJob]:
+    def list_ingest_jobs(self, chat_id: str) -> list[Job]:
         """The ingest jobs for a chat (queued, running, and finished), each
         carrying its buffered progress events."""
-        return self._ingest_queue.jobs_for_chat(chat_id)
+        return self._ingest_queue.jobs(group=chat_id)
 
-    async def _process_ingest_job(self, job: IngestJob) -> None:
+    async def _process_ingest_job(self, job: Job) -> None:
         """The worker's job: ingest each file (reporting progress) then mark
         the job done."""
+        files = job.payload
         emitter = ProgressEmitter(job.events)
         total_chunks = 0
-        for file in job.files:
+        for file in files:
             emitter.started(file.filename)
-            chunks = await self._ingestion_service.ingest(file, job.chat_id, emitter)
+            chunks = await self._ingestion_service.ingest(file, job.group, emitter)
             total_chunks += len(chunks)
             emitter.file_done(file.filename, len(chunks))
         job.events.publish(
-            IngestEvent(
+            Event(
                 name=INGEST_DONE,
                 payload={
-                    "files": [file.filename for file in job.files],
+                    "files": [file.filename for file in files],
                     "total_chunks": total_chunks,
                 },
             )

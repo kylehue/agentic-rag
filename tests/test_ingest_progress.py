@@ -1,21 +1,18 @@
 import asyncio
 import json
 
-from app.ingest.events import JobEvents, ProgressEmitter
-from app.retrievers.base import Retriever
-from app.ingest.queue import IngestQueue
-from app.models.ingest import (
-    INGEST_DONE,
-    INGEST_ERROR,
-    IngestEvent,
-)
+from app.ingest.events import ProgressEmitter
+from app.models.ingest import INGEST_TERMINAL
 from app.plugin.context import IngestionFile
 from app.plugin.registry import PluginRegistry
 from app.plugins.table import TablePlugin
+from app.retrievers.base import Retriever
 from app.services.ingestion import IngestionService
 from app.services.rag import RagService
 from app.store_file.local import LocalFileStorage
 from app.store_sql.local import LocalSqlStorage
+from app.utils.events import Event, EventBus
+from app.utils.queue import JobQueue
 
 from fakes import FakeEmbedder, FakeLLM, FakeVectorStorage
 
@@ -24,6 +21,7 @@ ANALYSIS = {
     "tables": [{"index": 0, "description": "Sales per region."}],
 }
 CSV_BYTES = b"region,amount\nnorth,10\nsouth,25\n"
+TERMINAL = frozenset({"done", "error"})
 
 
 class NoopRetriever(Retriever):
@@ -35,13 +33,22 @@ def make_file(name="sales.csv", content=CSV_BYTES, ctype="text/csv"):
     return IngestionFile(filename=name, content_type=ctype, file_bytes=content)
 
 
-# --- JobEvents bus ---
+def make_queue(process, *, terminal=TERMINAL, error_name="error"):
+    return JobQueue(
+        process_job=process,
+        events=lambda: EventBus(terminal=terminal),
+        workers=1,
+        error_event=lambda exc: Event(name=error_name, payload={"error": str(exc)}),
+    )
 
 
-def test_job_events_replay_then_live_tail():
-    events = JobEvents()
-    events.publish(IngestEvent(name="queued", payload={"file": "a", "position": 0}))
-    events.publish(IngestEvent(name="started", payload={"file": "a"}))
+# --- EventBus bus (generic) ---
+
+
+def test_event_bus_replay_then_live_tail():
+    events = EventBus(terminal=TERMINAL)
+    events.publish(Event(name="queued", payload={"file": "a", "position": 0}))
+    events.publish(Event(name="started", payload={"file": "a"}))
 
     async def flow():
         received = []
@@ -52,8 +59,8 @@ def test_job_events_replay_then_live_tail():
 
         task = asyncio.create_task(sub())
         await asyncio.sleep(0)  # let the subscriber register
-        events.publish(IngestEvent(name="file_done", payload={"file": "a"}))
-        events.publish(IngestEvent(name="done", payload={"files": ["a"]}))
+        events.publish(Event(name="file_done", payload={"file": "a"}))
+        events.publish(Event(name="done", payload={"files": ["a"]}))
         await asyncio.wait_for(task, timeout=1)
         return received
 
@@ -61,10 +68,10 @@ def test_job_events_replay_then_live_tail():
     assert asyncio.run(flow()) == ["queued", "started", "file_done", "done"]
 
 
-def test_job_events_finished_before_subscribe_replays_all():
-    events = JobEvents()
-    events.publish(IngestEvent(name="chat", payload={"chat_id": "c"}))
-    events.publish(IngestEvent(name="done", payload={"files": [], "total_chunks": 0}))
+def test_event_bus_finished_before_subscribe_replays_all():
+    events = EventBus(terminal=TERMINAL)
+    events.publish(Event(name="chat", payload={"chat_id": "c"}))
+    events.publish(Event(name="done", payload={"files": [], "total_chunks": 0}))
 
     async def flow():
         return [event.name async for event in events.subscribe()]
@@ -72,10 +79,10 @@ def test_job_events_finished_before_subscribe_replays_all():
     assert asyncio.run(flow()) == ["chat", "done"]
 
 
-def test_job_events_error_is_terminal():
-    events = JobEvents()
-    events.publish(IngestEvent(name="started", payload={"file": "a"}))
-    events.publish(IngestEvent(name="error", payload={"error": "boom"}))
+def test_event_bus_error_is_terminal():
+    events = EventBus(terminal=TERMINAL)
+    events.publish(Event(name="started", payload={"file": "a"}))
+    events.publish(Event(name="error", payload={"error": "boom"}))
 
     async def flow():
         return [event.name async for event in events.subscribe()]
@@ -84,23 +91,21 @@ def test_job_events_error_is_terminal():
     assert events.finished
 
 
-# --- IngestQueue ---
+# --- JobQueue (generic) ---
 
 
-def test_ingest_queue_processes_a_job_and_records_events():
+def test_job_queue_processes_a_job_and_transitions_status():
     processed = []
 
     async def process(job):
         processed.append(job.job_id)
-        job.events.publish(
-            IngestEvent(name=INGEST_DONE, payload={"files": [], "total_chunks": 1})
-        )
+        job.events.publish(Event(name="done", payload={"total": 1}))
 
-    queue = IngestQueue(process_job=process, workers=1)
+    queue = make_queue(process)
 
     async def flow():
         await queue.start()
-        job = queue.enqueue("chat-1", [make_file()])
+        job = queue.enqueue(payload=[make_file()], group="chat-1")
         await queue.join()
         await queue.stop()
         return job
@@ -108,37 +113,53 @@ def test_ingest_queue_processes_a_job_and_records_events():
     job = asyncio.run(flow())
     assert processed == [job.job_id]
     assert job.status == "done"
-    names = [event.name for event in job.events.events]
-    # The chat frame leads, the queued frame follows, and done terminates.
-    assert names[0] == "chat"
-    assert "queued" in names
-    assert names[-1] == "done"
+    # The generic queue emits no domain events itself; only the processor's do.
+    assert [event.name for event in job.events.events] == ["done"]
 
 
-def test_ingest_queue_reports_an_error_when_processing_fails():
+def test_job_queue_reports_an_error_when_processing_fails():
     async def process(job):
         raise RuntimeError("boom")
 
-    queue = IngestQueue(process_job=process, workers=1)
+    queue = make_queue(process)
 
     async def flow():
         await queue.start()
-        job = queue.enqueue("chat-1", [make_file()])
+        job = queue.enqueue(payload=[make_file()], group="chat-1")
         await queue.join()
         await queue.stop()
         return job
 
     job = asyncio.run(flow())
     assert job.status == "error"
-    names = [event.name for event in job.events.events]
-    assert INGEST_ERROR in names
+    # The queue published the terminal error event with the exception message.
     assert any(
-        event.name == INGEST_ERROR and event.payload.get("error") == "boom"
+        event.name == "error" and event.payload.get("error") == "boom"
         for event in job.events.events
     )
 
 
-# --- pipeline + plugin events ---
+def test_job_queue_groups_jobs_by_group():
+    async def process(job):
+        job.events.publish(Event(name="done", payload={}))
+
+    queue = make_queue(process)
+
+    async def flow():
+        await queue.start()
+        a = queue.enqueue(payload="x", group="g1")
+        b = queue.enqueue(payload="y", group="g2")
+        await queue.join()
+        await queue.stop()
+        return a, b
+
+    a, b = asyncio.run(flow())
+    assert [job.job_id for job in queue.jobs(group="g1")] == [a.job_id]
+    assert [job.job_id for job in queue.jobs(group="g2")] == [b.job_id]
+    assert {job.job_id for job in queue.jobs()} == {a.job_id, b.job_id}
+
+
+# --- pipeline + plugin events (ingest layer) ---
 
 
 def _build_service(tmp_path, plugins):
@@ -159,7 +180,7 @@ def _build_service(tmp_path, plugins):
 
 def test_ingest_emits_pipeline_and_plugin_events(tmp_path):
     service, sql_storage = _build_service(tmp_path, [TablePlugin()])
-    events = JobEvents()
+    events = EventBus(terminal=INGEST_TERMINAL)
     emitter = ProgressEmitter(events)
 
     async def flow():
@@ -205,8 +226,6 @@ def test_ingest_without_emitter_emits_nothing(tmp_path):
 
 
 def test_rag_service_enqueue_and_process_emits_full_progress(tmp_path):
-    from app.services.rag import RagService
-
     sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
     file_storage = LocalFileStorage(storage_dir=tmp_path / "file")
     rag = RagService(
@@ -230,7 +249,7 @@ def test_rag_service_enqueue_and_process_emits_full_progress(tmp_path):
 
     job = asyncio.run(flow())
     names = [event.name for event in job.events.events]
-    # chat -> queued -> started -> stages -> file_done -> done
+    # The ingest layer emits chat -> queued -> started -> stages -> file_done -> done.
     assert names[0] == "chat"
     assert "queued" in names
     assert "started" in names
@@ -263,11 +282,11 @@ def test_list_ingest_jobs_returns_the_chats_jobs(tmp_path):
 
     jobs = rag.list_ingest_jobs("chat-1")
 
-    # Only chat-1's job, with its status, files, and buffered progress.
+    # Only chat-1's job, with its status, files (payload), and buffered progress.
     assert [job.job_id for job in jobs] == [job_a.job_id]
     assert jobs[0].status == "queued"
-    assert [f.filename for f in jobs[0].files] == ["a.txt"]
+    assert [f.filename for f in jobs[0].payload] == ["a.txt"]
     assert [event.name for event in jobs[0].events.events] == ["chat", "queued"]
-    # A finished chat's list is empty when it has no jobs.
+    # A chat with no jobs lists empty.
     assert rag.list_ingest_jobs("chat-3") == []
     assert all(job.job_id != job_b.job_id for job in jobs)

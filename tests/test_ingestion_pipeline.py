@@ -264,8 +264,8 @@ def test_csv_ingest_end_to_end(tmp_path):
     assert row["origin_source_id"] == row["source_id"]
     metadata = row["metadata"]
     # The plugin stored the name plus a precomputed schema (so the agent can
-    # use the table without reading the file); the description is not
-    # duplicated into the metadata — it is in the chunk's text. The service
+    # use the table without reading the file). The description is not
+    # duplicated into the metadata. It is in the chunk's text. The service
     # added no SQL rows, lineage, or file path. A top-level file has no
     # source page.
     assert metadata == {

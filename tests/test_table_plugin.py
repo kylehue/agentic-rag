@@ -76,7 +76,7 @@ def test_process_csv_returns_a_retrieval_chunk():
 
     # Metadata carries the name plus the precomputed schema, so the agent can
     # inspect and query the table without reading the file. The description is
-    # deliberately not duplicated here — it is already in the chunk's text.
+    # deliberately not duplicated here. It is already in the chunk's text.
     assert chunk.metadata == {
         "table_name": "sales",
         "schema": [

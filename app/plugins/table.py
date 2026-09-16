@@ -262,8 +262,8 @@ class TablePlugin(Plugin):
         """Structured metadata so the agent can query a table without reading
         it: the schema (column names and types) and the row/column counts.
 
-        The retrieval-optimized description is deliberately not stored here —
-        it is already in the chunk's text, and duplicating it in the metadata
+        The retrieval-optimized description is deliberately not stored here.
+        It is already in the chunk's text, and duplicating it in the metadata
         would only waste tokens.
         """
         return {

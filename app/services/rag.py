@@ -125,6 +125,11 @@ class RagService:
         """A queued/running/finished ingest job, or None."""
         return self._ingest_queue.get(job_id)
 
+    def list_ingest_jobs(self, chat_id: str) -> list[IngestJob]:
+        """The ingest jobs for a chat (queued, running, and finished), each
+        carrying its buffered progress events."""
+        return self._ingest_queue.jobs_for_chat(chat_id)
+
     async def _process_ingest_job(self, job: IngestJob) -> None:
         """The worker's job: ingest each file (reporting progress) then mark
         the job done."""

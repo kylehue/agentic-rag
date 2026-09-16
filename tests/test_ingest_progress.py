@@ -13,6 +13,7 @@ from app.plugin.context import IngestionFile
 from app.plugin.registry import PluginRegistry
 from app.plugins.table import TablePlugin
 from app.services.ingestion import IngestionService
+from app.services.rag import RagService
 from app.store_file.local import LocalFileStorage
 from app.store_sql.local import LocalSqlStorage
 
@@ -241,3 +242,32 @@ def test_rag_service_enqueue_and_process_emits_full_progress(tmp_path):
     assert done.payload["total_chunks"] == 1
     # The chunk actually landed in the store.
     assert rag.get_ingest_job(job.job_id) is job
+
+
+def test_list_ingest_jobs_returns_the_chats_jobs(tmp_path):
+    rag = RagService(
+        llm=FakeLLM(),
+        embedder=FakeEmbedder(),
+        retriever=NoopRetriever(),
+        vector_storage=FakeVectorStorage(),
+        sql_storage=LocalSqlStorage(storage_dir=tmp_path / "sql"),
+        file_storage=LocalFileStorage(storage_dir=tmp_path / "file"),
+    )
+    # The worker pool is not started, so enqueued jobs stay "queued".
+    job_a = rag.enqueue_ingest(
+        [make_file(name="a.txt", content=b"x", ctype="text/plain")], "chat-1"
+    )
+    job_b = rag.enqueue_ingest(
+        [make_file(name="b.txt", content=b"y", ctype="text/plain")], "chat-2"
+    )
+
+    jobs = rag.list_ingest_jobs("chat-1")
+
+    # Only chat-1's job, with its status, files, and buffered progress.
+    assert [job.job_id for job in jobs] == [job_a.job_id]
+    assert jobs[0].status == "queued"
+    assert [f.filename for f in jobs[0].files] == ["a.txt"]
+    assert [event.name for event in jobs[0].events.events] == ["chat", "queued"]
+    # A finished chat's list is empty when it has no jobs.
+    assert rag.list_ingest_jobs("chat-3") == []
+    assert all(job.job_id != job_b.job_id for job in jobs)

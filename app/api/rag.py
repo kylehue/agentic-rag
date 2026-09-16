@@ -8,9 +8,12 @@ from app.api_schemas.rag import (
     DeleteFileResponseSchema,
     FileMetadataSchema,
     FileSchema,
+    IngestJobEventSchema,
+    IngestJobInfoSchema,
     IngestJobSchema,
     ListFileChunksResponseSchema,
     ListFilesResponseSchema,
+    ListIngestJobsResponseSchema,
     RetrieveResponseSchema,
     StoredChunkSchema,
 )
@@ -80,6 +83,39 @@ async def ingest_stream(job_id: str, user: str = Depends(require_user)):
             yield sse_frame(event.name, event.payload)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.get("/ingest/jobs", response_model=ListIngestJobsResponseSchema)
+async def list_ingest_jobs(
+    chat_id: str | None = Query(None),
+    user: str = Depends(require_user),
+):
+    """The chat's ingest jobs (queued, running, and finished), each with the
+    progress events buffered so far.
+
+    This is how a returning client sees where its ingests stand: a job still
+    running shows its progress up to now (and its stream can be re-attached
+    via `/rag/ingest/stream?job_id=...`), and a finished one shows its full
+    progress. The chat is created if none is given.
+    """
+    chat_id = await chat_service.get_or_create(user, chat_id)
+    jobs = rag_service.list_ingest_jobs(chat_id)
+    return ListIngestJobsResponseSchema(
+        chat_id=chat_id,
+        jobs=[
+            IngestJobInfoSchema(
+                job_id=job.job_id,
+                status=job.status,
+                files=[f.filename for f in job.files],
+                created_at=job.created_at,
+                events=[
+                    IngestJobEventSchema(name=event.name, payload=event.payload)
+                    for event in job.events.events
+                ],
+            )
+            for job in jobs
+        ],
+    )
 
 
 @router.post(

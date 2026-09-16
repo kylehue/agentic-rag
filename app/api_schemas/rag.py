@@ -53,6 +53,29 @@ class IngestJobSchema(BaseModel):
     files: list[str]
 
 
+class IngestJobEventSchema(BaseModel):
+    """One buffered progress event of an ingest job (name + payload)."""
+
+    name: str
+    payload: dict
+
+
+class IngestJobInfoSchema(BaseModel):
+    """An ingest job's current state: its status, files, and the progress
+    events buffered so far (the same frames the stream would replay)."""
+
+    job_id: str
+    status: str
+    files: list[str]
+    created_at: float
+    events: list[IngestJobEventSchema]
+
+
+class ListIngestJobsResponseSchema(BaseModel):
+    chat_id: str
+    jobs: list[IngestJobInfoSchema]
+
+
 class RetrieveResponseSchema(BaseModel):
     chat_id: str
     chunks: list[RetrievedChunkSchema]

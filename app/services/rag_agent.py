@@ -440,6 +440,9 @@ class RagAgentService:
         )
         self._checkpoint_conn: aiosqlite.Connection | None = None
         self._checkpointer_lock = asyncio.Lock()
+        # The in-flight run per chat (its driving task), so `stop` can
+        # interrupt a running answer.
+        self._running: dict[str, asyncio.Task] = {}
 
     async def _ensure_checkpointer(self) -> BaseCheckpointSaver:
         async with self._checkpointer_lock:
@@ -539,6 +542,34 @@ class RagAgentService:
                 for event in events:
                     yield event
 
+    def _track_run(self, chat_id: str) -> asyncio.Task | None:
+        """Register the current task as the chat's in-flight run (so `stop`
+        can interrupt it). Returns the tracked task, or None if there is none."""
+        task = asyncio.current_task()
+        if task is not None:
+            self._running[chat_id] = task
+        return task
+
+    def _untrack_run(self, chat_id: str, task: asyncio.Task | None) -> None:
+        # Only clear it if it is still this run's task (a newer run for the
+        # same chat must not be untracked by an older run's cleanup).
+        if task is not None and self._running.get(chat_id) is task:
+            del self._running[chat_id]
+
+    async def stop(self, chat_id: str) -> bool:
+        """Interrupt the run in flight on a chat, if there is one.
+
+        Cancels the run's task, so the answer is abandoned mid-way; the chat's
+        checkpoint keeps whatever step had completed, so the next question can
+        resume or start fresh. Returns True when a run was interrupted,
+        False when the chat has no run in flight.
+        """
+        task = self._running.get(chat_id)
+        if task is None or task.done():
+            return False
+        task.cancel()
+        return True
+
     async def ask(
         self,
         question: str,
@@ -552,18 +583,22 @@ class RagAgentService:
         The answer's `chunk_refs` are the chunks it cites (none, if it cites
         nothing).
         """
-        graph, input_state, config = await self._prepare_run(question, chat_id)
-        answer = None
-        async for event in self._run_events(graph, input_state, config):
-            if isinstance(event, AnswerEvent):
-                answer = event.content
-        if answer is None:
-            raise RuntimeError("The agent produced no final answer.")
-        return RagAnswer(
-            query=question,
-            answer=answer,
-            chunk_refs=extract_chunk_refs(answer),
-        )
+        task = self._track_run(chat_id)
+        try:
+            graph, input_state, config = await self._prepare_run(question, chat_id)
+            answer = None
+            async for event in self._run_events(graph, input_state, config):
+                if isinstance(event, AnswerEvent):
+                    answer = event.content
+            if answer is None:
+                raise RuntimeError("The agent produced no final answer.")
+            return RagAnswer(
+                query=question,
+                answer=answer,
+                chunk_refs=extract_chunk_refs(answer),
+            )
+        finally:
+            self._untrack_run(chat_id, task)
 
     async def ask_stream(
         self,
@@ -581,28 +616,32 @@ class RagAgentService:
         run ends without an answer. `chat_id` bounds the run's tools to that
         chat's chunks.
         """
-        graph, input_state, config = await self._prepare_run(question, chat_id)
-        # The stream is consumed to completion before the terminal frame is
-        # yielded: stopping early would cancel the run and skip its final
-        # checkpoint, losing the answer from the chat's history.
-        answer = None
-        async for event in self._run_events(graph, input_state, config):
-            if isinstance(event, AnswerEvent):
-                answer = event.content
-                continue
-            item = to_stream_event(event)
-            if item is not None:
-                yield item
-        if answer is None:
-            raise RuntimeError("The agent produced no final answer.")
-        yield StreamEvent(
-            "answer",
-            RagAnswer(
-                query=question,
-                answer=answer,
-                chunk_refs=extract_chunk_refs(answer),
-            ),
-        )
+        task = self._track_run(chat_id)
+        try:
+            graph, input_state, config = await self._prepare_run(question, chat_id)
+            # The stream is consumed to completion before the terminal frame
+            # is yielded: stopping early would cancel the run and skip its
+            # final checkpoint, losing the answer from the chat's history.
+            answer = None
+            async for event in self._run_events(graph, input_state, config):
+                if isinstance(event, AnswerEvent):
+                    answer = event.content
+                    continue
+                item = to_stream_event(event)
+                if item is not None:
+                    yield item
+            if answer is None:
+                raise RuntimeError("The agent produced no final answer.")
+            yield StreamEvent(
+                "answer",
+                RagAnswer(
+                    query=question,
+                    answer=answer,
+                    chunk_refs=extract_chunk_refs(answer),
+                ),
+            )
+        finally:
+            self._untrack_run(chat_id, task)
 
     async def chat_history(self, chat_id: str) -> list[dict]:
         """The conversation of a chat, read from the checkpointer.

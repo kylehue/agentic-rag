@@ -29,6 +29,20 @@ class ChatAnswerSchema(RagAnswerSchema):
     chat_id: str
 
 
+class RagStopRequestSchema(BaseModel):
+    """The chat whose in-flight answer should be interrupted. Unlike the
+    answer request, a missing chat is an error (there is nothing to create)."""
+
+    chat_id: str
+
+
+class RagStopResponseSchema(BaseModel):
+    chat_id: str
+    # True when a run was in flight and got interrupted; False when the chat
+    # had no run to stop.
+    stopped: bool
+
+
 class IngestJobSchema(BaseModel):
     """The acknowledgement for a queued (background) ingestion: the job id
     addresses the progress stream, not the (not-yet-done) chunks."""

@@ -7,8 +7,11 @@ from app.api_schemas.rag import (
     ChatAnswerSchema,
     RagAnswerRequestSchema,
     RagAnswerSchema,
+    RagStopRequestSchema,
+    RagStopResponseSchema,
 )
 from app.container import chat_service, rag_agent_service
+from app.errors.chat import ChatForbiddenError, ChatNotFoundError
 from app.models.rag import RagAnswer
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
@@ -61,3 +64,19 @@ async def answer_stream(
             yield sse_frame(event.name, payload)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/stop", response_model=RagStopResponseSchema)
+async def stop(
+    request: RagStopRequestSchema,
+    user: str = Depends(require_user),
+):
+    """Interrupt the in-flight answer on a chat, if there is one. Only the
+    chat's owner may stop it."""
+    owner = await chat_service.username_of(request.chat_id)
+    if owner is None:
+        raise ChatNotFoundError(request.chat_id)
+    if owner != user:
+        raise ChatForbiddenError(request.chat_id)
+    stopped = await rag_agent_service.stop(request.chat_id)
+    return RagStopResponseSchema(chat_id=request.chat_id, stopped=stopped)

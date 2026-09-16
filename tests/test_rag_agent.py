@@ -9,7 +9,7 @@ from app.agent_tools import (
     SqlQueryDocumentsTool,
     SqlQueryTableTool,
 )
-from app.llm.base import RawResult, ToolCall
+from app.llm.base import RawDelta, RawResult, ToolCall
 from app.models.chunk import RetrievedChunk
 from app.models.rag import RagAnswer
 from app.models.stream import StreamEvent
@@ -218,6 +218,44 @@ def test_ask_isolated_between_chats():
 
     # The s2 run has no s1 history.
     assert [m.role for m in llm.calls[1]] == ["system", "user"]
+
+
+def test_stop_interrupts_a_running_answer():
+    # An LLM that blocks on its first call, so the run is in flight and can
+    # be interrupted.
+    class BlockingLLM(FakeLLM):
+        def __init__(self) -> None:
+            super().__init__("never")
+            self.entered = asyncio.Event()
+
+        async def stream_complete(self, messages, *, tools=None, json_schema=None):
+            self.entered.set()
+            await asyncio.Event().wait()  # block until the task is cancelled
+            yield RawDelta(text="unreachable")
+
+    llm = BlockingLLM()
+    agent = make_agent(llm)
+
+    async def flow():
+        await agent.initialize()
+        task = asyncio.create_task(agent.ask("hi", chat_id="s1"))
+        await asyncio.wait_for(llm.entered.wait(), timeout=2)
+        stopped = await agent.stop("s1")
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return stopped
+
+    assert asyncio.run(flow()) is True
+
+
+def test_stop_returns_false_when_nothing_is_running():
+    agent = make_agent(FakeLLM("ok"))
+
+    async def flow():
+        await agent.initialize()
+        return await agent.stop("s1")
+
+    assert asyncio.run(flow()) is False
 
 
 def test_delete_chat_removes_the_history_and_the_rag_data(tmp_path):

@@ -23,3 +23,10 @@ class FileStorage(ABC):
     @abstractmethod
     async def read_bytes(self, full_path: str) -> bytes:
         """Read the stored file."""
+
+    @abstractmethod
+    def create_link(self, full_path: str) -> str:
+        """A URL path at which this stored file can be retrieved.
+
+        Pure (no I/O): it maps a stored path to a link the app serves.
+        """

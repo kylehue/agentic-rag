@@ -169,6 +169,14 @@ class RagService:
         """Reverse ingestion for a whole chat: its files, chunks, and vectors."""
         await self._ingestion_service.delete_chat(chat_id)
 
+    async def get_file_metadata(self, source_id: str) -> dict | None:
+        """The document record for one stored file, or None if absent."""
+        return await self._ingestion_service.get_file_metadata(source_id)
+
+    async def get_file_link(self, source_id: str) -> str | None:
+        """The URL at which one stored file can be retrieved, or None."""
+        return await self._ingestion_service.get_file_link(source_id)
+
     async def list_files(self, chat_id: str | None = None) -> list[dict]:
         """The origin files (user uploads) in the chat, excluding emitted files."""
         return await self._ingestion_service.list_files(chat_id)

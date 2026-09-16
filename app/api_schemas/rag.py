@@ -53,6 +53,17 @@ class FileSchema(BaseModel):
     chat_id: str | None
 
 
+class FileMetadataSchema(BaseModel):
+    """The metadata of one stored file, with the link to retrieve it."""
+
+    source_id: str
+    filename: str
+    content_type: str
+    is_origin: bool
+    chat_id: str | None
+    link: str
+
+
 class ListFilesResponseSchema(BaseModel):
     chat_id: str
     files: list[FileSchema]

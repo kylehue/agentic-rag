@@ -196,6 +196,9 @@ class FakeFileStorage(FileStorage):
     async def read_bytes(self, full_path: str) -> bytes:
         return self.files[full_path]
 
+    def create_link(self, full_path: str) -> str:
+        return f"/files/{full_path.rsplit('/', 1)[-1]}"
+
 
 def make_ingestion_file(
     *,

@@ -322,6 +322,21 @@ class IngestionService:
                 settings.DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
             )
 
+    async def get_file_metadata(self, source_id: str) -> dict | None:
+        """The document record for one stored file, or None if absent."""
+        return await self._sql_storage.get(
+            settings.DOCUMENT_METADATA_TABLE_NAME,
+            condition=lambda t: t.c.source_id == source_id,
+        )
+
+    async def get_file_link(self, source_id: str) -> str | None:
+        """The URL at which one stored file can be retrieved, or None if the
+        file is absent."""
+        document = await self.get_file_metadata(source_id)
+        if document is None:
+            return None
+        return self._file_storage.create_link(document["file_path"])
+
     async def list_files(self, chat_id: str | None = None) -> list[dict]:
         """The origin files in the chat (what the user uploaded), excluding
         the files plugins emitted during ingestion (``is_origin``)."""

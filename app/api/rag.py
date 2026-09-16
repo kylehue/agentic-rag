@@ -6,6 +6,7 @@ from app.api.sse import sse_frame
 from app.api_schemas.chunk import RetrievedChunkSchema
 from app.api_schemas.rag import (
     DeleteFileResponseSchema,
+    FileMetadataSchema,
     FileSchema,
     IngestJobSchema,
     ListFileChunksResponseSchema,
@@ -121,6 +122,35 @@ async def list_files(
             )
             for doc in documents
         ],
+    )
+
+
+@router.get(
+    "/files/{source_id}",
+    response_model=FileMetadataSchema,
+)
+async def get_file(
+    source_id: str,
+    user: str = Depends(require_user),
+):
+    # The file's metadata and the link to retrieve it, for a file the user
+    # owns. 404 for a missing file or one that belongs to someone else.
+    document = await rag_service.get_file_metadata(source_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="File not found.")
+    owner = await chat_service.username_of(document["chat_id"])
+    if owner != user:
+        raise HTTPException(status_code=404, detail="File not found.")
+    link = await rag_service.get_file_link(source_id)
+    if link is None:
+        raise HTTPException(status_code=404, detail="File not found.")
+    return FileMetadataSchema(
+        source_id=source_id,
+        filename=document["file_orig_filename"],
+        content_type=document["file_content_type"],
+        is_origin=bool(document["is_origin"]),
+        chat_id=document["chat_id"],
+        link=link,
     )
 
 

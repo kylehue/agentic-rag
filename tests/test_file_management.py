@@ -312,6 +312,50 @@ def test_delete_chat_removes_everything_in_the_chat(tmp_path):
     assert sorted(vector_storage.deleted[0]) == ["c1", "c2"]
 
 
+# --- file metadata and links ---
+
+
+def test_get_file_metadata_returns_the_document(tmp_path):
+    service, sql_storage, file_storage, _ = build_service(tmp_path)
+
+    async def flow():
+        await service.initialize()
+        await seed_tree(sql_storage, file_storage, FakeVectorStorage())
+        found = await service.get_file_metadata("origin-1")
+        missing = await service.get_file_metadata("nope")
+        await sql_storage.close()
+        return found, missing
+
+    found, missing = asyncio.run(flow())
+    assert found is not None
+    assert found["source_id"] == "origin-1"
+    assert found["file_orig_filename"] == "report.txt"
+    assert found["is_origin"] is True
+    assert found["chat_id"] == "chat-1"
+    assert missing is None
+
+
+def test_get_file_link_returns_a_serveable_link(tmp_path):
+    service, sql_storage, file_storage, _ = build_service(tmp_path)
+
+    async def flow():
+        await service.initialize()
+        await seed_tree(sql_storage, file_storage, FakeVectorStorage())
+        link = await service.get_file_link("origin-1")
+        missing = await service.get_file_link("nope")
+        await sql_storage.close()
+        return link, missing
+
+    link, missing = asyncio.run(flow())
+    assert link is not None and link.startswith("/files/")
+    assert missing is None
+
+
+def test_local_file_storage_create_link_is_by_stored_name(tmp_path):
+    storage = LocalFileStorage(storage_dir=tmp_path / "file")
+    assert storage.create_link(f"{tmp_path}/file/documents/abc123.pdf") == "/files/abc123.pdf"
+
+
 # --- RagService delegation ---
 
 
@@ -344,3 +388,32 @@ def test_rag_service_delegates_file_management(tmp_path):
     assert [doc["source_id"] for doc in files] == ["origin-1"]
     assert _row_ids(chunks, "chunk_id") == {"c1", "c2"}
     assert deleted == 2
+
+
+def test_rag_service_delegates_file_metadata_and_link(tmp_path):
+    from app.services.rag import RagService
+
+    sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
+    file_storage = LocalFileStorage(storage_dir=tmp_path / "file")
+    vector_storage = FakeVectorStorage()
+    rag = RagService(
+        llm=FakeLLM(),
+        embedder=FakeEmbedder(),
+        retriever=NoopRetriever(),
+        vector_storage=vector_storage,
+        sql_storage=sql_storage,
+        file_storage=file_storage,
+    )
+
+    async def flow():
+        await rag.initialize()
+        await seed_tree(sql_storage, file_storage, vector_storage)
+        meta = await rag.get_file_metadata("origin-1")
+        link = await rag.get_file_link("origin-1")
+        await sql_storage.close()
+        return meta, link
+
+    meta, link = asyncio.run(flow())
+
+    assert meta is not None and meta["source_id"] == "origin-1"
+    assert link is not None and link.startswith("/files/")

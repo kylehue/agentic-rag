@@ -72,3 +72,7 @@ class LocalFileStorage(FileStorage):
             raise FileNotFoundError(f"File not found: {full_path}")
 
         return path.read_bytes()
+
+    def create_link(self, full_path: str) -> str:
+        # The stored name is a unique uuid, so it is a safe link identifier.
+        return f"/files/{Path(full_path).name}"

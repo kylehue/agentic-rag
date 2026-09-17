@@ -109,6 +109,14 @@ def to_content(content: str | list[str | dict[str, Any]]) -> str | list[ContentP
     return [part for part in content if isinstance(part, str)]
 
 
+def _history_text(content: str | list[str | dict[str, Any]]) -> str:
+    """The plain text of a message's content (list content is joined)."""
+    text = to_content(content)
+    if isinstance(text, list):
+        return " ".join(part for part in text if isinstance(part, str))
+    return text
+
+
 def _to_llm_messages(messages: Sequence[BaseMessage]) -> list[ChatMessage]:
     """Convert langchain messages to the provider-neutral wire format."""
     converted: list[ChatMessage] = []
@@ -644,10 +652,10 @@ class RagAgentService:
             self._untrack_run(chat_id, task)
 
     async def chat_history(self, chat_id: str) -> list[dict]:
-        """The conversation of a chat, read from the checkpointer.
-
-        Returns the user and assistant turns in order (tool traffic and the
-        system prompt stay internal). An unknown or finished-with-nothing
+        """The conversation of a chat, read from the checkpointer, in the same
+        order and shape it was streamed: the user's questions, each tool call,
+        each tool result, and each answer (with its citations). The system
+        prompt and mid-run commentary stay internal. An unknown or empty
         thread yields an empty list.
         """
         # Straight from the checkpointer: the thread's latest checkpoint
@@ -663,13 +671,39 @@ class RagAgentService:
         history: list[dict] = []
         for message in messages:
             if isinstance(message, HumanMessage):
-                history.append({"role": "user", "content": str(message.content)})
-            elif isinstance(message, AIMessage) and message.content:
-                text = to_content(message.content)
-                if isinstance(text, list):
-                    text = " ".join(part for part in text if isinstance(part, str))
-                if text:
-                    history.append({"role": "assistant", "content": text})
+                history.append(
+                    {"type": "user", "content": _history_text(message.content)}
+                )
+            elif isinstance(message, AIMessage):
+                if message.tool_calls:
+                    # A tool-requesting turn: expose the calls, not any
+                    # mid-run commentary (matching the stream).
+                    for call in message.tool_calls:
+                        history.append(
+                            {
+                                "type": "tool_call",
+                                "name": call["name"],
+                                "arguments": call.get("args") or {},
+                            }
+                        )
+                elif message.content:
+                    text = _history_text(message.content)
+                    if text:
+                        history.append(
+                            {
+                                "type": "answer",
+                                "answer": text,
+                                "chunk_refs": extract_chunk_refs(text),
+                            }
+                        )
+            elif isinstance(message, ToolMessage):
+                history.append(
+                    {
+                        "type": "tool_result",
+                        "name": message.name,
+                        "content": _history_text(message.content),
+                    }
+                )
         return history
 
     async def delete_chat(self, chat_id: str) -> None:

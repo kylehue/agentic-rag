@@ -23,10 +23,15 @@ async def create_chat(user: str = Depends(require_user)):
     return ChatCreated(chat_id=chat_id)
 
 
-@router.get("/{chat_id}/messages", response_model=list[ChatMessage])
+@router.get(
+    "/{chat_id}/messages",
+    response_model=list[ChatMessage],
+    response_model_exclude_none=True,
+)
 async def chat_messages(chat_id: str, user: str = Depends(require_user)):
-    """The chat's conversation history, read from the agent's checkpointer
-    (user and assistant turns only)."""
+    """The chat's conversation history, read from the agent's checkpointer, in
+    the same order and shape it was streamed: user questions, tool calls, tool
+    results, and answers (with their citations)."""
     owner = await chat_service.username_of(chat_id)
     if owner is None:
         raise ChatNotFoundError(chat_id)

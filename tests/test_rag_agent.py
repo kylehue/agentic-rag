@@ -300,8 +300,9 @@ def test_delete_chat_removes_the_history_and_the_rag_data(tmp_path):
 
     before, after, chunk_rows, doc_rows = asyncio.run(flow())
 
-    # The conversation existed, then the thread was deleted.
-    assert [turn["role"] for turn in before] == ["user", "assistant"]
+    # The conversation existed (a question and an answer), then the thread
+    # was deleted.
+    assert [item["type"] for item in before] == ["user", "answer"]
     assert after == []
     # The chat's RAG data is gone too.
     assert chunk_rows == []
@@ -325,6 +326,41 @@ def test_delete_chat_with_no_history_on_a_durable_checkpointer(tmp_path):
         assert await agent.chat_history("never-asked") == []
 
     asyncio.run(flow())
+
+
+def test_chat_history_includes_tool_traffic_in_stream_order():
+    llm = FakeLLM(
+        tool_call_response("search_documents", {"query": "what?"}),
+        RawResult(content="The answer."),
+    )
+    agent = make_agent(llm, [make_tool("search_documents", "evidence found")])
+
+    async def flow():
+        await agent.ask("q", chat_id="s1")
+        return await agent.chat_history("s1")
+
+    history = asyncio.run(flow())
+
+    # The history mirrors the stream: question, tool call, tool result, answer.
+    assert [item["type"] for item in history] == [
+        "user",
+        "tool_call",
+        "tool_result",
+        "answer",
+    ]
+    assert history[0] == {"type": "user", "content": "q"}
+    assert history[1] == {
+        "type": "tool_call",
+        "name": "search_documents",
+        "arguments": {"query": "what?"},
+    }
+    assert history[2] == {
+        "type": "tool_result",
+        "name": "search_documents",
+        "content": "evidence found",
+    }
+    assert history[3]["answer"] == "The answer."
+    assert history[3]["chunk_refs"] == {}
 
 
 def test_ask_resumes_an_interrupted_run():

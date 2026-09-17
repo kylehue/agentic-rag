@@ -24,8 +24,7 @@ class InspectTableRelationshipsTool(AgentTool):
             "the tables that were ingested from the same origin document "
             "(for example the other tables embedded in the same document, or "
             "the other sheets of the same workbook). Returns each candidate's "
-            "source_id, description, and schema. Use it to find join "
-            "candidates before writing a multi-table sql_query_table."
+            "source_id, description, and schema."
         )
 
     @property

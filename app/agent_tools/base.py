@@ -77,3 +77,71 @@ def _parameters_summary(parameters: dict) -> str:
         f"{'required' if name in required else 'optional'})"
         for name, prop in properties.items()
     )
+
+
+class AgentToolset:
+    """A group of tools plus the cross-tool instructions for orchestrating
+    them.
+
+    The instructions live here (not in the individual tools), so each tool
+    stays decoupled and describes only itself. A toolset is transparent to the
+    tool-call wire format: its member tools are what the model actually calls,
+    and its rendered block (name + instructions + specs) is what the system
+    prompt shows.
+    """
+
+    def __init__(
+        self, name: str, tools: Sequence[AgentTool], instructions: str
+    ) -> None:
+        self.name = name
+        self._tools = list(tools)
+        self.instructions = instructions
+        seen = set()
+        for tool in self._tools:
+            if tool.name in seen:
+                raise ValueError(
+                    f"Tool name '{tool.name}' appears more than once in the toolset."
+                )
+            seen.add(tool.name)
+
+    @property
+    def tools(self) -> list[AgentTool]:
+        return self._tools
+
+    def outline(self) -> str:
+        """The spec of each tool in the set: name, description, parameters."""
+        return tools_outline(self._tools)
+
+    def render(self) -> str:
+        """The set's prompt block: its name, the cross-tool instructions, and
+        each tool's spec."""
+        return f"Toolset name: {self.name}\n\nToolset Description:\n{self.instructions}\n\nTools:\n{self.outline()}"
+
+
+def flatten_tools(items: Sequence[AgentTool | AgentToolset]) -> list[AgentTool]:
+    """All the tools in a mix of bare tools and toolsets, in order. Toolsets
+    contribute their member tools; the toolset wrappers themselves are not
+    tools the model calls."""
+    tools: list[AgentTool] = []
+    for item in items:
+        if isinstance(item, AgentToolset):
+            tools.extend(item.tools)
+        else:
+            tools.append(item)
+    return tools
+
+
+def render_tool_blocks(items: Sequence[AgentTool | AgentToolset]) -> str:
+    """The system-prompt tools section, rendered from a mix of bare tools and
+    toolsets. A toolset contributes its name, instructions, and its tools'
+    specs; bare tools are grouped under a single Tools: header."""
+    blocks: list[str] = []
+    bare: list[AgentTool] = []
+    for item in items:
+        if isinstance(item, AgentToolset):
+            blocks.append(item.render())
+        else:
+            bare.append(item)
+    if bare:
+        blocks.append("Tools:\n" + tools_outline(bare))
+    return "\n\n".join(blocks)

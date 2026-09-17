@@ -2,13 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.agent_tools import (
-    InspectTableRelationshipsTool,
-    InspectTableTool,
-    SearchDocumentTool,
-    SqlQueryDocumentsTool,
-    SqlQueryTableTool,
-)
+from app.agent_tools import RAG_TOOLSET
 from app.core.config import settings
 
 from app.llm.openai import OpenAIProvider
@@ -88,13 +82,7 @@ chat_service = ChatService(sql_storage=sql_storage)
 
 rag_agent_service = RagAgentService(
     rag_service=rag_service,
-    tools=[
-        SearchDocumentTool(),
-        InspectTableTool(),
-        InspectTableRelationshipsTool(),
-        SqlQueryTableTool(),
-        SqlQueryDocumentsTool(),
-    ],
+    tools=[RAG_TOOLSET],
     checkpoint_dir=settings.AGENT_LOCAL_STORAGE_DIR,
 )
 

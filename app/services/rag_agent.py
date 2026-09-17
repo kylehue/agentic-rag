@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import StreamWriter
 
-from app.agent_tools import AgentTool, tools_outline
+from app.agent_tools import AgentTool, AgentToolset, flatten_tools, render_tool_blocks
 from app.agent_tools.base import ToolExecutor
 from app.llm.base import (
     ChatMessage,
@@ -350,9 +350,6 @@ def _tool_events(state: dict) -> list[AgentEvent]:
 
 RAG_AGENT_SYSTEM_PROMPT_TEMPLATE = """You are a retrieval-augmented assistant that answers questions about the user's ingested documents.
 
-Work through the tools before answering.
-
-Tools:
 {tools}
 
 Rules:
@@ -411,19 +408,26 @@ class RagAgentService:
         self,
         *,
         rag_service: RagService,
-        tools: Sequence[AgentTool],
+        tools: Sequence[AgentTool | AgentToolset],
         max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
         checkpointer: BaseCheckpointSaver | None = None,
         checkpoint_dir: str | None = None,
     ) -> None:
+        # Toolsets wrap their member tools; the model calls the flat tools, so
+        # the specs and executors are built from the flattened list with
+        # duplicates dropped (the first occurrence of a name wins). The prompt
+        # renders the original mix, since that is what carries each toolset's
+        # name and instructions.
         seen = set()
-        for tool in tools:
+        flat_tools: list[AgentTool] = []
+        for tool in flatten_tools(tools):
             if tool.name in seen:
-                raise ValueError(f"Tool name '{tool.name}' is already registered.")
+                continue
             seen.add(tool.name)
+            flat_tools.append(tool)
 
         self._rag_service = rag_service
-        self._tools = list(tools)
+        self._tools = flat_tools
         self._max_tool_rounds = max_tool_rounds
         self._specs = [
             ToolSpec(
@@ -431,10 +435,11 @@ class RagAgentService:
                 description=tool.description,
                 parameters=tool.parameters,
             )
-            for tool in tools
+            for tool in flat_tools
         ]
         self._system_prompt = render_template(
-            RAG_AGENT_SYSTEM_PROMPT_TEMPLATE, {"tools": tools_outline(tools)}
+            RAG_AGENT_SYSTEM_PROMPT_TEMPLATE,
+            {"tools": render_tool_blocks(tools)},
         )
 
         # Checkpoint storage: a provided saver, else a durable SQLite saver

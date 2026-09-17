@@ -3,11 +3,15 @@ import asyncio
 import pytest
 
 from app.agent_tools import (
+    AgentToolset,
     InspectTableRelationshipsTool,
     InspectTableTool,
     SearchDocumentTool,
     SqlQueryDocumentsTool,
     SqlQueryTableTool,
+    RAG_TOOLSET,
+    flatten_tools,
+    render_tool_blocks,
 )
 from app.llm.base import RawDelta, RawResult, ToolCall
 from app.models.chunk import RetrievedChunk
@@ -449,12 +453,14 @@ def test_ask_raises_when_the_run_never_answers():
         asyncio.run(agent.ask("loop?", chat_id="s1"))
 
 
-def test_duplicate_tool_names_are_rejected():
-    with pytest.raises(ValueError):
-        RagAgentService(
-            rag_service=build_rag_service(FakeLLM(), NoopRetriever()),
-            tools=[make_tool("dup"), make_tool("dup")],
-        )
+def test_duplicate_bare_tool_names_are_deduped():
+    agent = RagAgentService(
+        rag_service=build_rag_service(FakeLLM(), NoopRetriever()),
+        tools=[make_tool("dup"), make_tool("dup")],
+    )
+    # The first occurrence wins; the duplicate is dropped, not an error.
+    assert [tool.name for tool in agent._tools] == ["dup"]
+    assert [spec.name for spec in agent._specs] == ["dup"]
 
 
 # --- system prompt and stream translation ---
@@ -481,6 +487,92 @@ def test_system_prompt_is_built_from_the_tools_outline():
     ):
         assert f"`{name}`" in system_prompt
     assert "Parameters: query (string, required)" in system_prompt
+
+
+def test_toolset_outline_lists_each_tool_and_render_adds_instructions():
+    toolset = AgentToolset(
+        name="Test set",
+        tools=[make_tool("alpha"), make_tool("beta")],
+        instructions="Call alpha before beta.",
+    )
+
+    # outline() is just the member tools' specs...
+    assert "`alpha`" in toolset.outline()
+    assert "`beta`" in toolset.outline()
+    assert "Call alpha" not in toolset.outline()
+    # ...and render() brings the set's name and instructions together with them.
+    assert toolset.render() == (
+        "Toolset name: Test set\n\n"
+        "Toolset Instructions: Call alpha before beta.\n\n"
+        "Tools:\n" + toolset.outline()
+    )
+
+
+def test_flatten_tools_unwraps_toolsets_and_render_tool_blocks_groups_bare():
+    toolset = AgentToolset(
+        name="Set", tools=[make_tool("alpha")], instructions="Instr."
+    )
+    beta = make_tool("beta")
+
+    # flatten_tools returns the bare tools in order, unwrapping toolsets.
+    assert [t.name for t in flatten_tools([toolset, beta])] == ["alpha", "beta"]
+    # render_tool_blocks: the toolset's block (name + instructions + specs)
+    # plus a grouped Tools: header for the bare tool.
+    blocks = render_tool_blocks([toolset, beta])
+    assert "Set" in blocks
+    assert "Instr." in blocks
+    assert "`alpha`" in blocks
+    assert "`beta`" in blocks
+    assert blocks.count("Tools:") == 2
+
+
+def test_agent_accepts_a_toolset_and_uses_its_instructions():
+    llm = FakeLLM(RawResult(content="ok"))
+    toolset = AgentToolset(
+        name="Search set",
+        tools=[make_tool("search_documents")],
+        instructions="Always search first.",
+    )
+    agent = RagAgentService(
+        rag_service=build_rag_service(llm, NoopRetriever()),
+        tools=[toolset],
+    )
+
+    asyncio.run(agent.ask("q", chat_id="s1"))
+
+    system_prompt = llm.calls[0][0].content
+    # The toolset's cross-tool instructions and the tool spec are both present.
+    assert "Always search first." in system_prompt
+    assert "`search_documents`" in system_prompt
+    # The wire spec is flattened to the toolset's member tool.
+    assert [spec.name for spec in llm.tools[0]] == ["search_documents"]
+
+
+def test_rag_toolset_provides_the_rag_tools_and_workflow():
+    toolset = RAG_TOOLSET
+
+    assert toolset.name == "RAG"
+    assert [tool.name for tool in toolset.tools] == [
+        "search_documents",
+        "inspect_table",
+        "inspect_table_relationships",
+        "sql_query_table",
+        "sql_query_documents",
+    ]
+    # The cross-tool orchestration lives in the toolset, not the tools.
+    assert "search_documents" in toolset.instructions
+    assert "sql_query_table" in toolset.instructions
+
+
+def test_duplicate_tool_names_across_a_toolset_and_a_bare_tool_are_deduped():
+    toolset = AgentToolset(name="Dup set", tools=[make_tool("dup")], instructions="x")
+    agent = RagAgentService(
+        rag_service=build_rag_service(FakeLLM(), NoopRetriever()),
+        tools=[toolset, make_tool("dup")],
+    )
+    # The first occurrence wins; the duplicate is dropped, not an error.
+    assert [tool.name for tool in agent._tools] == ["dup"]
+    assert [spec.name for spec in agent._specs] == ["dup"]
 
 
 def test_to_stream_event_translates_domain_items():

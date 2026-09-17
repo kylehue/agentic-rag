@@ -15,8 +15,7 @@ class SearchDocumentTool(AgentTool):
             "Search the ingested document corpus for evidence relevant to a "
             "query. Returns ranked chunks, each with its origin source id, "
             "chunk id, and text (for tables, the text is the table's "
-            "description and a sample, not the full data). Cite a chunk as "
-            "#[origin:chunk] using the ids shown here."
+            "description and a sample, not the full data)."
         )
 
     @property

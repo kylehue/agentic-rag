@@ -503,7 +503,8 @@ def test_toolset_outline_lists_each_tool_and_render_adds_instructions():
     # ...and render() brings the set's name and instructions together with them.
     assert toolset.render() == (
         "Toolset name: Test set\n\n"
-        "Toolset Instructions: Call alpha before beta.\n\n"
+        "Toolset Description:\n"
+        "Call alpha before beta.\n\n"
         "Tools:\n" + toolset.outline()
     )
 

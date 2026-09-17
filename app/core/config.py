@@ -38,9 +38,9 @@ class Settings(BaseSettings):
     # gets the Secure attribute.
     SESSION_COOKIE_SECURE: bool = False
 
-    # How many ingest jobs the background queue runs concurrently (files
-    # within a job always run one at a time).
-    INGEST_WORKERS: int = 1
+    # How many ingest jobs the background queue runs concurrently (one job
+    # per file, so a batch's files ingest in parallel up to this limit).
+    INGEST_WORKERS: int = 2
 
     model_config = SettingsConfigDict(
         env_file=".env",

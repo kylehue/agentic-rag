@@ -47,7 +47,7 @@ def make_queue(process, *, terminal=TERMINAL, error_name="error"):
 
 def test_event_bus_replay_then_live_tail():
     events = EventBus(terminal=TERMINAL)
-    events.publish(Event(name="queued", payload={"file": "a", "position": 0}))
+    events.publish(Event(name="queued", payload={"file": "a"}))
     events.publish(Event(name="started", payload={"file": "a"}))
 
     async def flow():
@@ -241,13 +241,13 @@ def test_rag_service_enqueue_and_process_emits_full_progress(tmp_path):
     async def flow():
         await rag.initialize()
         await rag.start_ingest_queue()
-        job = rag.enqueue_ingest([make_file()], chat_id="chat-1")
+        jobs = rag.enqueue_ingest([make_file()], chat_id="chat-1")
         await rag._ingest_queue.join()
         await rag.stop_ingest_queue()
         await sql_storage.close()
-        return job
+        return jobs
 
-    job = asyncio.run(flow())
+    [job] = asyncio.run(flow())
     names = [event.name for event in job.events.events]
     # The ingest layer emits chat -> queued -> started -> stages -> file_done -> done.
     assert names[0] == "chat"
@@ -257,10 +257,45 @@ def test_rag_service_enqueue_and_process_emits_full_progress(tmp_path):
     assert names[-1] == "done"
     assert job.status == "done"
     done = next(event for event in job.events.events if event.name == "done")
-    assert done.payload["files"] == ["sales.csv"]
+    assert done.payload["file"] == "sales.csv"
     assert done.payload["total_chunks"] == 1
     # The chunk actually landed in the store.
     assert rag.get_ingest_job(job.job_id) is job
+
+
+def test_enqueue_ingest_makes_one_job_per_file(tmp_path):
+    sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
+    rag = RagService(
+        llm=FakeLLM(json.dumps(ANALYSIS)),
+        embedder=FakeEmbedder(),
+        retriever=NoopRetriever(),
+        vector_storage=FakeVectorStorage(),
+        sql_storage=sql_storage,
+        file_storage=LocalFileStorage(storage_dir=tmp_path / "file"),
+        plugins=[TablePlugin()],
+    )
+
+    async def flow():
+        await rag.initialize()
+        await rag.start_ingest_queue()
+        jobs = rag.enqueue_ingest(
+            [make_file(name="a.csv"), make_file(name="b.csv")], "chat-1"
+        )
+        await rag._ingest_queue.join()
+        await rag.stop_ingest_queue()
+        await sql_storage.close()
+        return jobs
+
+    jobs = asyncio.run(flow())
+
+    # Two files in one batch become two independent jobs, one file each.
+    assert [job.payload.filename for job in jobs] == ["a.csv", "b.csv"]
+    assert len({job.job_id for job in jobs}) == 2
+    for job in jobs:
+        assert job.status == "done"
+        names = [event.name for event in job.events.events]
+        assert names[0] == "chat" and names.count("queued") == 1 and names[-1] == "done"
+        assert job.events.finished
 
 
 def test_list_ingest_jobs_returns_the_chats_jobs(tmp_path):
@@ -273,19 +308,19 @@ def test_list_ingest_jobs_returns_the_chats_jobs(tmp_path):
         file_storage=LocalFileStorage(storage_dir=tmp_path / "file"),
     )
     # The worker pool is not started, so enqueued jobs stay "queued".
-    job_a = rag.enqueue_ingest(
+    [job_a] = rag.enqueue_ingest(
         [make_file(name="a.txt", content=b"x", ctype="text/plain")], "chat-1"
     )
-    job_b = rag.enqueue_ingest(
+    [job_b] = rag.enqueue_ingest(
         [make_file(name="b.txt", content=b"y", ctype="text/plain")], "chat-2"
     )
 
     jobs = rag.list_ingest_jobs("chat-1")
 
-    # Only chat-1's job, with its status, files (payload), and buffered progress.
+    # Only chat-1's job, with its status, file (payload), and buffered progress.
     assert [job.job_id for job in jobs] == [job_a.job_id]
     assert jobs[0].status == "queued"
-    assert [f.filename for f in jobs[0].payload] == ["a.txt"]
+    assert jobs[0].payload.filename == "a.txt"
     assert [event.name for event in jobs[0].events.events] == ["chat", "queued"]
     # A chat with no jobs lists empty.
     assert rag.list_ingest_jobs("chat-3") == []

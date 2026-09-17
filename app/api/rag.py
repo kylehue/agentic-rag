@@ -11,6 +11,7 @@ from app.api_schemas.rag import (
     IngestJobEventSchema,
     IngestJobInfoSchema,
     IngestJobSchema,
+    IngestJobsResponseSchema,
     ListFileChunksResponseSchema,
     ListFilesResponseSchema,
     ListIngestJobsResponseSchema,
@@ -25,7 +26,7 @@ router = APIRouter(prefix="/rag", tags=["RAG"])
 
 @router.post(
     "/ingest",
-    response_model=IngestJobSchema,
+    response_model=IngestJobsResponseSchema,
 )
 async def ingest_documents(
     files: list[UploadFile] | None = File(None),
@@ -33,12 +34,13 @@ async def ingest_documents(
     chat_id: str | None = Query(None),
     user: str = Depends(require_user),
 ):
-    """Queue one or more files for background ingestion and return the job.
+    """Queue one or more files for background ingestion and return their jobs.
 
     Send multiple files as repeated `files` parts (a single legacy `file`
-    part is also accepted). The response carries the `job_id`; watch progress
-    with `GET /rag/ingest/stream?job_id=...`. The chat is created if not
-    given; ingesting stamps the chat id onto the files and their chunks.
+    part is also accepted). Each file becomes its own job, so a batch ingests
+    in parallel (bounded by `INGEST_WORKERS`); watch each with
+    `GET /rag/ingest/stream?job_id=...`. The chat is created if not given;
+    ingesting stamps the chat id onto the files and their chunks.
     """
     uploads = (files or []) + ([file] if file is not None else [])
     if not uploads:
@@ -52,23 +54,24 @@ async def ingest_documents(
         )
         for upload in uploads
     ]
-    job = rag_service.enqueue_ingest(ingestion_files, chat_id)
-    return IngestJobSchema(
+    jobs = rag_service.enqueue_ingest(ingestion_files, chat_id)
+    return IngestJobsResponseSchema(
         chat_id=chat_id,
-        job_id=job.job_id,
-        status=job.status,
-        files=[f.filename for f in ingestion_files],
+        jobs=[
+            IngestJobSchema(job_id=job.job_id, status=job.status, file=job.payload.filename)
+            for job in jobs
+        ],
     )
 
 
 @router.get("/ingest/stream")
 async def ingest_stream(job_id: str, user: str = Depends(require_user)):
-    """An ingest job's progress as a server-sent event stream.
+    """An ingest job's progress as a server-sent event stream (one job per file).
 
-    Frames: a `chat` frame naming the chat, a `queued` frame per file, then
-    per file a `started` frame, `stage` frames (processing / saving /
-    embedding), `plugin_state` frames (the plugins' fine-grained states), and
-    a `file_done` frame; the stream ends with a `done` frame (or an `error`
+    Frames: a `chat` frame naming the chat, a `queued` frame for the file,
+    then a `started` frame, `stage` frames (processing / saving / embedding),
+    `plugin_state` frames (the plugins' fine-grained states), and a
+    `file_done` frame; the stream ends with a `done` frame (or an `error`
     frame). Late subscribers replay the frames already emitted.
     """
     job = rag_service.get_ingest_job(job_id)
@@ -90,8 +93,8 @@ async def list_ingest_jobs(
     chat_id: str | None = Query(None),
     user: str = Depends(require_user),
 ):
-    """The chat's ingest jobs (queued, running, and finished), each with the
-    progress events buffered so far.
+    """The chat's ingest jobs (queued, running, and finished), one per file,
+    each with the progress events buffered so far.
 
     This is how a returning client sees where its ingests stand: a job still
     running shows its progress up to now (and its stream can be re-attached
@@ -106,7 +109,7 @@ async def list_ingest_jobs(
             IngestJobInfoSchema(
                 job_id=job.job_id,
                 status=job.status,
-                files=[f.filename for f in job.payload],
+                file=job.payload.filename,
                 created_at=job.created_at,
                 events=[
                     IngestJobEventSchema(name=event.name, payload=event.payload)

@@ -28,8 +28,8 @@ class ProgressEmitter:
     def _publish(self, name: str, **payload: Any) -> None:
         self._events.publish(Event(name=name, payload=payload))
 
-    def queued(self, file: str, position: int) -> None:
-        self._publish(INGEST_QUEUED, file=file, position=position)
+    def queued(self, file: str) -> None:
+        self._publish(INGEST_QUEUED, file=file)
 
     def started(self, file: str) -> None:
         self._publish(INGEST_STARTED, file=file)
@@ -43,8 +43,8 @@ class ProgressEmitter:
     def file_done(self, file: str, chunk_count: int) -> None:
         self._publish(INGEST_FILE_DONE, file=file, chunk_count=chunk_count)
 
-    def done(self, files: list[str], total_chunks: int) -> None:
-        self._publish(INGEST_DONE, files=files, total_chunks=total_chunks)
+    def done(self, file: str, total_chunks: int) -> None:
+        self._publish(INGEST_DONE, file=file, total_chunks=total_chunks)
 
     def error(self, file: str | None, error: str) -> None:
         self._publish(INGEST_ERROR, file=file, error=error)

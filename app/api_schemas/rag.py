@@ -44,13 +44,20 @@ class RagStopResponseSchema(BaseModel):
 
 
 class IngestJobSchema(BaseModel):
-    """The acknowledgement for a queued (background) ingestion: the job id
-    addresses the progress stream, not the (not-yet-done) chunks."""
+    """One file's ingest job: its id addresses that file's progress stream,
+    not the (not-yet-done) chunks."""
 
-    chat_id: str
     job_id: str
     status: str
-    files: list[str]
+    file: str
+
+
+class IngestJobsResponseSchema(BaseModel):
+    """The acknowledgement for a queued (background) ingestion: one job per
+    file, so a batch's files ingest in parallel."""
+
+    chat_id: str
+    jobs: list[IngestJobSchema]
 
 
 class IngestJobEventSchema(BaseModel):
@@ -66,7 +73,7 @@ class IngestJobInfoSchema(BaseModel):
 
     job_id: str
     status: str
-    files: list[str]
+    file: str
     created_at: float
     events: list[IngestJobEventSchema]
 

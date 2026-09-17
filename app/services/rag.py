@@ -7,7 +7,6 @@ from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk, RetrievedChunk
 from app.models.ingest import (
     INGEST_CHAT,
-    INGEST_DONE,
     INGEST_ERROR,
     INGEST_TERMINAL,
 )
@@ -127,16 +126,22 @@ class RagService:
         """Stop the ingest worker pool (called at application shutdown)."""
         await self._ingest_queue.stop()
 
-    def enqueue_ingest(self, files: Sequence[IngestionFile], chat_id: str) -> Job:
-        """Queue one or more files for background ingestion into `chat_id`
-        and return the job (its id addresses the progress stream)."""
-        job = self._ingest_queue.enqueue(payload=files, group=chat_id)
-        # Ingest-specific start events (the generic queue emits none).
-        job.events.publish(Event(name=INGEST_CHAT, payload={"chat_id": chat_id}))
-        emitter = ProgressEmitter(job.events)
-        for position, file in enumerate(job.payload):
-            emitter.queued(file.filename, position)
-        return job
+    def enqueue_ingest(self, files: Sequence[IngestionFile], chat_id: str) -> list[Job]:
+        """Queue each file for background ingestion into `chat_id` as its own
+        job, and return the jobs (each id addresses its own progress stream).
+
+        One job per file is what lets the worker pool ingest a single upload
+        batch in parallel (bounded by `INGEST_WORKERS`), instead of one job
+        processing its files one at a time.
+        """
+        jobs: list[Job] = []
+        for file in files:
+            job = self._ingest_queue.enqueue(payload=file, group=chat_id)
+            # Ingest-specific start events (the generic queue emits none).
+            job.events.publish(Event(name=INGEST_CHAT, payload={"chat_id": chat_id}))
+            ProgressEmitter(job.events).queued(file.filename)
+            jobs.append(job)
+        return jobs
 
     def get_ingest_job(self, job_id: str) -> Job | None:
         """A queued/running/finished ingest job, or None."""
@@ -148,25 +153,14 @@ class RagService:
         return self._ingest_queue.jobs(group=chat_id)
 
     async def _process_ingest_job(self, job: Job) -> None:
-        """The worker's job: ingest each file (reporting progress) then mark
-        the job done."""
-        files = job.payload
+        """The worker's job: ingest the job's single file (reporting progress)
+        then mark the job done."""
+        file = job.payload
         emitter = ProgressEmitter(job.events)
-        total_chunks = 0
-        for file in files:
-            emitter.started(file.filename)
-            chunks = await self._ingestion_service.ingest(file, job.group, emitter)
-            total_chunks += len(chunks)
-            emitter.file_done(file.filename, len(chunks))
-        job.events.publish(
-            Event(
-                name=INGEST_DONE,
-                payload={
-                    "files": [file.filename for file in files],
-                    "total_chunks": total_chunks,
-                },
-            )
-        )
+        emitter.started(file.filename)
+        chunks = await self._ingestion_service.ingest(file, job.group, emitter)
+        emitter.file_done(file.filename, len(chunks))
+        emitter.done(file.filename, len(chunks))
 
     async def retrieve(
         self,

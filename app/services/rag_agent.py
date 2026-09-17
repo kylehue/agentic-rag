@@ -196,16 +196,10 @@ def _build_graph(
 
     async def model_node(state: AgentState, writer: StreamWriter) -> dict:
         within_budget = state["tool_rounds"] < max_tool_rounds
-        messages = list(state["messages"])
-        if not within_budget:
-            messages.append(
-                SystemMessage(
-                    content=(
-                        "The tool budget is exhausted. Answer now with the "
-                        "information you have."
-                    )
-                )
-            )
+        # When the budget is exhausted, `tools` is dropped below, which forces
+        # a plain answer. No "answer now" system message is appended, because
+        # a system message mid-conversation is rejected by OpenAI ("system
+        # message must be at the beginning").
 
         # Stream the turn: text deltas go out on the custom stream as they
         # happen (token by token), and the accumulated result is what the
@@ -213,7 +207,7 @@ def _build_graph(
         # text deltas (its commentary, if any, is not part of the trace).
         deltas: list[RawDelta] = []
         async for delta in llm.stream_complete(
-            _to_llm_messages(messages),
+            _to_llm_messages(state["messages"]),
             tools=specs if within_budget else None,
         ):
             deltas.append(delta)

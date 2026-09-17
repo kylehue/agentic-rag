@@ -195,6 +195,28 @@ def test_ask_stops_at_the_tool_budget():
     assert llm.tools[-1] == []
 
 
+def test_budget_exhausted_call_has_no_trailing_system_message():
+    # OpenAI rejects a system message after the first turn, so the
+    # budget-exhausted call must not append one; dropping the tools is what
+    # forces the answer.
+    llm = FakeLLM(
+        tool_call_response("search_documents"),
+        RawResult(content="Best effort answer."),
+    )
+    agent = make_agent(
+        llm,
+        [make_tool("search_documents", "still searching")],
+        max_tool_rounds=1,
+    )
+
+    asyncio.run(agent.ask("loop?", chat_id="s1"))
+
+    assert llm.tools[-1] == []
+    roles = [message.role for message in llm.calls[-1]]
+    assert roles.count("system") == 1
+    assert roles[0] == "system"
+
+
 def test_ask_continues_the_conversation_on_a_chat():
     llm = FakeLLM(
         RawResult(content="First answer."),

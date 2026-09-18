@@ -2,19 +2,17 @@ import asyncio
 import io
 import json
 
+import pandas as pd
+
 from app.agent_tools import (
-    InspectTableRelationshipsTool,
-    InspectTableTool,
+    PerformSqlToDocumentRecordsTool,
+    PerformSqlToDocumentTool,
     SearchDocumentTool,
-    SqlQueryDocumentsTool,
-    SqlQueryTableTool,
-    tools_outline,
+    ValidateChunkAsStructuredDataTool,
 )
 from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
 from app.models.chunk import RetrievedChunk
-from app.plugin.registry import PluginRegistry
 from app.retrievers.base import Retriever
-from app.services.ingestion import IngestionService
 from app.services.rag_agent import execute_tool
 from app.store_file.local import LocalFileStorage
 from app.store_sql.local import LocalSqlStorage
@@ -25,6 +23,20 @@ SALES_CSV = b"region,amount\nnorth,10\nsouth,25\n"
 BIG_CSV = b"n\n1\n2\n3\n4\n5\n6\n"
 EMBEDDED_SALES_CSV = b"region,amount\nwest,5\neast,7\n"
 EMBEDDED_UNITS_CSV = b"region,units\nwest,2\neast,3\n"
+
+
+def make_workbook_bytes() -> bytes:
+    """A real two-sheet xlsx. Sheet names carry a space so the tests exercise
+    SQLite identifier quoting (the in-memory tables are named by sheet)."""
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer) as writer:
+        pd.DataFrame({"region": ["north", "south"], "amount": [100, 200]}).to_excel(
+            writer, sheet_name="Sheet A", index=False
+        )
+        pd.DataFrame({"region": ["north", "south"], "country": ["N", "S"]}).to_excel(
+            writer, sheet_name="Sheet B", index=False
+        )
+    return buffer.getvalue()
 
 
 class FixedRetriever(Retriever):
@@ -64,25 +76,16 @@ def make_chunk(
 
 
 def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
-    """Real local storages (with the system tables) plus the RAG tools.
+    """Real local storages plus the RAG tools.
 
     The corpus (all in chat-a): a text document, a directly ingested csv
-    table, a big csv table, a two-sheet workbook, and a pdf whose two
-    embedded tables are stored as csvs sharing the pdf as their origin.
-    `chat_id` scopes the tools to one chat.
+    table, a big csv table, a csv source that stores no table, a real
+    two-sheet workbook, and a pdf with two embedded tables stored as csvs
+    sharing the pdf as their origin. `chat_id` scopes the tools to one chat.
     """
     retriever = FixedRetriever(retriever_chunks or [])
     sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
     file_storage = LocalFileStorage(storage_dir=tmp_path / "file")
-
-    service = IngestionService(
-        registry=PluginRegistry(),
-        llm=FakeLLM(),
-        embedder=FakeEmbedder(),
-        vector_storage=FakeVectorStorage(),
-        sql_storage=sql_storage,
-        file_storage=file_storage,
-    )
 
     def table_metadata(name, schema, row_count):
         return {
@@ -96,11 +99,17 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
         {"name": "region", "type": "TEXT"},
         {"name": "amount", "type": "INTEGER"},
     ]
+    COUNTRY_SCHEMA = [
+        {"name": "region", "type": "TEXT"},
+        {"name": "country", "type": "TEXT"},
+    ]
 
     async def setup():
         await sql_storage.create_tables()
 
-        async def store_document(source_id, filename, content_type, file_bytes):
+        async def store_document(
+            source_id, filename, content_type, file_bytes, is_origin=True
+        ):
             path = await file_storage.upload(
                 file=io.BytesIO(file_bytes),
                 file_filename=filename,
@@ -115,7 +124,7 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
                         "file_content_type": content_type,
                         "file_filename": filename,
                         "file_orig_filename": filename,
-                        "is_origin": True,
+                        "is_origin": is_origin,
                     }
                 ],
             )
@@ -171,11 +180,11 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
         # A csv source that stores no table chunk.
         await store_document("empty-src", "empty.csv", "text/csv", b"n\n1\n")
 
-        # A two-sheet workbook (one source, several tables).
+        # A real two-sheet workbook (one source, several tables).
         await store_document(
             "wb-src", "book.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            b"fake-xlsx-bytes",
+            make_workbook_bytes(),
         )
         await store_chunk(
             "sheet-a-chunk", "wb-src", "table", "Table: Sheet A ...",
@@ -183,17 +192,11 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
         )
         await store_chunk(
             "sheet-b-chunk", "wb-src", "table", "Table: Sheet B ...",
-            table_metadata(
-                "Sheet B",
-                [
-                    {"name": "name", "type": "TEXT"},
-                    {"name": "qty", "type": "INTEGER"},
-                ],
-                1,
-            ),
+            table_metadata("Sheet B", COUNTRY_SCHEMA, 2),
         )
 
-        # A pdf with two embedded tables (csvs sharing the pdf origin).
+        # A pdf (not a table) with two embedded tables stored as csvs sharing
+        # the pdf origin.
         await store_document(
             "pdf-src", "report.pdf", "application/pdf", b"fake-pdf-bytes"
         )
@@ -202,16 +205,17 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
             {"source_page_number": 2},
         )
         await store_document(
-            "emb-1", "report_table_1.csv", "text/csv", EMBEDDED_SALES_CSV
+            "emb-1", "report_table_1.csv", "text/csv", EMBEDDED_SALES_CSV,
+            is_origin=False,
         )
         await store_chunk(
             "emb-1-chunk", "emb-1", "table", "Table: report_table_1 ...",
             table_metadata("report_table_1", SALES_SCHEMA, 2),
-            origin_source_id="pdf-src",
-            parent_source_id="pdf-src",
+            origin_source_id="pdf-src", parent_source_id="pdf-src",
         )
         await store_document(
-            "emb-2", "report_table_2.csv", "text/csv", EMBEDDED_UNITS_CSV
+            "emb-2", "report_table_2.csv", "text/csv", EMBEDDED_UNITS_CSV,
+            is_origin=False,
         )
         await store_chunk(
             "emb-2-chunk", "emb-2", "table", "Table: report_table_2 ...",
@@ -223,8 +227,7 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
                 ],
                 2,
             ),
-            origin_source_id="pdf-src",
-            parent_source_id="pdf-src",
+            origin_source_id="pdf-src", parent_source_id="pdf-src",
         )
 
         await sql_storage.close()
@@ -239,10 +242,9 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
     )
     tools = [
         SearchDocumentTool(),
-        InspectTableTool(),
-        InspectTableRelationshipsTool(),
-        SqlQueryTableTool(),
-        SqlQueryDocumentsTool(),
+        ValidateChunkAsStructuredDataTool(),
+        PerformSqlToDocumentTool(),
+        PerformSqlToDocumentRecordsTool(),
     ]
     executors = {
         tool.name: tool.create_executor(rag_service, chat_id) for tool in tools
@@ -257,22 +259,26 @@ def execute(executors, name: str, **arguments) -> str:
 # --- search_documents ---
 
 
-def test_search_documents_returns_ranked_evidence(tmp_path):
+def test_search_documents_returns_chunk_ids_and_text(tmp_path):
     tools, retriever = build_tools(
         tmp_path,
         retriever_chunks=[
             make_chunk("c1", "text", "first evidence"),
-            make_chunk("c2", "table", "second evidence", table_name="sales"),
+            make_chunk("c2", "table", "second evidence"),
         ],
     )
 
     output = execute(tools, "search_documents", query="evidence?")
 
     assert retriever.queries == ["evidence?"]
-    # Each chunk carries its origin source id and chunk id (the ids the model
-    # cites); the tool knows nothing about the citation format itself.
-    assert "[1] origin=s1 chunk=c1 first evidence" in output
-    assert "[2] origin=s1 chunk=c2 second evidence" in output
+    # Each chunk exposes its source id (the table tools' handle), chunk id,
+    # and origin source id (the citation key), then its text.
+    assert (
+        "[1] source_id=s1 chunk_id=c1 origin_source_id=s1\nfirst evidence" in output
+    )
+    assert (
+        "[2] source_id=s1 chunk_id=c2 origin_source_id=s1\nsecond evidence" in output
+    )
 
 
 def test_search_documents_reports_no_evidence(tmp_path):
@@ -281,357 +287,184 @@ def test_search_documents_reports_no_evidence(tmp_path):
     assert execute(tools, "search_documents", query="anything") == "No evidence found."
 
 
-# --- inspect_table ---
+# --- validate_chunk_as_structured_data ---
 
 
-def test_inspect_table_returns_the_full_record(tmp_path):
+def test_validate_csv_returns_one_schema(tmp_path):
     tools, _ = build_tools(tmp_path)
 
-    payload = json.loads(execute(tools, "inspect_table", source_id="tbl-src"))
+    output = json.loads(
+        execute(tools, "validate_chunk_as_structured_data", source_id="tbl-src")
+    )
 
-    assert payload["source_id"] == "tbl-src"
-    assert payload["chunk_id"] == "sales-chunk"
-    assert payload["parent_source_id"] is None
-    assert payload["origin_source_id"] == "tbl-src"
-    assert payload["text"] == "Table: sales ..."
-    # The entire metadata, not a selection of it.
-    assert payload["metadata"]["table_name"] == "sales"
-    assert payload["metadata"]["schema"] == [
+    assert len(output) == 1
+    assert output[0]["table_name"] == "sales"
+    assert output[0]["schema"] == [
         {"name": "region", "type": "TEXT"},
         {"name": "amount", "type": "INTEGER"},
     ]
-    assert payload["metadata"]["row_count"] == 2
-    assert payload["metadata"]["column_count"] == 2
+    assert output[0]["row_count"] == 2
 
 
-def test_inspect_table_rejects_a_non_csv_source(tmp_path):
+def test_validate_workbook_returns_one_schema_per_sheet(tmp_path):
     tools, _ = build_tools(tmp_path)
 
-    output = execute(tools, "inspect_table", source_id="wb-src")
+    output = json.loads(
+        execute(tools, "validate_chunk_as_structured_data", source_id="wb-src")
+    )
 
-    assert output.startswith("Error in tool 'inspect_table'")
-    assert "not a csv table" in output
+    assert {entry["table_name"] for entry in output} == {"Sheet A", "Sheet B"}
+    assert len(output) == 2
 
 
-def test_inspect_table_rejects_a_source_without_tables(tmp_path):
+def test_validate_rejects_a_non_table_source(tmp_path):
     tools, _ = build_tools(tmp_path)
 
-    # A csv source with no table chunk...
-    output = execute(tools, "inspect_table", source_id="empty-src")
-    assert output.startswith("Error in tool 'inspect_table'")
-    assert "stores no table" in output
-    # ...and a non-csv document is rejected before any table lookup.
-    output = execute(tools, "inspect_table", source_id="doc-src")
-    assert "not a csv table" in output
+    output = execute(tools, "validate_chunk_as_structured_data", source_id="doc-src")
+
+    assert output.startswith("Error in tool 'validate_chunk_as_structured_data'")
+    assert "not a table" in output
 
 
-def test_inspect_table_rejects_an_unknown_source(tmp_path):
+def test_validate_rejects_a_source_that_stores_no_table(tmp_path):
     tools, _ = build_tools(tmp_path)
 
-    output = execute(tools, "inspect_table", source_id="nope")
+    output = execute(tools, "validate_chunk_as_structured_data", source_id="empty-src")
 
-    assert output.startswith("Error in tool 'inspect_table'")
-    assert "Unknown source 'nope'" in output
-
-
-# --- inspect_table_relationships ---
-
-
-def test_relationships_list_the_sibling_tables_of_the_origin(tmp_path):
-    tools, _ = build_tools(tmp_path)
-
-    output = execute(tools, "inspect_table_relationships", source_id="emb-1")
-
-    # The sibling embedded table (same pdf origin), not itself.
-    assert "emb-2" in output
-    assert "emb-1" not in output
-    line = next(json.loads(l) for l in output.splitlines() if l.startswith("{"))
-    assert line["source_id"] == "emb-2"
-    assert line["chunk_id"] == "emb-2-chunk"
-    assert "Table: report_table_2" in line["description"]
-    assert line["schema"] == "region: TEXT, units: INTEGER"
-
-
-def test_relationships_of_a_workbook_source_list_its_sheets(tmp_path):
-    tools, _ = build_tools(tmp_path)
-
-    output = execute(tools, "inspect_table_relationships", source_id="wb-src")
-
-    # The workbook's sheets are each other's possible relationships.
-    assert "Sheet A" in output and "Sheet B" in output
-    assert output.count("wb-src") >= 2
-
-
-def test_relationships_with_no_siblings(tmp_path):
-    tools, _ = build_tools(tmp_path)
-
-    output = execute(tools, "inspect_table_relationships", source_id="tbl-src")
-
-    assert "No other tables share this table's origin document." in output
-
-
-def test_relationships_reject_non_table_sources(tmp_path):
-    tools, _ = build_tools(tmp_path)
-
-    output = execute(tools, "inspect_table_relationships", source_id="doc-src")
-    assert output.startswith("Error in tool 'inspect_table_relationships'")
+    assert output.startswith("Error in tool 'validate_chunk_as_structured_data'")
     assert "stores no table" in output
 
-    output = execute(tools, "inspect_table_relationships", source_id="nope")
-    assert "Unknown source 'nope'" in output
+
+def test_validate_rejects_an_unknown_source(tmp_path):
+    tools, _ = build_tools(tmp_path)
+
+    output = execute(tools, "validate_chunk_as_structured_data", source_id="nope")
+
+    assert output.startswith("Error in tool 'validate_chunk_as_structured_data'")
+    assert "Unknown source" in output
 
 
-# --- sql_query_table ---
+# --- perform_sql_to_document ---
 
 
-def test_sql_query_table_computes_with_sql(tmp_path):
+def test_perform_sql_computes_on_a_csv(tmp_path):
     tools, _ = build_tools(tmp_path)
 
     output = execute(
         tools,
-        "sql_query_table",
+        "perform_sql_to_document",
         source_id="tbl-src",
-        sql="SELECT SUM(amount) AS total FROM data",
+        sql_query="SELECT SUM(amount) AS total FROM sales",
     )
 
-    assert "total" in output
+    assert "Tables: sales" in output
     assert "35" in output
 
 
-def test_sql_query_table_joins_related_tables(tmp_path):
+def test_perform_sql_joins_a_workbooks_sheets(tmp_path):
     tools, _ = build_tools(tmp_path)
 
     output = execute(
         tools,
-        "sql_query_table",
-        source_id="emb-1",
-        sql=(
-            "SELECT related.units FROM data "
-            "JOIN related ON data.region = related.region "
-            "WHERE data.region = 'east'"
+        "perform_sql_to_document",
+        source_id="wb-src",
+        sql_query=(
+            'SELECT "Sheet B".country, SUM("Sheet A".amount) AS total '
+            'FROM "Sheet A" JOIN "Sheet B" '
+            'ON "Sheet A".region = "Sheet B".region '
+            'GROUP BY "Sheet B".country ORDER BY "Sheet B".country'
         ),
-        table_relationships={"related": "emb-2"},
     )
 
-    assert "units" in output
-    assert "3" in output
-    assert "related tables loaded as: related" in output
+    # Both sheets are loaded, and the join pairs Sheet A's amounts with
+    # Sheet B's country.
+    assert "N,100" in output
+    assert "S,200" in output
 
 
-def test_sql_query_table_rejects_a_non_csv_source(tmp_path):
-    tools, _ = build_tools(tmp_path)
-
-    output = execute(
-        tools, "sql_query_table", source_id="wb-src", sql="SELECT 1"
-    )
-
-    assert output.startswith("Error in tool 'sql_query_table'")
-    assert "not a csv table" in output
-
-
-def test_sql_query_table_rejects_a_non_csv_related_table(tmp_path):
+def test_perform_sql_caps_the_result_rows(tmp_path):
     tools, _ = build_tools(tmp_path)
 
     output = execute(
         tools,
-        "sql_query_table",
-        source_id="tbl-src",
-        sql="SELECT 1 FROM data",
-        table_relationships={"r": "wb-src"},
+        "perform_sql_to_document",
+        source_id="big-src",
+        sql_query="SELECT n FROM big",
     )
 
-    assert output.startswith("Error in tool 'sql_query_table'")
-    assert "not a csv table" in output
-
-
-def test_sql_query_table_rejects_bad_aliases(tmp_path):
-    tools, _ = build_tools(tmp_path)
-
-    output = execute(
-        tools,
-        "sql_query_table",
-        source_id="tbl-src",
-        sql="SELECT 1 FROM data",
-        table_relationships={"data": "emb-2"},
-    )
-    assert output.startswith("Error in tool 'sql_query_table'")
-    assert "reserved" in output
-
-    output = execute(
-        tools,
-        "sql_query_table",
-        source_id="tbl-src",
-        sql="SELECT 1 FROM data",
-        table_relationships={"1bad": "emb-2"},
-    )
-    assert "Invalid table alias '1bad'" in output
-
-
-def test_sql_query_table_caps_the_result_rows(tmp_path):
-    tools, _ = build_tools(tmp_path)
-
-    output = execute(
-        tools, "sql_query_table", source_id="big-src", sql="SELECT n FROM data"
-    )
-
+    # big.csv has 6 rows; the output is capped at 5 with a note.
     assert "showing the first 5 of 6 rows" in output
-    assert "1" in output and "5" in output
-    assert "\n6" not in output
 
 
-# --- sql_query_documents ---
-
-
-def test_sql_query_documents_reads_the_chunks_table(tmp_path):
-    tools, _ = build_tools(tmp_path, chat_id="chat-a")
-
-    output = execute(
-        tools,
-        "sql_query_documents",
-        sql="SELECT chunk_id, chat_id FROM __chunks__ WHERE chat_id = 'chat-a'",
-    )
-
-    assert "sales-chunk" in output
-    assert "text-chunk" in output
-    # The scope wraps the query; rows from other chats never come back.
-    assert "chat-b" not in output
-
-
-def test_sql_query_documents_rejects_non_select(tmp_path):
+def test_perform_sql_rejects_a_non_table_source(tmp_path):
     tools, _ = build_tools(tmp_path)
 
     output = execute(
-        tools, "sql_query_documents", sql="DELETE FROM __chunks__ WHERE 1 = 1"
+        tools,
+        "perform_sql_to_document",
+        source_id="doc-src",
+        sql_query="SELECT 1",
+    )
+
+    assert output.startswith("Error in tool 'perform_sql_to_document'")
+    assert "not a table" in output
+
+
+# --- perform_sql_to_document_records ---
+
+
+def test_records_queries_the_chunks_table(tmp_path):
+    tools, _ = build_tools(tmp_path)
+
+    output = execute(
+        tools,
+        "perform_sql_to_document_records",
+        sql="SELECT chunk_id FROM __chunks__ WHERE source_id = 'tbl-src'",
+    )
+
+    assert "sales-chunk" in output
+
+
+def test_records_rejects_non_select(tmp_path):
+    tools, _ = build_tools(tmp_path)
+
+    output = execute(
+        tools,
+        "perform_sql_to_document_records",
+        sql="DELETE FROM __chunks__ WHERE 1 = 1",
     )
 
     assert output == "Error: only read-only SELECT queries are allowed."
 
 
-def test_sql_query_documents_rejects_cte_wrapped_queries(tmp_path):
+def test_records_rejects_cte_wrapped_queries(tmp_path):
     tools, _ = build_tools(tmp_path)
 
     output = execute(
         tools,
-        "sql_query_documents",
-        sql="WITH x AS (SELECT 1 AS n) SELECT * FROM x",
+        "perform_sql_to_document_records",
+        sql="WITH x AS (SELECT 1) SELECT * FROM x",
     )
 
-    # A CTE can wrap a DELETE in SQLite, so WITH is not a SELECT alias; the
-    # guard matches the storage layer's backstop.
     assert output == "Error: only read-only SELECT queries are allowed."
 
 
-def test_sql_query_documents_scoped_to_the_chat(tmp_path):
+def test_records_scoped_to_the_chat(tmp_path):
     tools, _ = build_tools(tmp_path, chat_id="chat-a")
 
+    # A query that omits chat_id is wrapped to require it, so it fails with a
+    # SQL error (returned to the model) instead of leaking the scope.
     output = execute(
         tools,
-        "sql_query_documents",
-        sql="SELECT chunk_id, chat_id FROM __chunks__ WHERE chat_id = 'chat-a'",
+        "perform_sql_to_document_records",
+        sql="SELECT chunk_id FROM __chunks__",
+    )
+    assert "Error" in output
+
+    # Selecting chat_id lets the scoped query through.
+    output = execute(
+        tools,
+        "perform_sql_to_document_records",
+        sql="SELECT chunk_id, chat_id FROM __chunks__ WHERE source_id = 'tbl-src'",
     )
     assert "sales-chunk" in output
-    # ...and a query that does not select chat_id cannot bypass the scope.
-    bypass = execute(tools, "sql_query_documents", sql="SELECT chunk_id FROM __chunks__")
-    assert bypass.startswith("Error in tool 'sql_query_documents'")
-
-
-# --- tool definitions ---
-
-
-def rag_tools():
-    return [
-        SearchDocumentTool(),
-        InspectTableTool(),
-        InspectTableRelationshipsTool(),
-        SqlQueryTableTool(),
-        SqlQueryDocumentsTool(),
-    ]
-
-
-def test_tool_definitions_carry_name_description_and_parameters():
-    tools = rag_tools()
-
-    assert {tool.name for tool in tools} == {
-        "search_documents",
-        "inspect_table",
-        "inspect_table_relationships",
-        "sql_query_table",
-        "sql_query_documents",
-    }
-    assert InspectTableTool().parameters["required"] == ["source_id"]
-    assert SqlQueryTableTool().parameters["required"] == ["source_id", "sql"]
-
-
-def test_outline_summarizes_each_tool_from_its_definition():
-    outline = tools_outline(rag_tools())
-
-    # Every tool, with its description...
-    for name in (
-        "search_documents",
-        "inspect_table",
-        "inspect_table_relationships",
-        "sql_query_table",
-        "sql_query_documents",
-    ):
-        assert f"`{name}`" in outline
-    # ...and a compact parameter summary derived from its JSON schema.
-    assert "Parameters: query (string, required)" in outline
-    assert "Parameters: source_id (string, required)" in outline
-    assert (
-        "Parameters: source_id (string, required), sql (string, required), "
-        "table_relationships (object, optional)" in outline
-    )
-    # All five tools take parameters.
-    assert outline.count("Parameters: ") == 5
-
-
-def test_unknown_tool_returns_an_error_string(tmp_path):
-    executors, _ = build_tools(tmp_path)
-
-    assert execute(executors, "nope") == "Error: unknown tool 'nope'."
-
-
-# --- chat scoping ---
-# The fixture corpus lives in chat-a; a chat-empty scope sees none of it.
-# Separate storage dirs because the setup is not idempotent for a second
-# call on the same path.
-
-
-def test_inspect_table_scoped_outside_the_chat(tmp_path):
-    executors, _ = build_tools(tmp_path / "a", chat_id="chat-empty")
-
-    output = execute(executors, "inspect_table", source_id="tbl-src")
-    assert output.startswith("Error in tool 'inspect_table'")
-    assert "not in this chat" in output
-
-
-def test_relationships_scoped_to_the_chat(tmp_path):
-    executors, _ = build_tools(tmp_path / "a", chat_id="chat-empty")
-
-    output = execute(executors, "inspect_table_relationships", source_id="emb-1")
-    assert output.startswith("Error in tool 'inspect_table_relationships'")
-    assert "not in this chat" in output
-
-
-def test_search_documents_scoped_to_the_chat(tmp_path):
-    chunks = [
-        make_chunk("c1", "text", "evidence", chat_id="chat-a"),
-        make_chunk("c2", "table", "more", chat_id="chat-b"),
-    ]
-    executors_a, retriever_a = build_tools(
-        tmp_path / "a", chat_id="chat-a", retriever_chunks=chunks
-    )
-    executors_none, _ = build_tools(
-        tmp_path / "n", chat_id="chat-empty", retriever_chunks=chunks
-    )
-
-    assert (
-        "[1] origin=s1 chunk=c1 evidence"
-        in execute(executors_a, "search_documents", query="q")
-    )
-    assert "chunk=c2" not in execute(executors_a, "search_documents", query="q")
-    assert (
-        execute(executors_none, "search_documents", query="q") == "No evidence found."
-    )
-    # The chat id reached the retrieval path as the where condition.
-    assert retriever_a.wheres == [{"chat_id": "chat-a"}, {"chat_id": "chat-a"}]

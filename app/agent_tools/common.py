@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import io
-import re
 import sqlite3
 from collections.abc import Sequence
+from pathlib import Path
 
 import pandas as pd
 
@@ -12,19 +12,18 @@ from app.store_file.base import FileStorage
 from app.store_sql.base import SqlStorage
 
 # Row caps keep tool output small enough for the model's context.
-QUERY_TABLE_MAX_ROWS = 5
-QUERY_DOCUMENTS_MAX_ROWS = 5
+SQL_MAX_ROWS = 5
 
-# The main table's name inside sql_query_table's database.
-MAIN_TABLE_NAME = "data"
+# The stored-file extensions that mark a source as tabular data.
+TABLE_EXTENSIONS = frozenset({"csv", "xlsx", "xls"})
 
-# SQL identifiers the model may use as related-table aliases.
-_ALIAS_SHAPE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-# The main table's source_id, shared by the tools that take it.
-SOURCE_ID_DESCRIPTION = (
-    "The table's source id, as shown by search_documents or the "
-    "inspect_table / sql_query_table results."
+# The shared description for a source_id parameter, so the tools agree. It is
+# deliberately emphatic about what the id is NOT: the model otherwise tends to
+# substitute a file name or a table name for it.
+SOURCE_ID_PARAMETER = (
+    "The document's source id: an opaque UUID-like identifier, shown as "
+    "`source_id=` in search results. Copy that exact value; it is not the "
+    "file name and not a table name."
 )
 
 
@@ -35,16 +34,38 @@ def object_schema(properties: dict, required: list[str] | None = None) -> dict:
     return schema
 
 
-# --- table lookup (no plugin knowledge) ---
+# --- source / table lookup (no plugin knowledge) ---
 #
-# The tools know nothing about plugins. A chunk row is a table when its
-# metadata carries the table's schema; everything else (the file it came
-# from, how to address it) is read from the chunk and document rows.
+# A chunk row is a table when its metadata carries the table's schema; the
+# stored file a source points at is read from the document row.
 
 
 def is_table_row(row: dict) -> bool:
     metadata = row.get("metadata")
     return isinstance(metadata, dict) and isinstance(metadata.get("schema"), list)
+
+
+def document_extension(document: dict) -> str:
+    """The stored file's extension (lowercased, no dot), from its original
+    filename, falling back to the stored name."""
+    for key in ("file_orig_filename", "file_filename"):
+        name = document.get(key)
+        if name:
+            return Path(name).suffix.lower().lstrip(".")
+    return ""
+
+
+def is_table_type(document: dict) -> bool:
+    return document_extension(document) in TABLE_EXTENSIONS
+
+
+async def document_for_source(
+    sql_storage: SqlStorage, source_id: str
+) -> dict | None:
+    return await sql_storage.get(
+        DOCUMENT_METADATA_TABLE_NAME,
+        condition=lambda t: t.c.source_id == source_id,
+    )
 
 
 async def table_chunks_for_source(
@@ -61,96 +82,59 @@ async def table_chunks_for_source(
     return [row for row in rows if is_table_row(row)]
 
 
-async def table_chunks_with_origin(
-    sql_storage: SqlStorage, origin_source_id: str, chat_id: str | None = None
-) -> list[dict]:
-    """All table chunk rows whose origin document is the given source."""
-    def condition(t):
-        expr = t.c.origin_source_id == origin_source_id
-        if chat_id is not None:
-            expr = expr & (t.c.chat_id == chat_id)
-        return expr
-
-    rows = await sql_storage.get_all(CHUNK_TABLE_NAME, condition=condition)
-    return [row for row in rows if is_table_row(row)]
-
-
-async def document_for_source(
-    sql_storage: SqlStorage, source_id: str
-) -> dict | None:
-    return await sql_storage.get(
-        DOCUMENT_METADATA_TABLE_NAME,
-        condition=lambda t: t.c.source_id == source_id,
-    )
-
-
-def is_csv_document(document: dict) -> bool:
-    return (document.get("file_orig_filename") or "").lower().endswith(".csv")
-
-
-async def resolve_table_source(
+async def resolve_table_document(
     sql_storage: SqlStorage, source_id: str, chat_id: str | None = None
-) -> list[dict]:
-    """All of a source's table chunk rows, with friendly errors when the
-    source is unknown, not in the chat, or stores no table."""
-    rows = await table_chunks_for_source(sql_storage, source_id, chat_id)
-    if rows:
-        return rows
-    if chat_id is not None and await table_chunks_for_source(sql_storage, source_id):
-        raise ValueError(f"Source '{source_id}''s tables are not in this chat.")
+) -> dict:
+    """The stored document for a table source, with friendly errors when the
+    source is unknown, not in this chat, or not a spreadsheet."""
     document = await document_for_source(sql_storage, source_id)
     if document is None:
         raise ValueError(f"Unknown source '{source_id}'.")
-    raise ValueError(f"Source '{source_id}' stores no table.")
-
-
-async def resolve_csv_table(
-    sql_storage: SqlStorage, source_id: str, chat_id: str | None = None
-) -> tuple[dict, dict]:
-    """The (table chunk row, document row) for a source stored as a csv.
-
-    Raises ValueError when the source is unknown, not a csv (tables stored
-    as multi-sheet workbooks are not csv tables), or stores no table.
-    """
-    document = await document_for_source(sql_storage, source_id)
-    if document is None:
-        raise ValueError(f"Unknown source '{source_id}'.")
-    if not is_csv_document(document):
+    if chat_id is not None and document.get("chat_id") != chat_id:
+        raise ValueError(f"Source '{source_id}' is not in this chat.")
+    if not is_table_type(document):
         raise ValueError(
-            f"Source '{source_id}' is not a csv table "
-            f"(it's a '{document.get('file_orig_filename')}' file)."
+            f"Source '{source_id}' is not a table "
+            f"(it's a '{document_extension(document) or 'unknown'}' file)."
         )
-    rows = await table_chunks_for_source(sql_storage, source_id, chat_id)
-    if not rows:
-        if chat_id is not None and await table_chunks_for_source(
-            sql_storage, source_id
-        ):
-            raise ValueError(f"Source '{source_id}''s table is not in this chat.")
-        raise ValueError(f"Source '{source_id}' stores no table.")
-    if len(rows) > 1:
-        raise ValueError(
-            f"Source '{source_id}' stores several tables; a csv source "
-            "stores one."
+    return document
+
+
+def table_schema_entries(rows: Sequence[dict]) -> list[dict]:
+    """One entry per table chunk: its table name, schema, and row count, read
+    from the stored metadata (no data read)."""
+    entries = []
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        entries.append(
+            {
+                "table_name": metadata.get("table_name"),
+                "schema": metadata.get("schema"),
+                "row_count": metadata.get("row_count"),
+            }
         )
-    return rows[0], document
+    return entries
 
 
 # --- table data (sqlite) ---
 
 
-async def load_csv_table(file_storage: FileStorage, document: dict) -> pd.DataFrame:
-    """A csv table's data: the whole file, as a dataframe."""
-    return pd.read_csv(io.BytesIO(await file_storage.read_bytes(document["file_path"])))
-
-
-def validate_table_aliases(aliases: Sequence[str]) -> None:
-    for alias in aliases:
-        if not _ALIAS_SHAPE.fullmatch(alias):
-            raise ValueError(f"Invalid table alias '{alias}'.")
-        if alias == MAIN_TABLE_NAME:
-            raise ValueError(
-                f"'{MAIN_TABLE_NAME}' is reserved for the main table."
-            )
+async def read_source_tables(
+    file_storage: FileStorage, document: dict
+) -> dict[str, pd.DataFrame]:
+    """A spreadsheet source's data as {table name: DataFrame}. A csv is one
+    table (named after the file); a workbook is one table per sheet (named
+    after the sheet). The names match the table_name stored in the chunks'
+    metadata, so they are what the model uses in SQL and for JOINs."""
+    raw = await file_storage.read_bytes(document["file_path"])
+    extension = document_extension(document)
+    if extension == "csv":
+        name = Path(document.get("file_orig_filename") or document.get("file_filename") or "").stem
+        return {name or "data": pd.read_csv(io.BytesIO(raw))}
+    if extension in ("xlsx", "xls"):
+        sheets = pd.read_excel(io.BytesIO(raw), sheet_name=None)
+        return {str(name): dataframe for name, dataframe in sheets.items()}
+    raise ValueError(f"Source is not a spreadsheet (it's a '{extension}' file).")
 
 
 def run_table_sql(
@@ -165,10 +149,3 @@ def run_table_sql(
         return pd.read_sql_query(sql, connection)
     finally:
         connection.close()
-
-
-def format_schema(schema: Sequence[dict]) -> str:
-    """The schema as one compact line: `column: TYPE, ...`."""
-    if not schema:
-        return "(schema unavailable)"
-    return ", ".join(f"{col['name']}: {col['type']}" for col in schema)

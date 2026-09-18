@@ -4,11 +4,10 @@ import pytest
 
 from app.agent_tools import (
     AgentToolset,
-    InspectTableRelationshipsTool,
-    InspectTableTool,
+    PerformSqlToDocumentRecordsTool,
+    PerformSqlToDocumentTool,
     SearchDocumentTool,
-    SqlQueryDocumentsTool,
-    SqlQueryTableTool,
+    ValidateChunkAsStructuredDataTool,
     RAG_TOOLSET,
     flatten_tools,
     render_tool_blocks,
@@ -33,10 +32,9 @@ FULL_ANSWER = "The garden plan is in the report."
 
 RAG_TOOLS = [
     SearchDocumentTool(),
-    InspectTableTool(),
-    InspectTableRelationshipsTool(),
-    SqlQueryTableTool(),
-    SqlQueryDocumentsTool(),
+    ValidateChunkAsStructuredDataTool(),
+    PerformSqlToDocumentTool(),
+    PerformSqlToDocumentRecordsTool(),
 ]
 
 
@@ -112,22 +110,25 @@ def test_ask_answers_without_tools_when_none_are_requested():
 def test_ask_executes_several_tool_rounds():
     calls: list = []
     llm = FakeLLM(
-        tool_call_response("inspect_table", {"source_id": "tbl-src"}),
-        tool_call_response("sql_query_table", {"source_id": "tbl-src", "sql": "SELECT 1"}),
+        tool_call_response("validate_chunk_as_structured_data", {"source_id": "tbl-src"}),
+        tool_call_response("perform_sql_to_document", {"source_id": "tbl-src", "sql_query": "SELECT 1"}),
         RawResult(content="The total is 35."),
     )
     agent = make_agent(
         llm,
         [
-            make_tool("inspect_table", "columns: region, amount", calls),
-            make_tool("sql_query_table", "total is 35", calls),
+            make_tool("validate_chunk_as_structured_data", "columns: region, amount", calls),
+            make_tool("perform_sql_to_document", "total is 35", calls),
         ],
     )
 
     result = asyncio.run(agent.ask("total?", chat_id="s1"))
 
     assert result.answer == "The total is 35."
-    assert [name for name, _ in calls] == ["inspect_table", "sql_query_table"]
+    assert [name for name, _ in calls] == [
+        "validate_chunk_as_structured_data",
+        "perform_sql_to_document",
+    ]
 
 
 def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
@@ -136,8 +137,8 @@ def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
         RawResult(
             content="",
             tool_calls=(
-                ToolCall(id="c1", name="inspect_table", arguments={"source_id": "tbl-src"}),
-                ToolCall(id="c2", name="inspect_table_relationships", arguments={"source_id": "tbl-src"}),
+                ToolCall(id="c1", name="validate_chunk_as_structured_data", arguments={"source_id": "tbl-src"}),
+                ToolCall(id="c2", name="perform_sql_to_document_records", arguments={"sql": "SELECT 1"}),
             ),
         ),
         RawResult(content="Done."),
@@ -145,8 +146,8 @@ def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
     agent = make_agent(
         llm,
         [
-            make_tool("inspect_table", "columns: region, amount", calls),
-            make_tool("inspect_table_relationships", "no siblings", calls),
+            make_tool("validate_chunk_as_structured_data", "columns: region, amount", calls),
+            make_tool("perform_sql_to_document_records", "no records", calls),
         ],
     )
 
@@ -155,8 +156,8 @@ def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
     assert result.answer == "Done."
     # Both calls of the one round executed...
     assert [name for name, _ in calls] == [
-        "inspect_table",
-        "inspect_table_relationships",
+        "validate_chunk_as_structured_data",
+        "perform_sql_to_document_records",
     ]
     # ...and only two LLM calls happened: the round, then the final answer.
     assert len(llm.calls) == 2
@@ -164,13 +165,13 @@ def test_ask_runs_a_round_of_parallel_tool_calls_at_once():
     tool_results = [m for m in llm.calls[1] if m.role == "tool"]
     assert [str(m.content) for m in tool_results] == [
         "columns: region, amount",
-        "no siblings",
+        "no records",
     ]
     # The budget was not exhausted, so the final call still offered the
     # tools; the model simply chose to answer.
     assert [spec.name for spec in llm.tools[1]] == [
-        "inspect_table",
-        "inspect_table_relationships",
+        "validate_chunk_as_structured_data",
+        "perform_sql_to_document_records",
     ]
 
 
@@ -502,10 +503,9 @@ def test_system_prompt_is_built_from_the_tools_outline():
     assert "Tools:" in system_prompt
     for name in (
         "search_documents",
-        "inspect_table",
-        "inspect_table_relationships",
-        "sql_query_table",
-        "sql_query_documents",
+        "validate_chunk_as_structured_data",
+        "perform_sql_to_document",
+        "perform_sql_to_document_records",
     ):
         assert f"`{name}`" in system_prompt
     assert "Parameters: query (string, required)" in system_prompt
@@ -577,14 +577,13 @@ def test_rag_toolset_provides_the_rag_tools_and_workflow():
     assert toolset.name == "RAG"
     assert [tool.name for tool in toolset.tools] == [
         "search_documents",
-        "inspect_table",
-        "inspect_table_relationships",
-        "sql_query_table",
-        "sql_query_documents",
+        "validate_chunk_as_structured_data",
+        "perform_sql_to_document",
+        "perform_sql_to_document_records",
     ]
     # The cross-tool orchestration lives in the toolset, not the tools.
     assert "search_documents" in toolset.instructions
-    assert "sql_query_table" in toolset.instructions
+    assert "perform_sql_to_document" in toolset.instructions
 
 
 def test_duplicate_tool_names_across_a_toolset_and_a_bare_tool_are_deduped():
@@ -682,8 +681,8 @@ def test_ask_stream_parallel_calls_yield_every_step_in_order():
         RawResult(
             content="",
             tool_calls=(
-                ToolCall(id="c1", name="inspect_table", arguments={"source_id": "tbl-src"}),
-                ToolCall(id="c2", name="inspect_table_relationships", arguments={"source_id": "tbl-src"}),
+                ToolCall(id="c1", name="validate_chunk_as_structured_data", arguments={"source_id": "tbl-src"}),
+                ToolCall(id="c2", name="perform_sql_to_document_records", arguments={"sql": "SELECT 1"}),
             ),
         ),
         RawResult(content="Done."),
@@ -691,8 +690,8 @@ def test_ask_stream_parallel_calls_yield_every_step_in_order():
     agent = make_agent(
         llm,
         [
-            make_tool("inspect_table", "columns: region, amount"),
-            make_tool("inspect_table_relationships", "no siblings"),
+            make_tool("validate_chunk_as_structured_data", "columns: region, amount"),
+            make_tool("perform_sql_to_document_records", "no records"),
         ],
     )
 
@@ -702,22 +701,23 @@ def test_ask_stream_parallel_calls_yield_every_step_in_order():
 
     assert items[:5] == [
         StreamEvent(
-            "tool_call", {"name": "inspect_table", "arguments": {"source_id": "tbl-src"}}
+            "tool_call",
+            {"name": "validate_chunk_as_structured_data", "arguments": {"source_id": "tbl-src"}},
         ),
         StreamEvent(
             "tool_call",
             {
-                "name": "inspect_table_relationships",
-                "arguments": {"source_id": "tbl-src"},
+                "name": "perform_sql_to_document_records",
+                "arguments": {"sql": "SELECT 1"},
             },
         ),
         StreamEvent(
             "tool_result",
-            {"name": "inspect_table", "content": "columns: region, amount"},
+            {"name": "validate_chunk_as_structured_data", "content": "columns: region, amount"},
         ),
         StreamEvent(
             "tool_result",
-            {"name": "inspect_table_relationships", "content": "no siblings"},
+            {"name": "perform_sql_to_document_records", "content": "no records"},
         ),
         StreamEvent("answer_delta", {"content": "Done."}),
     ]

@@ -6,23 +6,25 @@ from app.agent_tools.base import (
     render_tool_blocks,
     tools_outline,
 )
-from app.agent_tools.inspect_table import InspectTableTool
-from app.agent_tools.inspect_table_relationships import InspectTableRelationshipsTool
+from app.agent_tools.perform_sql_to_document import PerformSqlToDocumentTool
+from app.agent_tools.perform_sql_to_document_records import (
+    PerformSqlToDocumentRecordsTool,
+)
 from app.agent_tools.rag_toolset import RAG_TOOLSET
 from app.agent_tools.search_documents import SearchDocumentTool
-from app.agent_tools.sql_query_documents import SqlQueryDocumentsTool
-from app.agent_tools.sql_query_table import SqlQueryTableTool
+from app.agent_tools.validate_chunk_as_structured_data import (
+    ValidateChunkAsStructuredDataTool,
+)
 
 __all__ = [
     "AgentTool",
     "AgentToolset",
-    "InspectTableRelationshipsTool",
-    "InspectTableTool",
+    "PerformSqlToDocumentRecordsTool",
+    "PerformSqlToDocumentTool",
     "RAG_TOOLSET",
     "SearchDocumentTool",
-    "SqlQueryDocumentsTool",
-    "SqlQueryTableTool",
     "ToolExecutor",
+    "ValidateChunkAsStructuredDataTool",
     "flatten_tools",
     "render_tool_blocks",
     "tools_outline",

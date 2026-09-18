@@ -2,25 +2,25 @@ import json
 import re
 
 from app.agent_tools.base import AgentTool
-from app.agent_tools.common import QUERY_DOCUMENTS_MAX_ROWS, object_schema
+from app.agent_tools.common import SQL_MAX_ROWS, object_schema
 
 # Chat ids are system-generated (uuid4 hex); this guard keeps the value that
 # gets inlined into the wrapped query free of SQL metacharacters.
 _CHAT_ID_SHAPE = re.compile(r"[\w-]+")
 
 
-class SqlQueryDocumentsTool(AgentTool):
-    """Query the chunk/document metadata database (read-only SELECT)."""
+class PerformSqlToDocumentRecordsTool(AgentTool):
+    """Query the chunk/document metadata records (read-only SELECT)."""
 
     @property
     def name(self) -> str:
-        return "sql_query_documents"
+        return "perform_sql_to_document_records"
 
     @property
     def description(self) -> str:
         return (
             "Run a read-only SELECT query against the RAG document database "
-            "(the chunk and document tables described in the Records section). "
+            "(the chunk and document records described in the Records section). "
             "Select chat_id so the results stay within the current chat."
         )
 
@@ -35,7 +35,7 @@ class SqlQueryDocumentsTool(AgentTool):
                 "limit": {
                     "type": "integer",
                     "description": (
-                        f"Maximum rows to return (default {QUERY_DOCUMENTS_MAX_ROWS})."
+                        f"Maximum rows to return (default {SQL_MAX_ROWS})."
                     ),
                 },
             },
@@ -55,10 +55,10 @@ class SqlQueryDocumentsTool(AgentTool):
                 return "Error: only read-only SELECT queries are allowed."
 
             try:
-                limit = int(arguments.get("limit") or QUERY_DOCUMENTS_MAX_ROWS)
+                limit = int(arguments.get("limit") or SQL_MAX_ROWS)
             except (TypeError, ValueError):
-                limit = QUERY_DOCUMENTS_MAX_ROWS
-            limit = max(1, min(limit, QUERY_DOCUMENTS_MAX_ROWS))
+                limit = SQL_MAX_ROWS
+            limit = max(1, min(limit, SQL_MAX_ROWS))
 
             if chat_id is not None:
                 if not _CHAT_ID_SHAPE.fullmatch(chat_id):

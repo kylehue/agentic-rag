@@ -1,34 +1,38 @@
 from app.agent_tools.base import AgentToolset
-from app.agent_tools.inspect_table import InspectTableTool
-from app.agent_tools.inspect_table_relationships import InspectTableRelationshipsTool
+from app.agent_tools.perform_sql_to_document import PerformSqlToDocumentTool
+from app.agent_tools.perform_sql_to_document_records import (
+    PerformSqlToDocumentRecordsTool,
+)
 from app.agent_tools.search_documents import SearchDocumentTool
-from app.agent_tools.sql_query_documents import SqlQueryDocumentsTool
-from app.agent_tools.sql_query_table import SqlQueryTableTool
+from app.agent_tools.validate_chunk_as_structured_data import (
+    ValidateChunkAsStructuredDataTool,
+)
 
 # The RAG tools, declared once. They are stateless (their executors are built
 # per answer), so sharing these instances is safe.
 SEARCH_DOCUMENT_TOOL = SearchDocumentTool()
-INSPECT_TABLE_TOOL = InspectTableTool()
-INSPECT_TABLE_RELATIONSHIPS_TOOL = InspectTableRelationshipsTool()
-SQL_QUERY_TABLE_TOOL = SqlQueryTableTool()
-SQL_QUERY_DOCUMENTS_TOOL = SqlQueryDocumentsTool()
+VALIDATE_CHUNK_AS_STRUCTURED_DATA_TOOL = ValidateChunkAsStructuredDataTool()
+PERFORM_SQL_TO_DOCUMENT_TOOL = PerformSqlToDocumentTool()
+PERFORM_SQL_TO_DOCUMENT_RECORDS_TOOL = PerformSqlToDocumentRecordsTool()
 
-# The cross-tool orchestration for the RAG tools
-RAG_TOOLSET_INSTRUCTIONS = f"""How to work with these tools:
-- Before anything else, consider starting with `{SEARCH_DOCUMENT_TOOL.name}` tool first. This is the retrieval tool of the RAG pipeline. Start with it if you need to find the relevant documents and to discover which tables exist and their source ids. Don't guess a source id; take it from the results.
-- For a document table's data (e.g. spreadsheet or csv documents), call `{INSPECT_TABLE_TOOL.name}` to see its schema.
-- It is possible that a document table has relationships with other tables. Think of an excel workbook with multiple sheets. When you think the question spans several tables, call `{INSPECT_TABLE_RELATIONSHIPS_TOOL.name}` to find the related tables, then join them in one `{SQL_QUERY_TABLE_TOOL.name}` call.
-- After inspecting a document's table, you can use `{SQL_QUERY_TABLE_TOOL.name}` to actually perform SQL queries for answers that need more specifics.
-- Only use `{SQL_QUERY_DOCUMENTS_TOOL.name}` as a last resort - when you need something that can't be searched with the normal RAG retrieval tool. The correct tool for searching documents is `{SEARCH_DOCUMENT_TOOL.name}`."""
+# The cross-tool orchestration for the RAG tools. Guidance, not a required
+# sequence: the model picks what it needs and skips tools it already has. The
+# identifier note lives here (not in the tools) because source_id is shared
+# across them and is where the model otherwise confuses the file/table name.
+RAG_TOOLSET_INSTRUCTIONS = f"""How to work with these tools (guidance, not a required sequence):
+- Identifiers: the `source_id` you pass to these tools is the opaque id shown as `source_id=` in the search results (a UUID-like string). It is not the file name and not a table name. Table names (used in SQL) are separate and come from the source's table schema(s).
+- To find relevant evidence, use `{SEARCH_DOCUMENT_TOOL.name}`. For a question about document text, that is usually enough to answer.
+- When the question needs computation over tabular data (totals, filtering, joins): use `{SEARCH_DOCUMENT_TOOL.name}` to find the relevant source and note its `source_id`, then `{VALIDATE_CHUNK_AS_STRUCTURED_DATA_TOOL.name}` to see that source's table name(s) and columns, then `{PERFORM_SQL_TO_DOCUMENT_TOOL.name}` to run the SQL. A multi-sheet workbook's sheets are separate tables you can JOIN in one `{PERFORM_SQL_TO_DOCUMENT_TOOL.name}` call.
+- `{PERFORM_SQL_TO_DOCUMENT_RECORDS_TOOL.name}` runs read-only SQL over the stored chunk and document records; use it to inspect what is stored, not to answer content questions.
+- Don't re-run a tool when you already have what you need from an earlier turn or the conversation history."""
 
 RAG_TOOLSET = AgentToolset(
     name="RAG",
     tools=[
         SEARCH_DOCUMENT_TOOL,
-        INSPECT_TABLE_TOOL,
-        INSPECT_TABLE_RELATIONSHIPS_TOOL,
-        SQL_QUERY_TABLE_TOOL,
-        SQL_QUERY_DOCUMENTS_TOOL,
+        VALIDATE_CHUNK_AS_STRUCTURED_DATA_TOOL,
+        PERFORM_SQL_TO_DOCUMENT_TOOL,
+        PERFORM_SQL_TO_DOCUMENT_RECORDS_TOOL,
     ],
     instructions=RAG_TOOLSET_INSTRUCTIONS,
 )

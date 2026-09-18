@@ -5,20 +5,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from sqlalchemy import (
-    Column,
-    ColumnElement,
-    Integer,
-    Float,
-    String,
-    Boolean,
-    DateTime,
-    MetaData,
-    Table,
-    delete,
-    select,
-    text,
-)
+from sqlalchemy import MetaData, Table, delete, select, text
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.ext.asyncio import (
@@ -27,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.database import Base
 from app.store_sql.base import ConditionBuilder, SqlStorage
 
 
@@ -226,47 +214,15 @@ class LocalSqlStorage(SqlStorage):
     async def get_table(self, table_name: str) -> Table:
         return await self._load_table(table_name)
 
-    async def ensure_table(
-        self,
-        table_name: str,
-        columns: Sequence[Column[Any]],
-    ) -> None:
-        self._validate_table_name(table_name)
+    async def create_tables(self) -> None:
+        """Create every table defined on the database base, if it is absent.
 
-        if not columns:
-            raise ValueError("A table must contain at least one column.")
-
-        metadata = MetaData()
-
-        Table(
-            table_name,
-            metadata,
-            *columns,
-        )
-
+        The schema is owned by the ORM models in app.database; this only
+        applies it. Existing tables are left as-is (checkfirst), so a changed
+        column set needs a fresh database rather than an in-place edit.
+        """
         async with self._engine.begin() as conn:
-            await conn.run_sync(metadata.create_all)
-            # Migrate an existing table: add declared columns it is missing.
-            existing = {
-                row[1]
-                for row in (
-                    await conn.execute(text(f'PRAGMA table_info("{table_name}")'))
-                ).fetchall()
-            }
-            for column in columns:
-                if column.name in existing:
-                    continue
-                if not column.nullable and column.default is None:
-                    raise ValueError(
-                        f"Cannot add required column '{column.name}' to the "
-                        f"existing table '{table_name}'."
-                    )
-                await conn.execute(
-                    text(
-                        f'ALTER TABLE "{table_name}" '
-                        f"ADD COLUMN {column.compile(dialect=conn.dialect)}"
-                    )
-                )
+            await conn.run_sync(Base.metadata.create_all)
 
     async def upsert(
         self,
@@ -466,41 +422,3 @@ class LocalSqlStorage(SqlStorage):
             )
 
             return [dict(row) for row in result.mappings()]
-
-    @staticmethod
-    def create_sql_columns_from_schema(
-        schema: list[dict[str, Any]],
-    ) -> list[Column[Any]]:
-        type_map = {
-            "INTEGER": Integer,
-            "REAL": Float,
-            "TEXT": String,
-            "BOOLEAN": Boolean,
-            "DATETIME": DateTime,
-        }
-
-        columns: list[Column[Any]] = []
-
-        for column in schema:
-            if not isinstance(column, dict):
-                continue
-
-            name = column.get("name")
-            sql_type = column.get("type", "TEXT")
-
-            if not isinstance(name, str) or not name:
-                raise ValueError("Invalid column name.")
-
-            sqlalchemy_type = type_map.get(sql_type)
-
-            if sqlalchemy_type is None:
-                raise ValueError(
-                    f"Unsupported SQL type {sql_type!r} " f"for column {name!r}."
-                )
-
-            columns.append(Column(name, sqlalchemy_type, nullable=True))
-
-        if not columns:
-            raise ValueError("Schema has no valid columns.")
-
-        return columns

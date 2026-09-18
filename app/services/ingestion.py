@@ -6,18 +6,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import (
-    JSON,
-    Boolean,
-    Column,
-    ColumnElement,
-    Integer,
-    String,
-    Table,
-    Text,
-)
+from sqlalchemy import ColumnElement, Table
 
-from app.core.config import settings
+from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
 from app.embedders.base import Embedder
 from app.errors.document import InvalidDocumentError
 from app.ingest.events import ProgressEmitter
@@ -54,36 +45,6 @@ class IngestionService:
         self._vector_storage = vector_storage
         self._sql_storage = sql_storage
         self._file_storage = file_storage
-
-    async def initialize(self) -> None:
-        await self._sql_storage.ensure_table(
-            settings.CHUNK_TABLE_NAME,
-            [
-                Column("id", Integer, primary_key=True, autoincrement=True),
-                Column("chunk_id", String, nullable=False, unique=True),
-                Column("source_id", String, nullable=False),
-                Column("parent_source_id", String, nullable=True),
-                Column("origin_source_id", String, nullable=False),
-                Column("plugin", String, nullable=False),
-                Column("text", Text, nullable=False),
-                Column("metadata", JSON),
-                Column("chat_id", String, nullable=True),
-            ],
-        )
-
-        await self._sql_storage.ensure_table(
-            settings.DOCUMENT_METADATA_TABLE_NAME,
-            [
-                Column("id", Integer, primary_key=True, autoincrement=True),
-                Column("source_id", String, nullable=False, unique=True),
-                Column("file_path", String, nullable=False),
-                Column("file_content_type", String, nullable=False),
-                Column("file_filename", String, nullable=False),
-                Column("file_orig_filename", String, nullable=False),
-                Column("is_origin", Boolean, nullable=False),
-                Column("chat_id", String, nullable=True),
-            ],
-        )
 
     async def ingest(
         self,
@@ -260,7 +221,7 @@ class IngestionService:
         )
         chunk_rows = list(
             await self._sql_storage.get_all(
-                settings.CHUNK_TABLE_NAME, condition=chunk_condition
+                CHUNK_TABLE_NAME, condition=chunk_condition
             )
         )
         chunk_ids = [row["chunk_id"] for row in chunk_rows]
@@ -272,7 +233,7 @@ class IngestionService:
             await self._vector_storage.delete(chunk_ids)
         if chunk_rows:
             await self._sql_storage.delete(
-                settings.CHUNK_TABLE_NAME, condition=chunk_condition
+                CHUNK_TABLE_NAME, condition=chunk_condition
             )
 
         doc_condition = self._chat_scoped(
@@ -280,14 +241,14 @@ class IngestionService:
         )
         doc_rows = list(
             await self._sql_storage.get_all(
-                settings.DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
+                DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
             )
         )
         for doc in doc_rows:
             await self._file_storage.delete(doc["file_path"])
         if doc_rows:
             await self._sql_storage.delete(
-                settings.DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
+                DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
             )
 
         return len(doc_rows)
@@ -298,7 +259,7 @@ class IngestionService:
         chunk_condition = lambda t: t.c.chat_id == chat_id
         chunk_rows = list(
             await self._sql_storage.get_all(
-                settings.CHUNK_TABLE_NAME, condition=chunk_condition
+                CHUNK_TABLE_NAME, condition=chunk_condition
             )
         )
         chunk_ids = [row["chunk_id"] for row in chunk_rows]
@@ -306,26 +267,26 @@ class IngestionService:
             await self._vector_storage.delete(chunk_ids)
         if chunk_rows:
             await self._sql_storage.delete(
-                settings.CHUNK_TABLE_NAME, condition=chunk_condition
+                CHUNK_TABLE_NAME, condition=chunk_condition
             )
 
         doc_condition = lambda t: t.c.chat_id == chat_id
         doc_rows = list(
             await self._sql_storage.get_all(
-                settings.DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
+                DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
             )
         )
         for doc in doc_rows:
             await self._file_storage.delete(doc["file_path"])
         if doc_rows:
             await self._sql_storage.delete(
-                settings.DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
+                DOCUMENT_METADATA_TABLE_NAME, condition=doc_condition
             )
 
     async def get_file_metadata(self, source_id: str) -> dict | None:
         """The document record for one stored file, or None if absent."""
         return await self._sql_storage.get(
-            settings.DOCUMENT_METADATA_TABLE_NAME,
+            DOCUMENT_METADATA_TABLE_NAME,
             condition=lambda t: t.c.source_id == source_id,
         )
 
@@ -343,7 +304,7 @@ class IngestionService:
         condition = self._chat_scoped(lambda t: t.c.is_origin.is_(True), chat_id)
         return list(
             await self._sql_storage.get_all(
-                settings.DOCUMENT_METADATA_TABLE_NAME, condition=condition
+                DOCUMENT_METADATA_TABLE_NAME, condition=condition
             )
         )
 
@@ -357,7 +318,7 @@ class IngestionService:
         )
         return list(
             await self._sql_storage.get_all(
-                settings.CHUNK_TABLE_NAME, condition=condition
+                CHUNK_TABLE_NAME, condition=condition
             )
         )
 
@@ -394,7 +355,7 @@ class IngestionService:
         )
 
         await self._sql_storage.upsert(
-            settings.DOCUMENT_METADATA_TABLE_NAME,
+            DOCUMENT_METADATA_TABLE_NAME,
             [
                 {
                     "source_id": file.source_id,
@@ -476,7 +437,7 @@ class IngestionService:
         ]
 
         await self._sql_storage.upsert(
-            settings.CHUNK_TABLE_NAME,
+            CHUNK_TABLE_NAME,
             rows,
             ["id"],
         )

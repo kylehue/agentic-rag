@@ -11,6 +11,13 @@ from unstructured.documents.elements import (
 )
 
 from app.agent_tools import AgentTool
+from app.database import (
+    AUTH_TOKENS_TABLE_NAME,
+    CHATS_TABLE_NAME,
+    CHUNK_TABLE_NAME,
+    DOCUMENT_METADATA_TABLE_NAME,
+    USERS_TABLE_NAME,
+)
 from app.embedders.base import Embedder
 from app.llm.base import (
     ChatMessage,
@@ -148,8 +155,16 @@ class FakeSqlStorage(SqlStorage):
     async def get_table(self, table_name):
         raise NotImplementedError
 
-    async def ensure_table(self, table_name, columns) -> None:
-        self.tables.setdefault(table_name, [])
+    async def create_tables(self) -> None:
+        # Register the schema's table names, mirroring the real create_all.
+        for name in (
+            CHUNK_TABLE_NAME,
+            DOCUMENT_METADATA_TABLE_NAME,
+            USERS_TABLE_NAME,
+            AUTH_TOKENS_TABLE_NAME,
+            CHATS_TABLE_NAME,
+        ):
+            self.tables.setdefault(name, [])
 
     async def upsert(self, table_name, rows, conflict_columns=()) -> None:
         self.tables.setdefault(table_name, []).extend(rows)
@@ -167,10 +182,6 @@ class FakeSqlStorage(SqlStorage):
         return []
 
     async def search(self, table_name, search_query, limit, condition=None):
-        return []
-
-    @staticmethod
-    def create_sql_columns_from_schema(schema):
         return []
 
 

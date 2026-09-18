@@ -1,9 +1,7 @@
 import time
 from uuid import uuid4
 
-from sqlalchemy import Column, REAL, String
-
-from app.core.config import settings
+from app.database import CHATS_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
 from app.errors.chat import ChatForbiddenError, ChatNotFoundError
 from app.store_sql.base import SqlStorage
 
@@ -20,20 +18,10 @@ class ChatService:
     def __init__(self, *, sql_storage: SqlStorage) -> None:
         self._sql_storage = sql_storage
 
-    async def initialize(self) -> None:
-        await self._sql_storage.ensure_table(
-            settings.CHATS_TABLE_NAME,
-            [
-                Column("chat_id", String, primary_key=True),
-                Column("username", String, nullable=False),
-                Column("created_at", REAL, nullable=False),
-            ],
-        )
-
     async def create(self, username: str) -> str:
         chat_id = uuid4().hex
         await self._sql_storage.upsert(
-            settings.CHATS_TABLE_NAME,
+            CHATS_TABLE_NAME,
             [
                 {
                     "chat_id": chat_id,
@@ -47,7 +35,7 @@ class ChatService:
     async def delete(self, chat_id: str) -> None:
         """Remove the chat's row (its data and history are deleted separately)."""
         await self._sql_storage.delete(
-            settings.CHATS_TABLE_NAME,
+            CHATS_TABLE_NAME,
             condition=lambda t: t.c.chat_id == chat_id,
         )
 
@@ -71,7 +59,7 @@ class ChatService:
 
     async def username_row(self, chat_id: str) -> dict | None:
         return await self._sql_storage.get(
-            settings.CHATS_TABLE_NAME,
+            CHATS_TABLE_NAME,
             condition=lambda t: t.c.chat_id == chat_id,
         )
 
@@ -80,7 +68,7 @@ class ChatService:
         it (derived from the documents table; no separate bookkeeping)."""
         chats = list(
             await self._sql_storage.get_all(
-                settings.CHATS_TABLE_NAME,
+                CHATS_TABLE_NAME,
                 condition=lambda t: t.c.username == username,
             )
         )
@@ -89,7 +77,7 @@ class ChatService:
             return []
 
         documents = await self._sql_storage.get_all(
-            settings.DOCUMENT_METADATA_TABLE_NAME,
+            DOCUMENT_METADATA_TABLE_NAME,
             condition=lambda t: t.c.chat_id.in_(chat_ids) & t.c.is_origin.is_(True),
         )
         by_chat: dict[str, list[str]] = {}

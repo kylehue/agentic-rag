@@ -25,11 +25,6 @@ class Settings(BaseSettings):
     FILE_LOCAL_STORAGE_DIR: str = "./.storage/file"
     VECTOR_LOCAL_STORAGE_DIR: str = "./.storage/vector"
     VECTOR_COLLECTION_NAME: str = "document_chunks"
-    CHUNK_TABLE_NAME: str = "__chunks__"
-    DOCUMENT_METADATA_TABLE_NAME: str = "__documents__"
-    USERS_TABLE_NAME: str = "__users__"
-    AUTH_TOKENS_TABLE_NAME: str = "__auth_tokens__"
-    CHATS_TABLE_NAME: str = "__chats__"
     AGENT_LOCAL_STORAGE_DIR: str = "./.storage/agent"
 
     # Comma-separated list of allowed browser origins for CORS, or "*" for any.

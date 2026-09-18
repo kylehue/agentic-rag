@@ -175,28 +175,15 @@ def test_sparse_retriever_applies_the_where_condition_in_the_real_fts_search(
     """Regression: the FTS search used to alias the table while the
     condition was compiled against the real name, so any scoped lexical
     search failed with 'no such column'."""
-    from sqlalchemy import Column, Integer, String, Text
-
-    from app.core.config import settings
+    from app.database import CHUNK_TABLE_NAME
     from app.retrievers.sparse import SparseRetriever
     from app.store_sql.local import LocalSqlStorage
 
     async def flow():
         storage = LocalSqlStorage(storage_dir=tmp_path)
-        await storage.ensure_table(
-            settings.CHUNK_TABLE_NAME,
-            [
-                Column("id", Integer, primary_key=True, autoincrement=True),
-                Column("chunk_id", String, nullable=False, unique=True),
-                Column("source_id", String, nullable=False),
-                Column("origin_source_id", String, nullable=False),
-                Column("plugin", String, nullable=False),
-                Column("text", Text, nullable=False),
-                Column("chat_id", String, nullable=True),
-            ],
-        )
+        await storage.create_tables()
         await storage.upsert(
-            settings.CHUNK_TABLE_NAME,
+            CHUNK_TABLE_NAME,
             [
                 {
                     "chunk_id": "c1",

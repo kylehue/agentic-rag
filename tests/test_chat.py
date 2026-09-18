@@ -1,9 +1,8 @@
 import asyncio
 
 import pytest
-from sqlalchemy import Boolean, Column, Integer, String
 
-from app.core.config import settings
+from app.database import DOCUMENT_METADATA_TABLE_NAME
 from app.errors.chat import ChatForbiddenError, ChatNotFoundError
 from app.services.chat import ChatService
 from app.store_sql.local import LocalSqlStorage
@@ -12,30 +11,15 @@ from app.store_sql.local import LocalSqlStorage
 def make_service(tmp_path) -> ChatService:
     sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
     service = ChatService(sql_storage=sql_storage)
-    asyncio.run(service.initialize())
-    # The documents table, where a chat's ingested sources are derived from.
-    asyncio.run(
-        sql_storage.ensure_table(
-            settings.DOCUMENT_METADATA_TABLE_NAME,
-            [
-                Column("id", Integer, primary_key=True, autoincrement=True),
-                Column("source_id", String, nullable=False, unique=True),
-                Column("file_path", String, nullable=False),
-                Column("file_content_type", String, nullable=False),
-                Column("file_filename", String, nullable=False),
-                Column("file_orig_filename", String, nullable=False),
-                Column("is_origin", Boolean, nullable=False),
-                Column("chat_id", String, nullable=True),
-            ],
-        )
-    )
+    # Create the schema (the chats and documents tables).
+    asyncio.run(sql_storage.create_tables())
     return service
 
 
 def add_document(sql_storage, source_id, chat_id, is_origin=True):
     asyncio.run(
         sql_storage.upsert(
-            settings.DOCUMENT_METADATA_TABLE_NAME,
+            DOCUMENT_METADATA_TABLE_NAME,
             [
                 {
                     "source_id": source_id,

@@ -10,7 +10,7 @@ from app.agent_tools import (
     SqlQueryTableTool,
     tools_outline,
 )
-from app.core.config import settings
+from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
 from app.models.chunk import RetrievedChunk
 from app.plugin.registry import PluginRegistry
 from app.retrievers.base import Retriever
@@ -98,7 +98,7 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
     ]
 
     async def setup():
-        await service.initialize()
+        await sql_storage.create_tables()
 
         async def store_document(source_id, filename, content_type, file_bytes):
             path = await file_storage.upload(
@@ -107,7 +107,7 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
                 file_content_type=content_type,
             )
             await sql_storage.upsert(
-                settings.DOCUMENT_METADATA_TABLE_NAME,
+                DOCUMENT_METADATA_TABLE_NAME,
                 [
                     {
                         "source_id": source_id,
@@ -130,7 +130,7 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
             parent_source_id=None,
         ):
             await sql_storage.upsert(
-                settings.CHUNK_TABLE_NAME,
+                CHUNK_TABLE_NAME,
                 [
                     {
                         "chunk_id": chunk_id,

@@ -89,12 +89,10 @@ rag_agent_service = RagAgentService(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize top-down: the agent service initializes the RAG service it
-    # wraps (the system tables); auth and chat manage their own tables.
+    # Create the schema (every table, owned by app.database), then open the
+    # agent's checkpoint database and start the background ingest workers.
+    await sql_storage.create_tables()
     await rag_agent_service.initialize()
-    await auth_service.initialize()
-    await chat_service.initialize()
-    # Then start the background ingest workers.
     await rag_service.start_ingest_queue()
 
     yield

@@ -3,7 +3,6 @@ import re
 
 from app.agent_tools.base import AgentTool
 from app.agent_tools.common import QUERY_DOCUMENTS_MAX_ROWS, object_schema
-from app.core.config import settings
 
 # Chat ids are system-generated (uuid4 hex); this guard keeps the value that
 # gets inlined into the wrapped query free of SQL metacharacters.
@@ -20,14 +19,9 @@ class SqlQueryDocumentsTool(AgentTool):
     @property
     def description(self) -> str:
         return (
-            "Run a read-only SELECT query against the document database. "
-            f"Tables: {settings.CHUNK_TABLE_NAME} (columns: id, chunk_id, "
-            "source_id, parent_source_id, origin_source_id, text, metadata, "
-            "chat_id) and "
-            f"{settings.DOCUMENT_METADATA_TABLE_NAME} (columns: id, "
-            "source_id, file_path, file_content_type, file_filename, "
-            "file_orig_filename, is_origin, chat_id). Select chat_id so the "
-            "results stay within the current chat."
+            "Run a read-only SELECT query against the RAG document database "
+            "(the chunk and document tables described in the Records section). "
+            "Select chat_id so the results stay within the current chat."
         )
 
     @property

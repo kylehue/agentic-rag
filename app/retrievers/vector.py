@@ -1,4 +1,4 @@
-from app.core.config import settings
+from app.database import CHUNK_TABLE_NAME
 from app.embedders.base import Embedder
 from app.models.chunk import RetrievedChunk
 from app.retrievers.base import Retriever
@@ -42,7 +42,7 @@ class VectorRetriever(Retriever):
 
         # SQL IN (...) does NOT guarantee the same order.
         raw_chunks = await self._sql_storage.get_all(
-            settings.CHUNK_TABLE_NAME,
+            CHUNK_TABLE_NAME,
             lambda table: table.c.chunk_id.in_(chunk_ids),
         )
 

@@ -2,9 +2,8 @@ import secrets
 import time
 
 import bcrypt
-from sqlalchemy import Column, REAL, String
 
-from app.core.config import settings
+from app.database import AUTH_TOKENS_TABLE_NAME, USERS_TABLE_NAME
 from app.errors.auth import AuthError, UserExistsError
 from app.store_sql.base import SqlStorage
 
@@ -23,37 +22,16 @@ class AuthService:
     def __init__(self, *, sql_storage: SqlStorage) -> None:
         self._sql_storage = sql_storage
 
-    async def initialize(self) -> None:
-        await self._sql_storage.ensure_table(
-            settings.USERS_TABLE_NAME,
-            [
-                Column("username", String, primary_key=True),
-                Column("password_hash", String, nullable=False),
-                Column("created_at", REAL, nullable=False),
-            ],
-        )
-        await self._sql_storage.ensure_table(
-            settings.AUTH_TOKENS_TABLE_NAME,
-            [
-                Column("token_hash", String, primary_key=True),
-                # Lookup key for the (salted, unguessable) hash. Nullable so
-                # pre-prefix rows in existing databases simply stop working.
-                Column("token_id", String, nullable=True),
-                Column("username", String, nullable=False),
-                Column("created_at", REAL, nullable=False),
-            ],
-        )
-
     async def register(self, username: str, password: str) -> None:
         existing = await self._sql_storage.get(
-            settings.USERS_TABLE_NAME,
+            USERS_TABLE_NAME,
             condition=lambda t: t.c.username == username,
         )
         if existing is not None:
             raise UserExistsError(username)
 
         await self._sql_storage.upsert(
-            settings.USERS_TABLE_NAME,
+            USERS_TABLE_NAME,
             [
                 {
                     "username": username,
@@ -66,7 +44,7 @@ class AuthService:
     async def login(self, username: str, password: str) -> str:
         """Verify the credentials and return a new API token."""
         user = await self._sql_storage.get(
-            settings.USERS_TABLE_NAME,
+            USERS_TABLE_NAME,
             condition=lambda t: t.c.username == username,
         )
         if user is None or not self._verify_password(password, user["password_hash"]):
@@ -74,7 +52,7 @@ class AuthService:
 
         token = secrets.token_urlsafe(32)
         await self._sql_storage.upsert(
-            settings.AUTH_TOKENS_TABLE_NAME,
+            AUTH_TOKENS_TABLE_NAME,
             [
                 {
                     "token_hash": self._hash_token(token),
@@ -91,7 +69,7 @@ class AuthService:
         if not token or len(token) < TOKEN_PREFIX_LENGTH:
             return None
         row = await self._sql_storage.get(
-            settings.AUTH_TOKENS_TABLE_NAME,
+            AUTH_TOKENS_TABLE_NAME,
             condition=lambda t: t.c.token_id == token[:TOKEN_PREFIX_LENGTH],
         )
         if row is None or not self._verify_token(token, row["token_hash"]):

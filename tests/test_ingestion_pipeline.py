@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.core.config import settings
+from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME, Base
 from app.errors.document import InvalidDocumentError
 from app.models.chunk import IngestedChunk
 from app.plugin.base import Plugin
@@ -221,7 +221,7 @@ def test_csv_ingest_end_to_end(tmp_path):
     )
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         chunks = await service.ingest(
             make_ingestion_file(
                 file_bytes=b"region,amount\nnorth,10\n",
@@ -229,8 +229,8 @@ def test_csv_ingest_end_to_end(tmp_path):
                 content_type="text/csv",
             )
         )
-        documents = await sql_storage.get_all(settings.DOCUMENT_METADATA_TABLE_NAME)
-        chunk_rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
+        documents = await sql_storage.get_all(DOCUMENT_METADATA_TABLE_NAME)
+        chunk_rows = await sql_storage.get_all(CHUNK_TABLE_NAME)
         db_tables = {
             row["name"]
             for row in await sql_storage.query(
@@ -282,11 +282,8 @@ def test_csv_ingest_end_to_end(tmp_path):
     assert "origin_source_id" not in metadata
     assert "file_path" not in metadata
 
-    # No per-table data tables were created; only the system tables exist.
-    assert db_tables == {
-        settings.CHUNK_TABLE_NAME,
-        settings.DOCUMENT_METADATA_TABLE_NAME,
-    }
+    # No per-table data tables were created; only the ORM's system tables exist.
+    assert db_tables == set(Base.metadata.tables)
 
     # The vector was added.
     assert vector_storage.added[0][0] == [chunks[0].chunk_id]
@@ -337,7 +334,7 @@ def test_text_ingest_emits_and_subprocesses_embedded_table(tmp_path):
     ]
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         with patch.object(
             text_module,
             "partition",
@@ -350,8 +347,8 @@ def test_text_ingest_emits_and_subprocesses_embedded_table(tmp_path):
                     content_type="application/pdf",
                 )
             )
-        documents = await sql_storage.get_all(settings.DOCUMENT_METADATA_TABLE_NAME)
-        chunk_rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
+        documents = await sql_storage.get_all(DOCUMENT_METADATA_TABLE_NAME)
+        chunk_rows = await sql_storage.get_all(CHUNK_TABLE_NAME)
         await sql_storage.close()
         return chunks, documents, chunk_rows
 
@@ -437,7 +434,7 @@ def test_file_description_reaches_subprocess_llm(tmp_path):
     elements = [make_table_element(table_html, page_number=1)]
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         with patch.object(
             text_module,
             "partition",
@@ -469,7 +466,7 @@ def test_multiple_accepting_plugins_all_run(tmp_path):
     )
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         chunks = await service.ingest(
             make_ingestion_file(
                 file_bytes=b"region,amount\nnorth,10\n",
@@ -477,7 +474,7 @@ def test_multiple_accepting_plugins_all_run(tmp_path):
                 content_type="text/csv",
             )
         )
-        chunk_rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
+        chunk_rows = await sql_storage.get_all(CHUNK_TABLE_NAME)
         await sql_storage.close()
         return chunks, chunk_rows
 
@@ -502,7 +499,7 @@ def test_ingest_without_chunks_warns(tmp_path, caplog):
     service, sql_storage, *_ = build_service(tmp_path, plugins=[EmptyPlugin()])
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         with caplog.at_level(logging.WARNING, logger="app.services.ingestion"):
             chunks = await service.ingest(
                 make_ingestion_file(
@@ -524,7 +521,7 @@ def test_file_no_plugin_accepts_raises(tmp_path):
     service, sql_storage, *_ = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         with pytest.raises(InvalidDocumentError):
             await service.ingest(
                 make_ingestion_file(
@@ -545,7 +542,7 @@ def test_file_rejected_by_all_registered_plugins_raises(tmp_path):
     )
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         with pytest.raises(InvalidDocumentError):
             await service.ingest(
                 make_ingestion_file(
@@ -569,7 +566,7 @@ def test_origin_propagates_through_emission_chain(tmp_path):
     )
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         await service.ingest(
             make_ingestion_file(
                 file_bytes=b"root",
@@ -578,8 +575,8 @@ def test_origin_propagates_through_emission_chain(tmp_path):
                 source_id="root-id",
             )
         )
-        documents = await sql_storage.get_all(settings.DOCUMENT_METADATA_TABLE_NAME)
-        chunk_rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
+        documents = await sql_storage.get_all(DOCUMENT_METADATA_TABLE_NAME)
+        chunk_rows = await sql_storage.get_all(CHUNK_TABLE_NAME)
         await sql_storage.close()
         return documents, chunk_rows
 
@@ -623,7 +620,7 @@ def test_unaccepted_emitted_file_is_ignored_with_warning(tmp_path, caplog):
     )
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         with caplog.at_level(logging.WARNING, logger="app.services.ingestion"):
             chunks = await service.ingest(
                 make_ingestion_file(
@@ -632,8 +629,8 @@ def test_unaccepted_emitted_file_is_ignored_with_warning(tmp_path, caplog):
                     content_type="text/plain",
                 )
             )
-        documents = await sql_storage.get_all(settings.DOCUMENT_METADATA_TABLE_NAME)
-        chunk_rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
+        documents = await sql_storage.get_all(DOCUMENT_METADATA_TABLE_NAME)
+        chunk_rows = await sql_storage.get_all(CHUNK_TABLE_NAME)
         await sql_storage.close()
         return chunks, documents, chunk_rows
 
@@ -673,15 +670,15 @@ class LifecycleObserverPlugin(Plugin):
 
     async def on_file_completed(self, chunks, context, runtime) -> None:
         documents = await self._sql_storage.get_all(
-            settings.DOCUMENT_METADATA_TABLE_NAME
+            DOCUMENT_METADATA_TABLE_NAME
         )
         self.file_completed.append((context, chunks, runtime, len(documents)))
 
     async def on_ingestion_completed(self, chunks, context, runtime) -> None:
         documents = await self._sql_storage.get_all(
-            settings.DOCUMENT_METADATA_TABLE_NAME
+            DOCUMENT_METADATA_TABLE_NAME
         )
-        chunk_rows = await self._sql_storage.get_all(settings.CHUNK_TABLE_NAME)
+        chunk_rows = await self._sql_storage.get_all(CHUNK_TABLE_NAME)
         self.ingestion_completed.append(
             (context, chunks, runtime, len(documents), len(chunk_rows))
         )
@@ -710,7 +707,7 @@ def test_file_completed_per_file_and_ingestion_completed_once_at_the_end(tmp_pat
     ]
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         with patch.object(
             text_module,
             "partition",
@@ -774,7 +771,7 @@ def test_lower_chunks_inherit_higher_chunk_metadata_with_own_keys_winning(tmp_pa
     )
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         chunks = await service.ingest(
             make_ingestion_file(
                 file_bytes=b"txt",
@@ -782,7 +779,7 @@ def test_lower_chunks_inherit_higher_chunk_metadata_with_own_keys_winning(tmp_pa
                 content_type="text/plain",
             )
         )
-        chunk_rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
+        chunk_rows = await sql_storage.get_all(CHUNK_TABLE_NAME)
         await sql_storage.close()
         return chunks, chunk_rows
 
@@ -814,7 +811,7 @@ def test_process_failure_saves_nothing(tmp_path):
     )
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         with pytest.raises(RuntimeError):
             await service.ingest(
                 make_ingestion_file(
@@ -823,8 +820,8 @@ def test_process_failure_saves_nothing(tmp_path):
                     content_type="text/plain",
                 )
             )
-        documents = await sql_storage.get_all(settings.DOCUMENT_METADATA_TABLE_NAME)
-        chunk_rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME)
+        documents = await sql_storage.get_all(DOCUMENT_METADATA_TABLE_NAME)
+        chunk_rows = await sql_storage.get_all(CHUNK_TABLE_NAME)
         await sql_storage.close()
         return documents, chunk_rows
 

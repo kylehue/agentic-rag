@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 import pandas as pd
 
-from app.core.config import settings
+from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
 from app.store_file.base import FileStorage
 from app.store_sql.base import SqlStorage
 
@@ -57,7 +57,7 @@ async def table_chunks_for_source(
             expr = expr & (t.c.chat_id == chat_id)
         return expr
 
-    rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME, condition=condition)
+    rows = await sql_storage.get_all(CHUNK_TABLE_NAME, condition=condition)
     return [row for row in rows if is_table_row(row)]
 
 
@@ -71,7 +71,7 @@ async def table_chunks_with_origin(
             expr = expr & (t.c.chat_id == chat_id)
         return expr
 
-    rows = await sql_storage.get_all(settings.CHUNK_TABLE_NAME, condition=condition)
+    rows = await sql_storage.get_all(CHUNK_TABLE_NAME, condition=condition)
     return [row for row in rows if is_table_row(row)]
 
 
@@ -79,7 +79,7 @@ async def document_for_source(
     sql_storage: SqlStorage, source_id: str
 ) -> dict | None:
     return await sql_storage.get(
-        settings.DOCUMENT_METADATA_TABLE_NAME,
+        DOCUMENT_METADATA_TABLE_NAME,
         condition=lambda t: t.c.source_id == source_id,
     )
 

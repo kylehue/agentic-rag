@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.core.config import settings
+from app.database import AUTH_TOKENS_TABLE_NAME, USERS_TABLE_NAME
 from app.errors.auth import AuthError, UserExistsError
 from app.services.auth import AuthService
 from app.store_sql.local import LocalSqlStorage
@@ -11,7 +11,7 @@ from app.store_sql.local import LocalSqlStorage
 def make_service(tmp_path) -> tuple[AuthService, LocalSqlStorage]:
     sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
     service = AuthService(sql_storage=sql_storage)
-    asyncio.run(service.initialize())
+    asyncio.run(sql_storage.create_tables())
     return service, sql_storage
 
 
@@ -58,12 +58,12 @@ def test_tokens_and_passwords_are_stored_hashed(tmp_path):
     asyncio.run(service.register("alice", "wonderland"))
     token = asyncio.run(service.login("alice", "wonderland"))
 
-    users = list(asyncio.run(sql_storage.get_all(settings.USERS_TABLE_NAME)))
+    users = list(asyncio.run(sql_storage.get_all(USERS_TABLE_NAME)))
     # bcrypt: the hash embeds its own salt and never the password.
     assert users[0]["password_hash"] != "wonderland"
     assert users[0]["password_hash"].startswith("$2")
 
-    tokens = list(asyncio.run(sql_storage.get_all(settings.AUTH_TOKENS_TABLE_NAME)))
+    tokens = list(asyncio.run(sql_storage.get_all(AUTH_TOKENS_TABLE_NAME)))
     assert len(tokens) == 1
     # The raw token is never stored, only its hash.
     assert tokens[0]["token_hash"] != token

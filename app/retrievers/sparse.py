@@ -2,7 +2,7 @@ from typing import Any
 
 from sqlalchemy import ColumnElement, Table
 
-from app.core.config import settings
+from app.database import CHUNK_TABLE_NAME
 from app.models.chunk import RetrievedChunk
 from app.retrievers.base import Retriever
 from app.store_sql.base import ConditionBuilder, SqlStorage
@@ -19,7 +19,7 @@ class SparseRetriever(Retriever):
 
     async def retrieve(self, user_query, where: dict[str, Any] | None = None):
         raw_chunks = await self._sql_storage.search(
-            settings.CHUNK_TABLE_NAME,
+            CHUNK_TABLE_NAME,
             user_query,
             self._top_k,
             self._condition(where),

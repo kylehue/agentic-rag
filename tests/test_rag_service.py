@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.config import settings
+from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
 from app.errors.document import InvalidDocumentError
 from app.models.chunk import RetrievedChunk
 from app.plugins.table import TablePlugin
@@ -73,17 +73,17 @@ def build_rag(llm=None, retriever=None, plugins=None):
 def test_initialize_creates_the_system_tables():
     rag, parts = build_rag()
 
-    asyncio.run(rag.initialize())
+    asyncio.run(parts.sql_storage.create_tables())
 
-    assert settings.CHUNK_TABLE_NAME in parts.sql_storage.tables
-    assert settings.DOCUMENT_METADATA_TABLE_NAME in parts.sql_storage.tables
+    assert CHUNK_TABLE_NAME in parts.sql_storage.tables
+    assert DOCUMENT_METADATA_TABLE_NAME in parts.sql_storage.tables
 
 
 def test_ingest_end_to_end_through_the_wrapper():
     rag, parts = build_rag()
 
     async def flow():
-        await rag.initialize()
+        await parts.sql_storage.create_tables()
         return await rag.ingest(
             file_bytes=CSV_BYTES,
             filename="sales.csv",
@@ -109,11 +109,11 @@ def test_ingest_end_to_end_through_the_wrapper():
     # (chat column).
     assert parts.vector_storage.added[0][0] == [chunks[0].chunk_id]
     assert parts.vector_storage.added[0][2] == [{"chat_id": "chat-1"}]
-    rows = parts.sql_storage.tables[settings.CHUNK_TABLE_NAME]
+    rows = parts.sql_storage.tables[CHUNK_TABLE_NAME]
     assert len(rows) == 1
     assert rows[0]["origin_source_id"] == rows[0]["source_id"] == origin_source_id
     assert rows[0]["chat_id"] == "chat-1"
-    documents = parts.sql_storage.tables[settings.DOCUMENT_METADATA_TABLE_NAME]
+    documents = parts.sql_storage.tables[DOCUMENT_METADATA_TABLE_NAME]
     assert documents[0]["chat_id"] == "chat-1"
 
     # The description reached the TablePlugin's LLM.
@@ -126,7 +126,7 @@ def test_ingest_without_description_leaves_prompt_unchanged():
     rag, parts = build_rag()
 
     async def flow():
-        await rag.initialize()
+        await parts.sql_storage.create_tables()
         await rag.ingest(
             file_bytes=CSV_BYTES,
             filename="sales.csv",
@@ -145,7 +145,7 @@ def test_plugins_option_limits_registered_plugins():
     rag, parts = build_rag(plugins=[TextPlugin()])
 
     async def flow():
-        await rag.initialize()
+        await parts.sql_storage.create_tables()
         await rag.ingest(
             file_bytes=CSV_BYTES,
             filename="sales.csv",

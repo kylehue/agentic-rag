@@ -33,6 +33,7 @@ The application is designed around separate ingestion, retrieval, and answer-gen
     - [`app/api_schemas`](#appapi_schemas)
     - [`app/core`](#appcore)
     - [`app/errors`](#apperrors)
+    - [`app/database`](#appdatabase)
     - [`app/llm`](#appllm)
     - [`app/embedders`](#appembedders)
     - [`app/retrievers`](#appretrievers)
@@ -492,12 +493,24 @@ Contains Pydantic models used specifically at the API boundary. These are separa
 
 Application-wide configuration and core infrastructure.
 
-- `app/core/config.py` - settings (API keys, model names, storage paths, collection names, the auth/chat table names, and the agent storage directory).
+- `app/core/config.py` - settings (API keys, model names, storage paths, the vector collection name, and the agent storage directory).
 - `app/core/exceptions.py` - exception handlers registered on the FastAPI app.
 
 ### `app/errors`
 
 Domain-specific errors: `InvalidDocumentError` for unsupported/invalid uploads, `UserExistsError` / `AuthError` for auth, and `ChatNotFoundError` / `ChatForbiddenError` for chats. `app/core/exceptions.py` maps them to HTTP status codes (409, 401, 404, 403).
+
+### `app/database`
+
+The database schema, one SQLAlchemy ORM model per table (one file per table), all mapped onto a shared declarative `Base`. The `__tablename__` literal in each model is the single source of truth for the table name (there are no table-name constants in config). The SQL storage's `create_tables()` applies the schema with `Base.metadata.create_all`. The ingestion models (`Chunk`, `Document`) set `__expose_docs_to_agent__ = True` and carry a class doc plus a `doc` on every column; `agent_table_docs()` renders those into the agent's system prompt (a "Records" section), so the model learns the table structure and the origin / parent / source id semantics from the schema itself rather than a hand-maintained copy.
+
+- `app/database/base.py` - the declarative `Base`.
+- `app/database/chunks.py` - `Chunk` (`__chunks__`): the searchable pieces, with the origin/parent/source id columns.
+- `app/database/documents.py` - `Document` (`__documents__`): the stored files (origin + emitted), with `is_origin`.
+- `app/database/chats.py` - `Chat` (`__chats__`): a user's working space and conversation thread.
+- `app/database/users.py` - `User` (`__users__`): username + bcrypt password hash.
+- `app/database/auth_tokens.py` - `AuthToken` (`__auth_tokens__`): hashed session tokens.
+- `app/database/__init__.py` - re-exports the table-name constants, the models, `Base`, and `agent_table_docs()`.
 
 ### `app/llm`
 
@@ -535,15 +548,15 @@ Internal application models.
 - `app/services/chat.py` - user chats: `get_or_create` (ownership-checked), `create`, `delete`, `username_of`, and `list_chats` (a chat's ingested sources are derived from the documents table, so there is no separate bookkeeping).
 - `app/services/ingestion.py` - the pipeline driver: offers each file to all plugins, builds context/runtime (carrying the chat id), runs `on_ingestion_process` on every plugin, persists everything (source files, chunk records, vectors) stamped with the chat id, and re-ingests emitted files. It also manages stored files: `list_files(chat_id)` (origin uploads only), `list_file_chunks(origin_source_id, chat_id)` (a file's whole emission tree via `origin_source_id`), `delete_file(origin_source_id, chat_id)` (reverse ingestion for one file's tree: its chunks, vectors, SQL records, and stored files), and `delete_chat(chat_id)` (reverse ingestion for a whole chat: its chunks, vectors, document records, and stored files). It also reads stored files: `get_file_metadata(source_id)` (the document record) and `get_file_link(source_id)` (the URL to retrieve the file, built via the file storage's `create_link`). `ingest(file, chat_id, emitter=None)` optionally takes a `ProgressEmitter` and reports pipeline stages (`processing` / `saving` / `embedding`) to it as the file's tree is walked.
 - `app/services/retrieval.py` - runs the hybrid retriever (bounded to a chat when given) and runs `on_retrieval_finalize` on every plugin for each chunk.
-- `app/services/rag.py` - the wrapper for ingestion and retrieval. It builds the `PluginRegistry` from the `plugins` option and the ingestion and retrieval services (which take the registry) from the collaborators it is given, and exposes those collaborators as public properties so the agent's tools can use them. `initialize()` creates the system tables at startup. `ingest(file_bytes, filename, content_type, description=None, chat_id=None)` builds the `IngestionFile` and delegates, returning the origin source id with the chunks. `retrieve(user_query, chat_id=None)` returns evidence bounded to that chat's chunks when given. It also delegates the file-management methods: `list_files`, `list_file_chunks`, `delete_file`, `delete_chat`, `get_file_metadata`, and `get_file_link`. It owns the background ingest queue: `start_ingest_queue()` / `stop_ingest_queue()` (called from the lifespan), `enqueue_ingest(files, chat_id)` (queues one job per file and returns the jobs), `get_ingest_job(job_id)`, and `list_ingest_jobs(chat_id)` (the chat's jobs, each with its buffered progress events).
-- `app/services/rag_agent.py` - the `RagAgentService`: takes the RAG service and the tools (or toolsets) at initialization, and owns the orchestration graph (built on a checkpointer, one thread per chat), the per-run chat scoping, the run's events, `chat_history` (a chat's full conversation read from the checkpointer: user questions, tool calls, tool results, and answers, in stream order), the system prompt (a template whose tools block is rendered from the passed tools and toolsets via `render_tool_blocks`, so each toolset's cross-tool instructions and every tool's spec appear), the citation format (`CHUNK_REF_PATTERN`, `extract_chunk_refs`: the single source of truth for `#[origin_source_id:chunk_id]`), and the translation of a run into neutral `StreamEvent`s. `ask(question, chat_id=)` returns the `RagAnswer`. `ask_stream(...)` yields the run ending with it. Interrupted runs resume from their checkpoint. `stop(chat_id)` interrupts a chat's in-flight run (it tracks each run's driving task and cancels it, returning whether a run was stopped). `delete_chat(chat_id)` deletes a chat's RAG data (via the RAG service) and its conversation history (the checkpointer thread).
+- `app/services/rag.py` - the wrapper for ingestion and retrieval. It builds the `PluginRegistry` from the `plugins` option and the ingestion and retrieval services (which take the registry) from the collaborators it is given, and exposes those collaborators as public properties so the agent's tools can use them. `ingest(file_bytes, filename, content_type, description=None, chat_id=None)` builds the `IngestionFile` and delegates, returning the origin source id with the chunks. `retrieve(user_query, chat_id=None)` returns evidence bounded to that chat's chunks when given. It also delegates the file-management methods: `list_files`, `list_file_chunks`, `delete_file`, `delete_chat`, `get_file_metadata`, and `get_file_link`. It owns the background ingest queue: `start_ingest_queue()` / `stop_ingest_queue()` (called from the lifespan), `enqueue_ingest(files, chat_id)` (queues one job per file and returns the jobs), `get_ingest_job(job_id)`, and `list_ingest_jobs(chat_id)` (the chat's jobs, each with its buffered progress events).
+- `app/services/rag_agent.py` - the `RagAgentService`: takes the RAG service and the tools (or toolsets) at initialization, and owns the orchestration graph (built on a checkpointer, one thread per chat), the per-run chat scoping, the run's events, `chat_history` (a chat's full conversation read from the checkpointer: user questions, tool calls, tool results, and answers, in stream order), the system prompt (a template whose tools block is rendered from the passed tools and toolsets via `render_tool_blocks`, so each toolset's cross-tool instructions and every tool's spec appear, and whose Records section is rendered from the ingestion tables' own class and column docstrings via `agent_table_docs`, so the model knows the table structure and the origin/parent/source id semantics without a hand-maintained copy), the citation format (`CHUNK_REF_PATTERN`, `extract_chunk_refs`: the single source of truth for `#[origin_source_id:chunk_id]`), and the translation of a run into neutral `StreamEvent`s. `ask(question, chat_id=)` returns the `RagAnswer`. `ask_stream(...)` yields the run ending with it. Interrupted runs resume from their checkpoint. `stop(chat_id)` interrupts a chat's in-flight run (it tracks each run's driving task and cancels it, returning whether a run was stopped). `delete_chat(chat_id)` deletes a chat's RAG data (via the RAG service) and its conversation history (the checkpointer thread).
 
 ### `app/store_file`, `app/store_sql`, `app/store_vector`
 
 Storage abstractions and local implementations:
 
 - `FileStorage` - upload/delete/read files, and `create_link(full_path)` (a pure path-to-URL mapping used to build a file's retrieval link). Local implementation stores everything under `.storage/file/documents/`: the original user uploads (`is_origin = True` in `__documents__`) and every file a plugin emits (`is_origin = False`). Its `create_link` returns `/files/<stored name>` (the stored name is a unique uuid). Each file is stored exactly once, when it goes through ingestion. There is no separate chunk-file storage.
-- `SqlStorage` - tables, upserts, read-only queries, FTS5 search (with an optional chat filter). Local implementation is one SQLite database holding the `__chunks__` and `__documents__` system tables (both carry a `chat_id` column). `ensure_table` also migrates existing tables by adding declared columns they are missing.
+- `SqlStorage` - upserts, read-only queries, and FTS5 search (with an optional chat filter), plus `create_tables()` to apply the schema. Local implementation is one SQLite database holding the tables defined in `app/database` (the ingestion tables `__chunks__` and `__documents__` both carry a `chat_id` column); `create_tables()` runs `Base.metadata.create_all`, creating only the tables that are absent.
 - `VectorStorage` - stores chunk IDs + embeddings (+ optional metadata, for example the chat id), cosine search with an optional metadata filter. Local implementation is a persistent Chroma collection.
 
 ### `app/utils`
@@ -555,7 +568,7 @@ Storage abstractions and local implementations:
 
 ### `app/container.py`
 
-The composition root for the external collaborators. It builds the providers, storages, retrievers, and built-in plugins, then composes the services: `AuthService` and `ChatService` (which get SQL storage), the `RagService` wrapper (which gets the plugins through its `plugins` option), and the `RagAgentService` (which gets the RAG service, the RAG tools, and the agent storage directory its checkpoint database lives in). It also exposes the FastAPI lifespan (initializing all system tables, closing the agent checkpoint database and the SQL and vector databases on shutdown). The pipeline internals (the plugin registry and the ingestion/retrieval services) are composed inside the `RagService`.
+The composition root for the external collaborators. It builds the providers, storages, retrievers, and built-in plugins, then composes the services: `AuthService` and `ChatService` (which get SQL storage), the `RagService` wrapper (which gets the plugins through its `plugins` option), and the `RagAgentService` (which gets the RAG service, the RAG tools, and the agent storage directory its checkpoint database lives in). It also exposes the FastAPI lifespan (creating the schema with `sql_storage.create_tables()`, opening the agent's checkpoint database, then closing the agent checkpoint, SQL, and vector databases on shutdown). The pipeline internals (the plugin registry and the ingestion/retrieval services) are composed inside the `RagService`.
 
 ## Design Principles
 

@@ -184,7 +184,7 @@ def test_ingest_emits_pipeline_and_plugin_events(tmp_path):
     emitter = ProgressEmitter(events)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         await service.ingest(make_file(), chat_id="chat-1", emitter=emitter)
         await sql_storage.close()
         return list(events.events)
@@ -213,7 +213,7 @@ def test_ingest_without_emitter_emits_nothing(tmp_path):
     service, sql_storage = _build_service(tmp_path, [TablePlugin()])
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         return await service.ingest(make_file(), chat_id="chat-1")
 
     chunks = asyncio.run(flow())
@@ -239,7 +239,7 @@ def test_rag_service_enqueue_and_process_emits_full_progress(tmp_path):
     )
 
     async def flow():
-        await rag.initialize()
+        await sql_storage.create_tables()
         await rag.start_ingest_queue()
         jobs = rag.enqueue_ingest([make_file()], chat_id="chat-1")
         await rag._ingest_queue.join()
@@ -276,7 +276,7 @@ def test_enqueue_ingest_makes_one_job_per_file(tmp_path):
     )
 
     async def flow():
-        await rag.initialize()
+        await sql_storage.create_tables()
         await rag.start_ingest_queue()
         jobs = rag.enqueue_ingest(
             [make_file(name="a.csv"), make_file(name="b.csv")], "chat-1"

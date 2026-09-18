@@ -2,7 +2,7 @@ import asyncio
 from io import BytesIO
 from pathlib import Path
 
-from app.core.config import settings
+from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
 from app.plugin.registry import PluginRegistry
 from app.retrievers.base import Retriever
 from app.services.ingestion import IngestionService
@@ -11,8 +11,8 @@ from app.store_sql.local import LocalSqlStorage
 
 from fakes import FakeEmbedder, FakeLLM, FakeVectorStorage, build_rag_service
 
-DOCUMENTS = settings.DOCUMENT_METADATA_TABLE_NAME
-CHUNKS = settings.CHUNK_TABLE_NAME
+DOCUMENTS = DOCUMENT_METADATA_TABLE_NAME
+CHUNKS = CHUNK_TABLE_NAME
 
 
 class NoopRetriever(Retriever):
@@ -143,7 +143,7 @@ def test_list_files_returns_only_origins_in_the_chat(tmp_path):
     service, sql_storage, file_storage, _ = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, FakeVectorStorage())
         result = await service.list_files(chat_id="chat-1")
         await sql_storage.close()
@@ -160,7 +160,7 @@ def test_list_files_without_chat_returns_all_origins(tmp_path):
     service, sql_storage, file_storage, _ = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, FakeVectorStorage())
         result = await service.list_files()
         await sql_storage.close()
@@ -178,7 +178,7 @@ def test_list_file_chunks_includes_emitted_descendants(tmp_path):
     service, sql_storage, file_storage, _ = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, FakeVectorStorage())
         result = await service.list_file_chunks("origin-1", chat_id="chat-1")
         await sql_storage.close()
@@ -194,7 +194,7 @@ def test_list_file_chunks_scoped_to_the_chat(tmp_path):
     service, sql_storage, file_storage, _ = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, FakeVectorStorage())
         result = await service.list_file_chunks("origin-1", chat_id="chat-2")
         await sql_storage.close()
@@ -213,7 +213,7 @@ def test_delete_file_removes_the_whole_emission_tree(tmp_path):
     service, sql_storage, file_storage, vector_storage = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         path_origin1, path_child1, path_origin2 = await seed_tree(
             sql_storage, file_storage, vector_storage
         )
@@ -250,7 +250,7 @@ def test_delete_file_is_scoped_to_the_chat(tmp_path):
     service, sql_storage, file_storage, vector_storage = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, vector_storage)
         deleted = await service.delete_file("origin-1", chat_id="chat-2")
         chunk_rows = await sql_storage.get_all(CHUNKS)
@@ -269,7 +269,7 @@ def test_delete_file_not_found_returns_zero(tmp_path):
     service, sql_storage, file_storage, _ = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, FakeVectorStorage())
         deleted = await service.delete_file("nonexistent", chat_id="chat-1")
         await sql_storage.close()
@@ -285,7 +285,7 @@ def test_delete_chat_removes_everything_in_the_chat(tmp_path):
     service, sql_storage, file_storage, vector_storage = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         path_origin1, path_child1, path_origin2 = await seed_tree(
             sql_storage, file_storage, vector_storage
         )
@@ -319,7 +319,7 @@ def test_get_file_metadata_returns_the_document(tmp_path):
     service, sql_storage, file_storage, _ = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, FakeVectorStorage())
         found = await service.get_file_metadata("origin-1")
         missing = await service.get_file_metadata("nope")
@@ -339,7 +339,7 @@ def test_get_file_link_returns_a_serveable_link(tmp_path):
     service, sql_storage, file_storage, _ = build_service(tmp_path)
 
     async def flow():
-        await service.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, FakeVectorStorage())
         link = await service.get_file_link("origin-1")
         missing = await service.get_file_link("nope")
@@ -375,7 +375,7 @@ def test_rag_service_delegates_file_management(tmp_path):
     )
 
     async def flow():
-        await rag.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, vector_storage)
         files = await rag.list_files(chat_id="chat-1")
         chunks = await rag.list_file_chunks("origin-1", chat_id="chat-1")
@@ -406,7 +406,7 @@ def test_rag_service_delegates_file_metadata_and_link(tmp_path):
     )
 
     async def flow():
-        await rag.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, vector_storage)
         meta = await rag.get_file_metadata("origin-1")
         link = await rag.get_file_link("origin-1")

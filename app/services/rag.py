@@ -94,9 +94,6 @@ class RagService:
     def file_storage(self) -> FileStorage:
         return self._file_storage
 
-    async def initialize(self) -> None:
-        await self._ingestion_service.initialize()
-
     async def ingest(
         self,
         file_bytes: bytes,

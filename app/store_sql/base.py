@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from typing import Any
-from sqlalchemy import Column, ColumnElement, Table
+from sqlalchemy import ColumnElement, Table
 
 ConditionBuilder = Callable[[Table], ColumnElement[bool]]
 
@@ -20,12 +20,8 @@ class SqlStorage(ABC):
         """Load the existing table in SQL Alchemy format."""
 
     @abstractmethod
-    async def ensure_table(
-        self,
-        table_name: str,
-        columns: Sequence[Column],
-    ) -> None:
-        """Creates a table if it doesn't exist."""
+    async def create_tables(self) -> None:
+        """Create the database schema (all tables, if they do not exist yet)."""
 
     @abstractmethod
     async def upsert(
@@ -82,24 +78,4 @@ class SqlStorage(ABC):
         Returns row results sorted by most relevant to least relevant.
         `condition`, when given, further restricts the matched rows
         (the same condition builder as get/get_all).
-        """
-
-    @staticmethod
-    @abstractmethod
-    def create_sql_columns_from_schema(
-        schema: list[dict[str, Any]],
-    ) -> list[Column[Any]]:
-        """
-        Create SQLAlchemy columns from the schema.
-
-        The schema is expected to be in form of:
-        ```
-        [
-            {
-                name: "column name",
-                type: "INTEGER" | "BOOLEAN" | "REAL" | "TEXT" | "DATETIME"
-            }
-            ...
-        ]
-        ```
         """

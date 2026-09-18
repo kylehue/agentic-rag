@@ -285,7 +285,7 @@ def test_stop_returns_false_when_nothing_is_running():
 
 
 def test_delete_chat_removes_the_history_and_the_rag_data(tmp_path):
-    from app.core.config import settings
+    from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
     from app.services.rag import RagService
     from app.store_file.local import LocalFileStorage
     from app.store_sql.local import LocalSqlStorage
@@ -307,7 +307,7 @@ def test_delete_chat_removes_the_history_and_the_rag_data(tmp_path):
     agent = RagAgentService(rag_service=rag, tools=[make_tool("search_documents")])
 
     async def flow():
-        await rag.initialize()
+        await sql_storage.create_tables()
         await seed_tree(sql_storage, file_storage, vector_storage)
         # A conversation on chat-1, so the checkpointer has a thread.
         await agent.ask("hi", chat_id="chat-1")
@@ -315,10 +315,10 @@ def test_delete_chat_removes_the_history_and_the_rag_data(tmp_path):
         await agent.delete_chat("chat-1")
         after = await agent.chat_history("chat-1")
         chunk_rows = await sql_storage.get_all(
-            settings.CHUNK_TABLE_NAME, condition=lambda t: t.c.chat_id == "chat-1"
+            CHUNK_TABLE_NAME, condition=lambda t: t.c.chat_id == "chat-1"
         )
         doc_rows = await sql_storage.get_all(
-            settings.DOCUMENT_METADATA_TABLE_NAME,
+            DOCUMENT_METADATA_TABLE_NAME,
             condition=lambda t: t.c.chat_id == "chat-1",
         )
         await sql_storage.close()

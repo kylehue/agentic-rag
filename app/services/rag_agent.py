@@ -26,6 +26,7 @@ from langgraph.types import StreamWriter
 
 from app.agent_tools import AgentTool, AgentToolset, flatten_tools, render_tool_blocks
 from app.agent_tools.base import ToolExecutor
+from app.database import agent_table_docs
 from app.llm.base import (
     ChatMessage,
     ContentPart,
@@ -346,6 +347,9 @@ RAG_AGENT_SYSTEM_PROMPT_TEMPLATE = """You are a retrieval-augmented assistant th
 
 {tools}
 
+Records:
+{records}
+
 Rules:
 - Answer only from what the tools return. If the evidence is insufficient, say so plainly.
 - Keep tool output lean: fetch only what the question needs.
@@ -433,7 +437,7 @@ class RagAgentService:
         ]
         self._system_prompt = render_template(
             RAG_AGENT_SYSTEM_PROMPT_TEMPLATE,
-            {"tools": render_tool_blocks(tools)},
+            {"tools": render_tool_blocks(tools), "records": agent_table_docs()},
         )
 
         # Checkpoint storage: a provided saver, else a durable SQLite saver
@@ -472,9 +476,8 @@ class RagAgentService:
             return self._checkpointer
 
     async def initialize(self) -> None:
-        """Initialize the services this one wraps (the RAG system tables)
-        and open the checkpoint database."""
-        await self._rag_service.initialize()
+        """Open the checkpoint database (the tables this service queries are
+        created separately, by the SQL storage)."""
         await self._ensure_checkpointer()
 
     async def close(self) -> None:

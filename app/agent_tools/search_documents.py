@@ -46,8 +46,8 @@ class SearchDocumentTool(AgentTool):
             lines = []
             for rank, chunk in enumerate(chunks, start=1):
                 lines.append(
-                    f"[{rank}] origin={chunk.origin_source_id} "
-                    f"chunk={chunk.chunk_id} {chunk.text}"
+                    f"[{rank}] source_id={chunk.source_id}\n"
+                    f"chunk_id={chunk.chunk_id}\n{chunk.text}"
                 )
             return "\n\n".join(lines)
 

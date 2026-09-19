@@ -382,7 +382,7 @@ def test_perform_sql_joins_a_workbooks_sheets(tmp_path):
     assert "S,200" in output
 
 
-def test_perform_sql_caps_the_result_rows(tmp_path):
+def test_perform_sql_returns_all_rows_without_a_limit(tmp_path):
     tools, _ = build_tools(tmp_path)
 
     output = execute(
@@ -392,8 +392,11 @@ def test_perform_sql_caps_the_result_rows(tmp_path):
         sql_query="SELECT n FROM big",
     )
 
-    # big.csv has 6 rows; the output is capped at 5 with a note.
-    assert "showing the first 5 of 6 rows" in output
+    # No row cap: without a LIMIT the query returns every row, and there is
+    # no truncation note.
+    lines = output.split("\n")
+    assert lines[-6:] == ["1", "2", "3", "4", "5", "6"]
+    assert "showing the first" not in output
 
 
 def test_perform_sql_rejects_a_non_table_source(tmp_path):
@@ -452,14 +455,14 @@ def test_records_rejects_cte_wrapped_queries(tmp_path):
 def test_records_scoped_to_the_chat(tmp_path):
     tools, _ = build_tools(tmp_path, chat_id="chat-a")
 
-    # A query that omits chat_id is wrapped to require it, so it fails with a
-    # SQL error (returned to the model) instead of leaking the scope.
+    # A query that omits chat_id is rejected upfront with a clear message
+    # instead of failing with a cryptic SQL error.
     output = execute(
         tools,
         "perform_sql_to_document_records",
         sql="SELECT chunk_id FROM __chunks__",
     )
-    assert "Error" in output
+    assert "must include chat_id" in output
 
     # Selecting chat_id lets the scoped query through.
     output = execute(

@@ -21,7 +21,8 @@ class PerformSqlToDocumentRecordsTool(AgentTool):
         return (
             "Run a read-only SELECT query against the RAG document database "
             "(the chunk and document records described in the Records section). "
-            "Select chat_id so the results stay within the current chat."
+            "Always include chat_id in the SELECT list; results are bounded to "
+            "the current chat, and a query without it is rejected."
         )
 
     @property
@@ -63,10 +64,15 @@ class PerformSqlToDocumentRecordsTool(AgentTool):
             if chat_id is not None:
                 if not _CHAT_ID_SHAPE.fullmatch(chat_id):
                     return "Error: invalid chat scope."
-                # Bound the result to the chat. The query must select
-                # chat_id; without it the wrapped query fails with a SQL
-                # error the model can adapt to, so no row can leak the
-                # scope.
+                # Results are bounded to this chat by wrapping the query and
+                # filtering on chat_id, which the query must therefore
+                # select. Check for it upfront and say so plainly, rather than
+                # letting it fail with a cryptic SQL error.
+                if "chat_id" not in sql.lower():
+                    return (
+                        "Error: the query must include chat_id in its SELECT "
+                        "list so results are bounded to the current chat."
+                    )
                 sql = (
                     f"SELECT * FROM ({sql}) AS scoped "
                     f"WHERE scoped.chat_id = '{chat_id}'"

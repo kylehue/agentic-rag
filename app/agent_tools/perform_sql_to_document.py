@@ -1,7 +1,6 @@
 from app.agent_tools.base import AgentTool
 from app.agent_tools.common import (
     SOURCE_ID_PARAMETER,
-    SQL_MAX_ROWS,
     object_schema,
     read_source_tables,
     resolve_table_document,
@@ -24,8 +23,9 @@ class PerformSqlToDocumentTool(AgentTool):
             "are loaded into a throw-away in-memory database, one table per "
             "sheet for a workbook. Each table is named by its table_name; quote "
             "a table or column name in double quotes if it contains spaces or "
-            "is a reserved word. At most the first "
-            f"{SQL_MAX_ROWS} result rows are returned."
+            "is a reserved word. Add a LIMIT so the query fetches only the rows "
+            "the answer actually needs, to avoid wasting tokens; omit the "
+            "LIMIT only when you need every row of the result."
         )
 
     @property
@@ -58,15 +58,7 @@ class PerformSqlToDocumentTool(AgentTool):
             dataframes = await read_source_tables(file_storage, document)
             result = run_table_sql(dataframes, sql)
 
-            total_rows = len(result)
-            truncated = total_rows > SQL_MAX_ROWS
-            csv = result.head(SQL_MAX_ROWS).to_csv(index=False).rstrip()
-            note = (
-                f"\n(showing the first {SQL_MAX_ROWS} of {total_rows} rows)"
-                if truncated
-                else ""
-            )
             tables = ", ".join(dataframes)
-            return f"Tables: {tables}\n\n{csv}{note}"
+            return f"Tables: {tables}\n\n{result.to_csv(index=False).rstrip()}"
 
         return execute

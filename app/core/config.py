@@ -1,4 +1,7 @@
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.mcp.server import McpServer
 
 
 class Settings(BaseSettings):
@@ -36,6 +39,15 @@ class Settings(BaseSettings):
     # How many ingest jobs the background queue runs concurrently (one job
     # per file, so a batch's files ingest in parallel up to this limit).
     INGEST_WORKERS: int = 2
+
+    # MCP servers the agent connects to (client direction); pydantic-settings
+    # JSON-decodes the value from the env. Empty means no MCP.
+    MCP_SERVERS: list[McpServer] = [
+        McpServer(
+            name="parallel",
+            url="https://search.parallel.ai/mcp",
+        )
+    ]
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.agent_tools import RAG_TOOLSET
 from app.core.config import settings
+from app.mcp import McpClient, McpServer
 
 from app.llm.openai import OpenAIProvider
 from app.embedders.gemini import GeminiEmbedder
@@ -80,27 +81,35 @@ rag_service = RagService(
 auth_service = AuthService(sql_storage=sql_storage)
 chat_service = ChatService(sql_storage=sql_storage)
 
+mcp_client = McpClient(settings.MCP_SERVERS) if settings.MCP_SERVERS else None
+
 rag_agent_service = RagAgentService(
     rag_service=rag_service,
     tools=[RAG_TOOLSET],
+    mcp_client=mcp_client,
     checkpoint_dir=settings.AGENT_LOCAL_STORAGE_DIR,
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create the schema (every table, owned by app.database), then open the
-    # agent's checkpoint database and start the background ingest workers.
+    # Create the schema (every table, owned by app.database), connect any MCP
+    # servers, open the agent's checkpoint database, and start the background
+    # ingest workers.
     await sql_storage.create_tables()
+    if mcp_client is not None:
+        await mcp_client.connect()
     await rag_agent_service.initialize()
     await rag_service.start_ingest_queue()
 
     yield
 
-    # Stop the ingest workers, then close every database: the checkpoint
-    # connection (through the agent service, whose only own resource it is)
-    # and the SQL and vector stores.
+    # Stop the ingest workers, then close every resource: the agent's
+    # checkpoint connection, the MCP connections, and the SQL and vector
+    # stores.
     await rag_service.stop_ingest_queue()
     await rag_agent_service.close()
+    if mcp_client is not None:
+        await mcp_client.close()
     await sql_storage.close()
     await vector_storage.close()

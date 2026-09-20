@@ -26,6 +26,7 @@ The application is designed around separate ingestion, retrieval, and answer-gen
     - [Text Plugin: Reassembling tables split across pages](#text-plugin-reassembling-tables-split-across-pages)
   - [Project Structure](#project-structure)
     - [`app/agent_tools`](#appagent_tools)
+    - [`app/mcp`](#appmcp)
     - [`app/ingest`](#appingest)
     - [`app/plugin`](#appplugin)
     - [`app/plugins`](#appplugins)
@@ -229,6 +230,7 @@ flowchart TD
         T2["Read table structure"]
         T3["Run a table query"]
         T4["Search the records"]
+        T5["External tools (MCP)"]
     end
 
     E --> TOOLS
@@ -237,14 +239,16 @@ flowchart TD
 
 Answering runs an agent built on langgraph. The agent loops between two steps: it asks the LLM (with the tools available), and when the LLM requests tools, it runs them and feeds the results back. Once the loop reached the max limits, the LLM is called without tools and must answer, so the loop always terminates.
 
-The agent's tools are read-only lookups over the RAG system. They know nothing about plugins: a stored chunk is a table when its metadata carries a schema, and tables are addressed by their `source_id`.
+The agent's built-in tools are read-only lookups over the RAG system. They know nothing about plugins: a stored chunk is a table when its metadata carries a schema, and tables are addressed by their `source_id`. The agent can also use external tools from MCP servers (see the MCP note below).
 
 - `search_documents`: hybrid retrieval over the corpus, through the same path the `/rag/retrieve` endpoint uses; each result carries its `source_id` (the handle for the table tools), `chunk_id`, `origin_source_id` (the citation key), and text.
 - `validate_chunk_as_structured_data`: given a source id, reports whether the source is tabular (a csv or spreadsheet). If so, returns its table schema(s) as an array, one entry per sheet (a csv returns one; a multi-sheet workbook returns one per sheet), each with the table name and columns. The schemas come from the stored chunk metadata, so no table data is read.
-- `perform_sql_to_document`: runs the model's targeted SQL (sqlite dialect) against a source's tabular data. The source's file is loaded into a throwaway in-memory database, one table per sheet for a workbook (each named by its `table_name`), so a workbook's sheets can be JOINed in one query. Non-spreadsheet sources are rejected; at most 5 result rows are returned. The only tool that reads table data.
+- `perform_sql_to_document`: runs the model's targeted SQL (sqlite dialect) against a source's tabular data. The source's file is loaded into a throwaway in-memory database, one table per sheet for a workbook (each named by its `table_name`), so a workbook's sheets can be JOINed in one query. Non-spreadsheet sources are rejected. The model is told to add a LIMIT so it only fetches the rows the answer needs. The only tool that reads table data.
 - `perform_sql_to_document_records`: read-only SELECT over the stored chunk and document records, bounded to the chat.
 
 The RAG tools are grouped into one `AgentToolset` (the `rag_toolset`), which carries the cross-tool orchestration instructions as guidance (find the source with `search_documents`; for tabular answers, `validate_chunk_as_structured_data` to learn the schema then `perform_sql_to_document` to run SQL, JOINing a workbook's sheets; `perform_sql_to_document_records` for inspecting stored data; and don't re-run a tool you already have). Each tool's own description stays decoupled and describes only itself; the "how these tools fit together" rules live in the toolset. The system prompt's tools section is generated from the toolset (`render_tool_blocks()`), so the prompt can never list a tool the agent does not have or miss one it does. The agent answers only from tool output; the prompt tells it to cite factual claims as `#[origin_source_id:chunk_id]` using the origin source and chunk ids the search tool returns (the citation format is owned by the agent service, the tools do not know about it). Citations use the `origin_source_id` (the top-level file the user uploaded) rather than the chunk's own `source_id`, so a citation for a table embedded in a document points at the document, not the intermediate emitted file. When the answer is done, those references are parsed out of the answer text: `RagAnswer.chunk_refs` holds exactly the chunks the answer cites (keyed by `#[origin_source_id:chunk_id]`), not everything it retrieved along the way.
+
+**MCP tools.** The agent can also call tools exposed by external MCP servers. `MCP_SERVERS` in the config lists them (a JSON array of `{name, url, headers, transport}`); the composition root builds an `McpClient` from that list, and the lifespan connects it (a server that fails to connect is skipped with a warning, so the app still starts). Once connected, each server's tools are discovered and merged into the agent's tool list on `initialize()`: every tool becomes an `AgentTool` adapter, namespaced as `{server}__{tool}` so it can never shadow a built-in, and grouped under a per-server `AgentToolset` in the prompt. The executors route each call back through the client to the owning server. The MCP SDK is imported lazily (only when a server connects), so the app runs without it when no servers are configured.
 
 **Streaming.** The LLM providers stream natively, and the run is forwarded as events: a token event per streamed token, a tool-call event per tool the model requests, a tool-result event per result, and a final answer event. `POST /rag/answer/stream` serves these as server-sent events (`answer_delta` frames as the answer types out, `tool_call` / `tool_result` frames while the agent works, then a final `answer` frame with the full answer JSON).
 
@@ -255,7 +259,8 @@ The RAG tools are grouped into one `AgentToolset` (the `rag_toolset`), which car
 The layers, so each concern has one home:
 
 - `app/services/rag_agent.py`: the `RagAgentService`. It takes the RAG service and the tools at initialization, owns the orchestration graph and the run events, composes a fresh run per answer, parses the answer's `chunk_refs` from its citations, and exposes `ask()` and `ask_stream()`.
-- `app/agent_tools/`: the RAG tools, one module each (an `AgentTool` subclass per tool), plus the `rag_toolset` that groups them with their cross-tool instructions.
+- `app/agent_tools/`: the RAG tools, one module each (an `AgentTool` subclass per tool), plus the `rag_toolset` that groups them with their cross-tool instructions, and `mcp.py` (the `McpTool` adapter and `build_mcp_toolsets`, which turn MCP servers' tools into agent tools).
+- `app/mcp/`: the generic MCP client (one `McpServer` connection per configured endpoint, an `McpClient` that manages them and discovers their tools).
 - `app/api/rag_agent.py`: the answer endpoints.
 
 ## Users and Chats
@@ -402,11 +407,21 @@ Each reassembled table is emitted as a CSV with a header row (generated `col_N` 
 
 ### `app/agent_tools`
 
-The RAG agent's tools, plugin-style: one module per tool (`search_documents.py`, `validate_chunk_as_structured_data.py`, `perform_sql_to_document.py`, `perform_sql_to_document_records.py`), plus `base.py` (the `AgentTool` and `AgentToolset` base classes and the outline/render helpers), `common.py` (the shared source/table resolution, spreadsheet loading, and in-memory SQL helpers), and `rag_toolset.py` (the `AgentToolset` that groups the RAG tools with their cross-tool instructions). The tools are decoupled from the plugins: they only know the `rag_service` (and the `chat_id`), and treat a stored chunk as a table when its metadata carries a schema.
+The RAG agent's tools, plugin-style: one module per tool (`search_documents.py`, `validate_chunk_as_structured_data.py`, `perform_sql_to_document.py`, `perform_sql_to_document_records.py`), plus `base.py` (the `AgentTool` and `AgentToolset` base classes and the outline/render helpers), `common.py` (the shared source/table resolution, spreadsheet loading, and in-memory SQL helpers), `mcp.py` (the `McpTool` `AgentTool` adapter and `build_mcp_toolsets`, which turn MCP servers' tools into agent tools), and `rag_toolset.py` (the `AgentToolset` that groups the RAG tools with their cross-tool instructions). The tools are decoupled from the plugins: they only know the `rag_service` (and the `chat_id`), and treat a stored chunk as a table when its metadata carries a schema.
 
-`AgentTool` declares the tool's `name`, `description`, and `parameters` (the JSON schema the model sees) and implements `create_executor(rag_service, chat_id)`, which returns the async execute function the agent uses (a closure over the RAG service pieces it needs; the RAG service exposes its collaborators as public properties for this). Each tool's description is decoupled and describes only itself. Tools are read-only and token-lean: `validate_chunk_as_structured_data` returns a source's stored table schema(s) with no data read, and `perform_sql_to_document` loads a source's spreadsheet (a csv, or a workbook's sheets, each named by its `table_name`) into a throwaway in-memory database and caps output at 5 rows.
+`AgentTool` declares the tool's `name`, `description`, and `parameters` (the JSON schema the model sees) and implements `create_executor(rag_service, chat_id)`, which returns the async execute function the agent uses (a closure over the RAG service pieces it needs; the RAG service exposes its collaborators as public properties for this). Each tool's description is decoupled and describes only itself. Tools are read-only and token-lean: `validate_chunk_as_structured_data` returns a source's stored table schema(s) with no data read, and `perform_sql_to_document` loads a source's spreadsheet (a csv, or a workbook's sheets, each named by its `table_name`) into a throwaway in-memory database and tells the model to bound its own output with a LIMIT.
 
 `AgentToolset` is a named group of tools plus the cross-tool orchestration instructions (e.g. "validate a source's schema before running SQL over it"). It is transparent to the tool-call wire format (the model calls its member tools), and its `render()` block (name + instructions + each tool's spec) is what the agent's system prompt shows. `flatten_tools()` unwraps a mix of bare tools and toolsets into the tools the model actually calls; `render_tool_blocks()` renders that mix for the prompt; `tools_outline()` renders a bare set of tools' specs. `rag_toolset.py` declares the RAG tools one by one as module constants (so the instructions can reference their real names) and the `RAG_TOOLSET` constant (named "RAG") that groups them.
+
+### `app/mcp`
+
+The MCP client layer, decoupled from the agent (it knows nothing about `AgentTool`). It connects to external MCP servers so the agent can call their tools:
+
+- `app/mcp/models.py` - `ToolInfo` (name, description, input schema) and `ToolsetInfo` (a server's tools grouped by name), the generic captured shapes.
+- `app/mcp/server.py` - `McpServer`: one connected endpoint (streamable HTTP or SSE). Opens the transport + session in `connect()`, exposes `list_tools()` and `call_tool()` (which flattens the tool's text content), and closes everything in `close()`. The MCP SDK is imported lazily inside `connect()`, so this module (and the app) loads even when `mcp` is not installed and MCP is disabled.
+- `app/mcp/client.py` - `McpClient`: manages a set of `McpServer`s. `connect()` opens each and caches its tools (a server that fails is skipped with a warning, so the app still starts), and `call_tool()` routes a call to the owning server.
+
+The bridge to the agent is `app/agent_tools/mcp.py`: `McpTool` adapts one MCP tool into an `AgentTool` (namespaced as `{server}__{tool}`), and `build_mcp_toolsets()` groups each server's tools into an `AgentToolset`. The `RagAgentService` merges those into its tool list on `initialize()`.
 
 ### `app/ingest`
 
@@ -492,7 +507,7 @@ Contains Pydantic models used specifically at the API boundary. These are separa
 
 Application-wide configuration and core infrastructure.
 
-- `app/core/config.py` - settings (API keys, model names, storage paths, the vector collection name, and the agent storage directory).
+- `app/core/config.py` - settings (API keys, model names, storage paths, the vector collection name, the agent storage directory, and `MCP_SERVERS`, the JSON list of MCP servers the agent connects to).
 - `app/core/exceptions.py` - exception handlers registered on the FastAPI app.
 
 ### `app/errors`
@@ -567,7 +582,7 @@ Storage abstractions and local implementations:
 
 ### `app/container.py`
 
-The composition root for the external collaborators. It builds the providers, storages, retrievers, and built-in plugins, then composes the services: `AuthService` and `ChatService` (which get SQL storage), the `RagService` wrapper (which gets the plugins through its `plugins` option), and the `RagAgentService` (which gets the RAG service, the RAG tools, and the agent storage directory its checkpoint database lives in). It also exposes the FastAPI lifespan (creating the schema with `sql_storage.create_tables()`, opening the agent's checkpoint database, then closing the agent checkpoint, SQL, and vector databases on shutdown). The pipeline internals (the plugin registry and the ingestion/retrieval services) are composed inside the `RagService`.
+The composition root for the external collaborators. It builds the providers, storages, retrievers, and built-in plugins, then composes the services: `AuthService` and `ChatService` (which get SQL storage), the `RagService` wrapper (which gets the plugins through its `plugins` option), the `McpClient` (from `MCP_SERVERS`, or `None` when none are configured), and the `RagAgentService` (which gets the RAG service, the RAG tools, the MCP client, and the agent storage directory its checkpoint database lives in). It also exposes the FastAPI lifespan (creating the schema with `sql_storage.create_tables()`, connecting the MCP servers, opening the agent's checkpoint database, and then closing the MCP connections, the agent checkpoint, the SQL, and the vector databases on shutdown). The pipeline internals (the plugin registry and the ingestion/retrieval services) are composed inside the `RagService`.
 
 ## Design Principles
 

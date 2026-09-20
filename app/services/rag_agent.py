@@ -26,6 +26,7 @@ from langgraph.types import StreamWriter
 
 from app.agent_tools import AgentTool, AgentToolset, flatten_tools, render_tool_blocks
 from app.agent_tools.base import ToolExecutor
+from app.agent_tools.mcp import build_mcp_toolsets
 from app.database import agent_table_docs
 from app.llm.base import (
     ChatMessage,
@@ -36,6 +37,7 @@ from app.llm.base import (
     ToolSpec,
     accumulate_result,
 )
+from app.mcp import McpClient
 from app.models.rag import RagAnswer
 from app.models.stream import StreamEvent
 from app.services.rag import RagService
@@ -410,35 +412,17 @@ class RagAgentService:
         max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
         checkpointer: BaseCheckpointSaver | None = None,
         checkpoint_dir: str | None = None,
+        mcp_client: McpClient | None = None,
     ) -> None:
-        # Toolsets wrap their member tools; the model calls the flat tools, so
-        # the specs and executors are built from the flattened list with
-        # duplicates dropped (the first occurrence of a name wins). The prompt
-        # renders the original mix, since that is what carries each toolset's
-        # name and instructions.
-        seen = set()
-        flat_tools: list[AgentTool] = []
-        for tool in flatten_tools(tools):
-            if tool.name in seen:
-                continue
-            seen.add(tool.name)
-            flat_tools.append(tool)
-
         self._rag_service = rag_service
-        self._tools = flat_tools
+        self._static_tools = list(tools)
+        self._mcp_client = mcp_client
         self._max_tool_rounds = max_tool_rounds
-        self._specs = [
-            ToolSpec(
-                name=tool.name,
-                description=tool.description,
-                parameters=tool.parameters,
-            )
-            for tool in flat_tools
-        ]
-        self._system_prompt = render_template(
-            RAG_AGENT_SYSTEM_PROMPT_TEMPLATE,
-            {"tools": render_tool_blocks(tools), "records": agent_table_docs()},
-        )
+
+        # The static tools define the baseline tool view (specs + prompt);
+        # initialize() extends it with the MCP tools once the MCP client has
+        # connected.
+        self._apply_tools(self._static_tools)
 
         # Checkpoint storage: a provided saver, else a durable SQLite saver
         # created on first use from the agent storage dir (or in-memory when
@@ -454,6 +438,34 @@ class RagAgentService:
         # The in-flight run per chat (its driving task), so `stop` can
         # interrupt a running answer.
         self._running: dict[str, asyncio.Task] = {}
+
+    def _apply_tools(self, items: Sequence[AgentTool | AgentToolset]) -> None:
+        # Toolsets wrap their member tools; the model calls the flat tools, so
+        # the specs and executors are built from the flattened list with
+        # duplicates dropped (the first occurrence of a name wins). The prompt
+        # renders the original mix, since that is what carries each toolset's
+        # name and instructions.
+        seen = set()
+        flat_tools: list[AgentTool] = []
+        for tool in flatten_tools(items):
+            if tool.name in seen:
+                continue
+            seen.add(tool.name)
+            flat_tools.append(tool)
+
+        self._tools = flat_tools
+        self._specs = [
+            ToolSpec(
+                name=tool.name,
+                description=tool.description,
+                parameters=tool.parameters,
+            )
+            for tool in flat_tools
+        ]
+        self._system_prompt = render_template(
+            RAG_AGENT_SYSTEM_PROMPT_TEMPLATE,
+            {"tools": render_tool_blocks(items), "records": agent_table_docs()},
+        )
 
     async def _ensure_checkpointer(self) -> BaseCheckpointSaver:
         async with self._checkpointer_lock:
@@ -476,8 +488,14 @@ class RagAgentService:
             return self._checkpointer
 
     async def initialize(self) -> None:
-        """Open the checkpoint database (the tables this service queries are
-        created separately, by the SQL storage)."""
+        # Add the MCP tools (the client has connected and cached them), then
+        # open the checkpoint database.
+        if self._mcp_client is not None:
+            all_items: list[AgentTool | AgentToolset] = [
+                *self._static_tools,
+                *build_mcp_toolsets(self._mcp_client),
+            ]
+            self._apply_tools(all_items)
         await self._ensure_checkpointer()
 
     async def close(self) -> None:

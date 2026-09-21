@@ -2,12 +2,26 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 
+from app.agent_tools.evidence import EvidenceIndex
 from app.services.rag import RagService
 
 # The async function the agent calls for a tool: parsed arguments in,
 # the text the model reads back out.
 ToolExecutor = Callable[[dict], Awaitable[str]]
+
+
+@dataclass
+class RunContext:
+    """Per-answer state handed to the tools when their executors are built.
+
+    ``chat_id`` scopes lookups to the chat; ``evidence`` is the index the
+    chunk-surfacing tools register into, so the answer can cite a chunk by a
+    small integer the service later resolves to the real ids."""
+
+    chat_id: str | None
+    evidence: EvidenceIndex
 
 
 class AgentTool(ABC):
@@ -35,17 +49,14 @@ class AgentTool(ABC):
         """The tool's JSON schema parameters."""
 
     @abstractmethod
-    def create_executor(
-        self,
-        rag_service: RagService,
-        chat_id: str | None = None,
-    ) -> ToolExecutor:
+    def create_executor(self, rag_service: RagService, context: RunContext) -> ToolExecutor:
         """Return the async execute function the agent uses for this tool.
 
-        Called once per answer with the RAG service and the chat the answer
-        runs in (None means no chat scope). The returned closure may capture
-        whatever it needs; chat-scoped tools bound their lookups to that
-        chat's chunks.
+        Called once per answer with the RAG service and the per-answer context
+        (the chat scope plus the evidence index). The returned closure may
+        capture whatever it needs; chunk-surfacing tools register their
+        results in the context's evidence index so the answer can cite them by
+        number.
         """
 
 

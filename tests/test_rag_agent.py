@@ -4,6 +4,7 @@ import pytest
 
 from app.agent_tools import (
     AgentToolset,
+    EvidenceIndex,
     PerformSqlToDocumentRecordsTool,
     PerformSqlToDocumentTool,
     SearchDocumentTool,
@@ -11,6 +12,7 @@ from app.agent_tools import (
     RAG_TOOLSET,
     flatten_tools,
     render_tool_blocks,
+    resolve_citations,
 )
 from app.llm.base import RawDelta, RawResult, ToolCall
 from app.models.chunk import RetrievedChunk
@@ -22,7 +24,6 @@ from app.services.rag_agent import (
     RagAgentService,
     ToolCallEvent,
     ToolResultEvent,
-    extract_chunk_refs,
     to_stream_event,
 )
 
@@ -432,20 +433,21 @@ def test_ask_tool_errors_are_seen_by_the_model_not_raised():
 
 
 def test_ask_reports_only_the_cited_chunks():
-    # The search returns two chunks, but only one is cited in the answer.
+    # The search returns two chunks (indexed 1 and 2), but only one is cited
+    # in the answer.
     chunks = [make_chunk("c1"), make_chunk("c2")]
     llm = FakeLLM(
         tool_call_response("search_documents", {"query": "what?"}),
-        RawResult(content="Grounded answer. #[s1:c2]"),
+        RawResult(content="Grounded answer. #[2]"),
     )
     agent = make_agent(llm, [SearchDocumentTool()], retriever=NoopRetriever(chunks))
 
     result = asyncio.run(agent.ask("what?", chat_id="s1"))
 
     assert result.query == "what?"
-    assert result.answer == "Grounded answer. #[s1:c2]"
+    assert result.answer == "Grounded answer. #[2]"
     assert result.chunk_refs == {
-        "#[s1:c2]": {"origin_source_id": "s1", "chunk_id": "c2"}
+        "#[2]": {"chunk_id": "c2", "origin_source_id": "s1"}
     }
 
 
@@ -460,6 +462,83 @@ def test_ask_without_citations_reports_no_chunk_refs():
     # retriever holds chunks.
     assert result.answer == "No tools needed."
     assert result.chunk_refs == {}
+
+
+def test_ask_cites_a_table_it_computes_over(tmp_path):
+    # A table-computed answer has nothing to cite unless perform_sql registers
+    # the table it queried. This is the regression for the "agent never cites"
+    # bug on table questions.
+    import io
+
+    from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
+    from app.store_file.local import LocalFileStorage
+    from app.store_sql.local import LocalSqlStorage
+
+    sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
+    file_storage = LocalFileStorage(storage_dir=tmp_path / "file")
+
+    async def setup():
+        await sql_storage.create_tables()
+        path = await file_storage.upload(
+            file=io.BytesIO(b"region,amount\nnorth,40\nsouth,125\n"),
+            file_filename="sales.csv",
+            file_content_type="text/csv",
+        )
+        await sql_storage.upsert(
+            DOCUMENT_METADATA_TABLE_NAME,
+            [
+                {
+                    "source_id": "tbl",
+                    "file_path": path,
+                    "file_content_type": "text/csv",
+                    "file_filename": "sales.csv",
+                    "file_orig_filename": "sales.csv",
+                    "is_origin": True,
+                    "chat_id": "chat-a",
+                }
+            ],
+        )
+        await sql_storage.upsert(
+            CHUNK_TABLE_NAME,
+            [
+                {
+                    "chunk_id": "tc1",
+                    "source_id": "tbl",
+                    "origin_source_id": "tbl",
+                    "plugin": "table",
+                    "text": "Table: sales",
+                    "metadata": {
+                        "table_name": "sales",
+                        "schema": [
+                            {"name": "region", "type": "TEXT"},
+                            {"name": "amount", "type": "INTEGER"},
+                        ],
+                        "row_count": 2,
+                        "column_count": 2,
+                    },
+                    "chat_id": "chat-a",
+                }
+            ],
+        )
+        await sql_storage.close()
+
+    asyncio.run(setup())
+
+    llm = FakeLLM(
+        tool_call_response(
+            "perform_sql_to_document",
+            {"source_id": "tbl", "sql_query": "SELECT SUM(amount) AS total FROM sales"},
+        ),
+        RawResult(content="The total is 165. #[1]"),
+    )
+    rag = build_rag_service(
+        llm, NoopRetriever(), sql_storage=sql_storage, file_storage=file_storage
+    )
+    agent = RagAgentService(rag_service=rag, tools=[PerformSqlToDocumentTool()])
+
+    result = asyncio.run(agent.ask("total?", chat_id="chat-a"))
+
+    assert result.chunk_refs == {"#[1]": {"chunk_id": "tc1", "origin_source_id": "tbl"}}
 
 
 def test_ask_raises_when_the_run_never_answers():
@@ -498,7 +577,7 @@ def test_system_prompt_is_built_from_the_tools_outline():
     system_prompt = llm.calls[0][0].content
     # The persona and rules...
     assert "retrieval-augmented assistant" in system_prompt
-    assert "Cite factual claims" in system_prompt
+    assert "Cite the evidence you use" in system_prompt
     # ...and a Tools section derived from the tool definitions.
     assert "Tools:" in system_prompt
     for name in (
@@ -610,15 +689,20 @@ def test_to_stream_event_translates_domain_items():
     assert to_stream_event(AnswerEvent("a")) is None
 
 
-def test_extract_chunk_refs_parses_citations():
-    answer = "It is here #[s1:c1], again #[s1:c1], and also #[s2:c2]."
-    assert extract_chunk_refs(answer) == {
-        "#[s1:c1]": {"origin_source_id": "s1", "chunk_id": "c1"},
-        "#[s2:c2]": {"origin_source_id": "s2", "chunk_id": "c2"},
+def test_resolve_citations_maps_indices_to_ids():
+    evidence = EvidenceIndex()
+    evidence.register("s1", "c1")  # -> 1
+    evidence.register("s2", "c2")  # -> 2
+    answer = "Claim one #[1], again #[1], and claim two #[2]."
+    assert resolve_citations(answer, evidence) == {
+        "#[1]": {"chunk_id": "c1", "origin_source_id": "s1"},
+        "#[2]": {"chunk_id": "c2", "origin_source_id": "s2"},
     }
-    # Plain brackets, ranks, and links are not citations (no leading #).
-    assert extract_chunk_refs("[1] origin=s1 chunk=c1") == {}
-    assert extract_chunk_refs("see [s1:c1] or [a](http://x)") == {}
+    # An index that was never surfaced is dropped.
+    assert resolve_citations("see #[9]", evidence) == {}
+    # Plain brackets, ranks, and links are not citations (no #[n] marker).
+    assert resolve_citations("[1] s1 c1", evidence) == {}
+    assert resolve_citations("see #1 or [a](http://x)", evidence) == {}
 
 
 # --- ask_stream ---

@@ -388,7 +388,7 @@ def make_tool(name, output="tool result", calls=None):
         def parameters(self) -> dict:
             return {"type": "object", "properties": {}}
 
-        def create_executor(self, rag_service, chat_id=None):
+        def create_executor(self, rag_service, context):
             async def execute(arguments):
                 if calls is not None:
                     calls.append((name, arguments))

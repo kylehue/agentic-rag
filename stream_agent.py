@@ -209,7 +209,7 @@ HELP_TEXT = """commands:
   /chats (or /ls)  list all chats (the current one is marked)
   /use <id>        switch to a chat (a unique prefix is enough)
   /new             start a fresh chat on the next question
-  /del <id>        delete one chat (conversation + ingested data)
+  /del <id>        delete one chat (conversation + ingested documents/chunks/vectors)
   /delall          delete all chats
   /help            show this help
   /exit, /quit     leave"""
@@ -282,8 +282,8 @@ def preview(text: str) -> str:
 def show_chunk_refs(data: dict) -> None:
     refs = data["chunk_refs"]
     print(f"cited chunks: {len(refs)}")
-    for ref in refs:
-        print(f"  - {ref}")
+    for marker, ids in refs.items():
+        print(f"  - {marker} -> {ids['origin_source_id']}:{ids['chunk_id']}")
 
 
 def show(event: str, data: dict) -> None:

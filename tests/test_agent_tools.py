@@ -5,8 +5,10 @@ import json
 import pandas as pd
 
 from app.agent_tools import (
+    EvidenceIndex,
     PerformSqlToDocumentRecordsTool,
     PerformSqlToDocumentTool,
+    RunContext,
     SearchDocumentTool,
     ValidateChunkAsStructuredDataTool,
 )
@@ -246,8 +248,9 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
         PerformSqlToDocumentTool(),
         PerformSqlToDocumentRecordsTool(),
     ]
+    context = RunContext(chat_id=chat_id, evidence=EvidenceIndex())
     executors = {
-        tool.name: tool.create_executor(rag_service, chat_id) for tool in tools
+        tool.name: tool.create_executor(rag_service, context) for tool in tools
     }
     return executors, retriever
 
@@ -271,8 +274,8 @@ def test_search_documents_returns_chunk_ids_and_text(tmp_path):
     output = execute(tools, "search_documents", query="evidence?")
 
     assert retriever.queries == ["evidence?"]
-    # Each chunk exposes its source id (the table tools' handle), chunk id,
-    # and origin source id (the citation key), then its text.
+    # Each chunk is shown with its citation number and its ids (the model
+    # passes source_id to the other table tools), then its text.
     assert (
         "[1] source_id=s1 chunk_id=c1 origin_source_id=s1\nfirst evidence" in output
     )
@@ -357,7 +360,7 @@ def test_perform_sql_computes_on_a_csv(tmp_path):
         sql_query="SELECT SUM(amount) AS total FROM sales",
     )
 
-    assert "Tables: sales" in output
+    assert "Tables: sales (#[1])" in output
     assert "35" in output
 
 
@@ -426,6 +429,25 @@ def test_records_queries_the_chunks_table(tmp_path):
     )
 
     assert "sales-chunk" in output
+
+
+def test_records_numbers_chunk_rows_so_they_are_citable(tmp_path):
+    tools, _ = build_tools(tmp_path)
+
+    output = execute(
+        tools,
+        "perform_sql_to_document_records",
+        sql=(
+            "SELECT chunk_id, origin_source_id, chat_id FROM __chunks__ "
+            "WHERE source_id = 'tbl-src'"
+        ),
+    )
+
+    # A chunk-shaped row (chunk_id + origin_source_id) is numbered, so the
+    # answer can cite it.
+    assert "[1] " in output
+    assert "sales-chunk" in output
+    assert "tbl-src" in output
 
 
 def test_records_rejects_non_select(tmp_path):

@@ -1,6 +1,6 @@
 import asyncio
 
-from app.agent_tools import RAG_TOOLSET
+from app.agent_tools import RAG_TOOLSET, EvidenceIndex, RunContext
 from app.agent_tools.mcp import build_mcp_toolsets
 from app.mcp import McpClient
 from app.mcp.models import ToolInfo
@@ -134,7 +134,8 @@ def test_build_mcp_toolsets_groups_tools_by_server_and_namespaces_them():
     # The executor routes the call through the client to the server, ignoring
     # the RAG service and chat it is given.
     executor = tool.create_executor(
-        rag_service=build_rag_service(FakeLLM("ok"), NoopRetriever()), chat_id=None
+        rag_service=build_rag_service(FakeLLM("ok"), NoopRetriever()),
+        context=RunContext(chat_id=None, evidence=EvidenceIndex()),
     )
 
     async def run() -> str:

@@ -19,8 +19,7 @@ class RagAnswerSchema(BaseModel):
 
     query: str
     answer: str
-    # Only the chunks the answer actually cites, keyed by their
-    # #[origin_source_id:chunk_id] reference.
+    # Only the chunks the answer actually cites, keyed by their #[1] marker.
     chunk_refs: dict[str, dict[str, str]]
 
 

@@ -5,6 +5,7 @@ from app.agent_tools.common import (
     read_source_tables,
     resolve_table_document,
     run_table_sql,
+    table_chunks_for_source,
 )
 
 
@@ -47,18 +48,37 @@ class PerformSqlToDocumentTool(AgentTool):
             ["source_id", "sql_query"],
         )
 
-    def create_executor(self, rag_service, chat_id=None):
+    def create_executor(self, rag_service, context):
         sql_storage = rag_service.sql_storage
         file_storage = rag_service.file_storage
 
         async def execute(arguments: dict) -> str:
             source_id = str(arguments.get("source_id", ""))
             sql = str(arguments.get("sql_query", ""))
-            document = await resolve_table_document(sql_storage, source_id, chat_id)
+            document = await resolve_table_document(sql_storage, source_id, context.chat_id)
             dataframes = await read_source_tables(file_storage, document)
-            result = run_table_sql(dataframes, sql)
 
-            tables = ", ".join(dataframes)
-            return f"Tables: {tables}\n\n{result.to_csv(index=False).rstrip()}"
+            # Register the source's table chunk(s) as citable evidence, so the
+            # answer can cite the data it computed over. A table already seen
+            # via search reuses its number (deduped by origin + chunk id). Each
+            # loaded table is labeled with the number the model cites it by.
+            chunks = await table_chunks_for_source(sql_storage, source_id, context.chat_id)
+            by_name = {
+                (chunk.get("metadata") or {}).get("table_name"): chunk
+                for chunk in chunks
+            }
+            labels = []
+            for table_name in dataframes:
+                chunk = by_name.get(table_name)
+                if chunk is None:
+                    labels.append(table_name)
+                    continue
+                index = context.evidence.register(
+                    chunk.get("origin_source_id") or source_id, chunk["chunk_id"]
+                )
+                labels.append(f"{table_name} (#[{index}])")
+
+            result = run_table_sql(dataframes, sql)
+            return f"Tables: {', '.join(labels)}\n\n{result.to_csv(index=False).rstrip()}"
 
         return execute

@@ -37,17 +37,23 @@ class SearchDocumentTool(AgentTool):
             ["query"],
         )
 
-    def create_executor(self, rag_service, chat_id=None):
+    def create_executor(self, rag_service, context):
         async def execute(arguments: dict) -> str:
             query = str(arguments.get("query", ""))
-            chunks = list(await rag_service.retrieve(query, chat_id))
+            chunks = list(await rag_service.retrieve(query, context.chat_id))
             if not chunks:
                 return "No evidence found."
 
             lines = []
-            for rank, chunk in enumerate(chunks, start=1):
+            for chunk in chunks:
+                # Register the chunk so the answer can cite it by number. The
+                # ids are still shown: the model passes source_id to the other
+                # table tools (validate / perform_sql_to_document).
+                index = context.evidence.register(
+                    chunk.origin_source_id, chunk.chunk_id
+                )
                 lines.append(
-                    f"[{rank}] source_id={chunk.source_id} "
+                    f"[{index}] source_id={chunk.source_id} "
                     f"chunk_id={chunk.chunk_id} "
                     f"origin_source_id={chunk.origin_source_id}\n"
                     f"{chunk.text}"

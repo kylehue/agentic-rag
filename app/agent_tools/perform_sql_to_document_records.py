@@ -43,7 +43,7 @@ class PerformSqlToDocumentRecordsTool(AgentTool):
             ["sql"],
         )
 
-    def create_executor(self, rag_service, chat_id=None):
+    def create_executor(self, rag_service, context):
         sql_storage = rag_service.sql_storage
 
         async def execute(arguments: dict) -> str:
@@ -61,8 +61,8 @@ class PerformSqlToDocumentRecordsTool(AgentTool):
                 limit = SQL_MAX_ROWS
             limit = max(1, min(limit, SQL_MAX_ROWS))
 
-            if chat_id is not None:
-                if not _CHAT_ID_SHAPE.fullmatch(chat_id):
+            if context.chat_id is not None:
+                if not _CHAT_ID_SHAPE.fullmatch(context.chat_id):
                     return "Error: invalid chat scope."
                 # Results are bounded to this chat by wrapping the query and
                 # filtering on chat_id, which the query must therefore
@@ -75,14 +75,25 @@ class PerformSqlToDocumentRecordsTool(AgentTool):
                     )
                 sql = (
                     f"SELECT * FROM ({sql}) AS scoped "
-                    f"WHERE scoped.chat_id = '{chat_id}'"
+                    f"WHERE scoped.chat_id = '{context.chat_id}'"
                 )
 
             rows = await sql_storage.query(sql, limit)
             if not rows:
                 return "No rows."
-            return "Rows (JSON, one per line):\n" + "\n".join(
-                json.dumps(row, default=str) for row in rows
-            )
+
+            lines = []
+            for row in rows:
+                # A chunk-shaped row (chunk_id + origin_source_id) is citable
+                # evidence; register it so the answer can cite it by number.
+                origin = row.get("origin_source_id")
+                chunk_id = row.get("chunk_id")
+                body = json.dumps(row, default=str)
+                if origin and chunk_id:
+                    index = context.evidence.register(origin, chunk_id)
+                    lines.append(f"[{index}] {body}")
+                else:
+                    lines.append(body)
+            return "Rows (one per line):\n" + "\n".join(lines)
 
         return execute

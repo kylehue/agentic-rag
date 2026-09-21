@@ -40,13 +40,13 @@ class ValidateChunkAsStructuredDataTool(AgentTool):
             ["source_id"],
         )
 
-    def create_executor(self, rag_service, chat_id=None):
+    def create_executor(self, rag_service, context):
         sql_storage = rag_service.sql_storage
 
         async def execute(arguments: dict) -> str:
             source_id = str(arguments.get("source_id", ""))
-            await resolve_table_document(sql_storage, source_id, chat_id)
-            rows = await table_chunks_for_source(sql_storage, source_id, chat_id)
+            await resolve_table_document(sql_storage, source_id, context.chat_id)
+            rows = await table_chunks_for_source(sql_storage, source_id, context.chat_id)
             if not rows:
                 raise ValueError(f"Source '{source_id}' stores no table.")
             return json.dumps(table_schema_entries(rows), default=str, indent=2)

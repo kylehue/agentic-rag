@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 from uuid import uuid4
@@ -25,7 +24,8 @@ from langgraph.graph.message import add_messages
 from langgraph.types import StreamWriter
 
 from app.agent_tools import AgentTool, AgentToolset, flatten_tools, render_tool_blocks
-from app.agent_tools.base import ToolExecutor
+from app.agent_tools.base import RunContext, ToolExecutor
+from app.agent_tools.evidence import EvidenceIndex, resolve_citations
 from app.agent_tools.mcp import build_mcp_toolsets
 from app.database import agent_table_docs
 from app.llm.base import (
@@ -88,9 +88,13 @@ class ToolResultEvent(AgentEvent):
 
 @dataclass(frozen=True)
 class AnswerEvent(AgentEvent):
-    """The agent's final answer text. The last event of a run."""
+    """The agent's final answer. The last event of a run.
+
+    `chunk_refs` is the resolved citation map (``"#[n]"`` -> the real chunk
+    ids), computed against the run's evidence index."""
 
     content: str
+    chunk_refs: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 # --- the orchestration graph ---
@@ -184,6 +188,7 @@ def _build_graph(
     executors: dict[str, ToolExecutor],
     max_tool_rounds: int,
     checkpointer: BaseCheckpointSaver,
+    evidence: EvidenceIndex,
 ):
     """Compile the agent's orchestration graph.
 
@@ -191,6 +196,9 @@ def _build_graph(
     the LLM requests tool calls, the tools node executes them and feeds the
     results back. Once `max_tool_rounds` rounds are used up, the LLM is
     called without tools and must answer, so the loop always terminates.
+
+    `evidence` is the run's citation index: the model cites chunks by number
+    and the model node resolves those numbers back to real ids on the answer.
 
     The `checkpointer` persists each thread's state (one thread per
     chat), so a conversation continues across runs and restarts, and an
@@ -217,6 +225,14 @@ def _build_graph(
             if delta.text:
                 writer({"type": "answer_delta", "text": delta.text})
         result = accumulate_result(deltas)
+        # On the answer turn, resolve the citations the model wrote against
+        # this run's evidence and attach them to the message, so they persist
+        # with it (chat_history reads them back without a live index).
+        citations = (
+            resolve_citations(result.content, evidence)
+            if result.content and not result.tool_calls
+            else {}
+        )
         # A list, like the tools node: node outputs are the unit the state
         # (and any stream projection) sees.
         return {
@@ -227,6 +243,7 @@ def _build_graph(
                         {"name": call.name, "args": call.arguments, "id": call.id}
                         for call in result.tool_calls
                     ],
+                    additional_kwargs={"citations": citations},
                 )
             ]
         }
@@ -323,7 +340,12 @@ def _model_events(state: dict) -> list[AgentEvent]:
             if isinstance(text, list):
                 text = " ".join(part for part in text if isinstance(part, str))
             if text:
-                events.append(AnswerEvent(content=text))
+                events.append(
+                    AnswerEvent(
+                        content=text,
+                        chunk_refs=message.additional_kwargs.get("citations", {}),
+                    )
+                )
     return events
 
 
@@ -355,38 +377,9 @@ Records:
 Rules:
 - Answer only from what the tools return. If the evidence is insufficient, say so plainly.
 - Keep tool output lean: fetch only what the question needs.
-- Cite factual claims as #[origin_source_id:chunk_id].
+- Cite the evidence you use with the number shown in the tool results, e.g. #[1]. Only do inline citations. Cite only the chunks you actually rely on.
 - Keep the answer concise and direct.
 """
-
-
-# --- answer citations ---
-
-CHUNK_REF_PATTERN = re.compile(r"#\[([^\[\]:]+):([^\[\]:]+)\]")
-
-
-def format_chunk_ref(origin_source_id: str, chunk_id: str) -> str:
-    """The citation reference for one chunk: `#[origin_source_id:chunk_id]`."""
-    return f"#[{origin_source_id}:{chunk_id}]"
-
-
-def extract_chunk_refs(answer: str) -> dict[str, dict[str, str]]:
-    """The chunk references cited in an answer.
-
-    Keyed by the reference string (`#[origin_source_id:chunk_id]`), in
-    first-seen order, each mapped to its structured
-    `{origin_source_id, chunk_id}` parts. The origin id is the top-level file
-    the user uploaded (not the chunk's own source), so citations point at the
-    user's documents, including tables embedded in them.
-    """
-    refs: dict[str, dict[str, str]] = {}
-    for match in CHUNK_REF_PATTERN.finditer(answer):
-        origin_source_id, chunk_id = match.group(1), match.group(2)
-        refs.setdefault(
-            format_chunk_ref(origin_source_id, chunk_id),
-            {"origin_source_id": origin_source_id, "chunk_id": chunk_id},
-        )
-    return refs
 
 
 # --- the service ---
@@ -509,13 +502,13 @@ class RagAgentService:
 
     def _create_run(
         self,
-        chat_id: str | None,
+        context: RunContext,
         checkpointer: BaseCheckpointSaver,
     ):
-        """Compile the graph for one run: tool executors scoped to `chat_id`,
-        on the shared checkpointer."""
+        """Compile the graph for one run: tool executors bound to the run's
+        context, on the shared checkpointer."""
         executors = {
-            tool.name: tool.create_executor(self._rag_service, chat_id)
+            tool.name: tool.create_executor(self._rag_service, context)
             for tool in self._tools
         }
         return _build_graph(
@@ -524,12 +517,13 @@ class RagAgentService:
             executors,
             self._max_tool_rounds,
             checkpointer,
+            context.evidence,
         )
 
     async def _prepare_run(
         self,
         question: str,
-        chat_id: str,
+        context: RunContext,
     ) -> tuple[Any, AgentState | None, RunnableConfig]:
         """The compiled graph, the run input, and the thread config.
 
@@ -538,8 +532,8 @@ class RagAgentService:
         checkpoint; otherwise the question starts a new run on the thread.
         """
         checkpointer = await self._ensure_checkpointer()
-        graph = self._create_run(chat_id, checkpointer)
-        config: RunnableConfig = {"configurable": {"thread_id": chat_id}}
+        graph = self._create_run(context, checkpointer)
+        config: RunnableConfig = {"configurable": {"thread_id": context.chat_id}}
 
         state = await graph.aget_state(config)
         if state.next:
@@ -612,18 +606,21 @@ class RagAgentService:
         nothing).
         """
         task = self._track_run(chat_id)
+        context = RunContext(chat_id=chat_id, evidence=EvidenceIndex())
         try:
-            graph, input_state, config = await self._prepare_run(question, chat_id)
+            graph, input_state, config = await self._prepare_run(question, context)
             answer = None
+            chunk_refs: dict[str, dict[str, str]] = {}
             async for event in self._run_events(graph, input_state, config):
                 if isinstance(event, AnswerEvent):
                     answer = event.content
+                    chunk_refs = event.chunk_refs
             if answer is None:
                 raise RuntimeError("The agent produced no final answer.")
             return RagAnswer(
                 query=question,
                 answer=answer,
-                chunk_refs=extract_chunk_refs(answer),
+                chunk_refs=chunk_refs,
             )
         finally:
             self._untrack_run(chat_id, task)
@@ -645,15 +642,18 @@ class RagAgentService:
         chat's chunks.
         """
         task = self._track_run(chat_id)
+        context = RunContext(chat_id=chat_id, evidence=EvidenceIndex())
         try:
-            graph, input_state, config = await self._prepare_run(question, chat_id)
+            graph, input_state, config = await self._prepare_run(question, context)
             # The stream is consumed to completion before the terminal frame
             # is yielded: stopping early would cancel the run and skip its
             # final checkpoint, losing the answer from the chat's history.
             answer = None
+            chunk_refs: dict[str, dict[str, str]] = {}
             async for event in self._run_events(graph, input_state, config):
                 if isinstance(event, AnswerEvent):
                     answer = event.content
+                    chunk_refs = event.chunk_refs
                     continue
                 item = to_stream_event(event)
                 if item is not None:
@@ -665,7 +665,7 @@ class RagAgentService:
                 RagAnswer(
                     query=question,
                     answer=answer,
-                    chunk_refs=extract_chunk_refs(answer),
+                    chunk_refs=chunk_refs,
                 ),
             )
         finally:
@@ -713,7 +713,12 @@ class RagAgentService:
                             {
                                 "type": "answer",
                                 "answer": text,
-                                "chunk_refs": extract_chunk_refs(text),
+                                # The model node resolved and stored the
+                                # citations on the message, so a refresh reads
+                                # them back without a live evidence index.
+                                "chunk_refs": message.additional_kwargs.get(
+                                    "citations", {}
+                                ),
                             }
                         )
             elif isinstance(message, ToolMessage):

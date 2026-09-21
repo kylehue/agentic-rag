@@ -33,7 +33,7 @@ class McpTool(AgentTool):
     def parameters(self) -> dict:
         return self._info.input_schema or {"type": "object", "properties": {}}
 
-    def create_executor(self, rag_service, chat_id=None):
+    def create_executor(self, rag_service, context):
         client = self._client
         server_name = self._server_name
         tool_name = self._info.name

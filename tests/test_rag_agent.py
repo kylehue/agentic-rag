@@ -605,9 +605,11 @@ def test_system_prompt_is_built_from_the_tools_outline():
     asyncio.run(agent.ask("q", chat_id="s1"))
 
     system_prompt = llm.calls[0][0].content
-    # The persona and rules...
+    # The persona, rules, and the current date/time (so time-relative
+    # questions can be answered)...
     assert "retrieval-augmented assistant" in system_prompt
     assert "Cite the evidence you use" in system_prompt
+    assert "Current date and time:" in system_prompt
     # ...and a Tools section derived from the tool definitions.
     assert "Tools:" in system_prompt
     for name in (

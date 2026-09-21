@@ -23,7 +23,7 @@ RAG_TOOLSET_INSTRUCTIONS = f"""How to work with these tools (guidance, not a req
 - Identifiers: the `source_id` you pass to these tools is the opaque id shown as `source_id=` in the search results (a UUID-like string). It is not the file name and not a table name. Table names (used in SQL) are separate and come from the source's table schema(s).
 - To find relevant evidence, use `{SEARCH_DOCUMENT_TOOL.name}`. For a question about document text, that is usually enough to answer.
 - When the question needs computation over tabular data (totals, filtering, joins): use `{SEARCH_DOCUMENT_TOOL.name}` to find the relevant source and note its `source_id`, then `{VALIDATE_CHUNK_AS_STRUCTURED_DATA_TOOL.name}` to see that source's table name(s) and columns, then `{PERFORM_SQL_TO_DOCUMENT_TOOL.name}` to run the SQL. A multi-sheet workbook's sheets are separate tables you can JOIN in one `{PERFORM_SQL_TO_DOCUMENT_TOOL.name}` call.
-- `{PERFORM_SQL_TO_DOCUMENT_RECORDS_TOOL.name}` runs read-only SQL over the stored chunk and document records; use it to inspect what is stored, not to answer content questions.
+- `{PERFORM_SQL_TO_DOCUMENT_RECORDS_TOOL.name}` runs read-only SQL over the stored chunk and document records; use it to inspect what is stored, not to answer content questions. Only use this as a last resort. Ideally, you only need `{SEARCH_DOCUMENT_TOOL.name}` tool to search for document records.
 - Don't re-run a tool when you already have what you need from an earlier turn or the conversation history."""
 
 RAG_TOOLSET = AgentToolset(

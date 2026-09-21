@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ DEFAULT_MAX_TOOL_ROUNDS = 8
 # The checkpoint database's file name, inside the agent storage dir.
 CHECKPOINT_DB_FILENAME = "checkpoints.sqlite"
 
-RAG_AGENT_SYSTEM_PROMPT_TEMPLATE = """You are a retrieval-augmented assistant that answers questions about the user's ingested documents.
+RAG_AGENT_SYSTEM_PROMPT_TEMPLATE = """You are a retrieval-augmented assistant that answers questions about the user's ingested documents, and nothing else.
 
 {tools}
 
@@ -49,6 +50,8 @@ Records:
 {records}
 
 Rules:
+- Scope: answer only questions the ingested documents can address. If a question is unrelated to them, say so plainly and do not answer it - no web search, no guessing.
+- Web tools: use them only to supplement an answer about the ingested documents (fill in a missing external fact the corpus refers to, or verify/expand on corpus content). Never use them to answer a question that is outside the corpus.
 - Answer only from what the tools return. If the evidence is insufficient, say so plainly.
 - Keep tool output lean: fetch only what the question needs.
 - Cite the evidence you use with the number shown in the tool results, e.g. #[1]. Only do inline citations. Cite only the chunks you actually rely on.
@@ -230,7 +233,12 @@ class RagAgentService:
         if state.next:
             return graph, None, config
         messages = state.values.get("messages") or []
-        return graph, run_input(messages, question, self._system_prompt), config
+        # The model needs to know "now" to answer time-relative questions. The
+        # timestamp is appended to the system prompt, which run_input adds on a
+        # fresh thread; a chat keeps the date/time it started with.
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        system_prompt = f"{self._system_prompt}\n\nCurrent date and time: {now}"
+        return graph, run_input(messages, question, system_prompt), config
 
     def _track_run(self, chat_id: str) -> asyncio.Task | None:
         """Register the current task as the chat's in-flight run (so `stop`

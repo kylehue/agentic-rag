@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from app.agent import AnswerEvent, ToolCallEvent, ToolResultEvent
 from app.agent_tools import (
     AgentToolset,
     EvidenceIndex,
@@ -19,13 +20,7 @@ from app.models.chunk import RetrievedChunk
 from app.models.rag import RagAnswer
 from app.models.stream import StreamEvent
 from app.retrievers.base import Retriever
-from app.services.rag_agent import (
-    AnswerEvent,
-    RagAgentService,
-    ToolCallEvent,
-    ToolResultEvent,
-    to_stream_event,
-)
+from app.services.rag_agent import RagAgentService, to_stream_event
 
 from fakes import FakeLLM, build_rag_service, drain, make_tool, tool_call_response
 

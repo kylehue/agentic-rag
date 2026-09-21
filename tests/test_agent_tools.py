@@ -4,6 +4,7 @@ import json
 
 import pandas as pd
 
+from app.agent import execute_tool
 from app.agent_tools import (
     EvidenceIndex,
     PerformSqlToDocumentRecordsTool,
@@ -15,7 +16,6 @@ from app.agent_tools import (
 from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
 from app.models.chunk import RetrievedChunk
 from app.retrievers.base import Retriever
-from app.services.rag_agent import execute_tool
 from app.store_file.local import LocalFileStorage
 from app.store_sql.local import LocalSqlStorage
 

@@ -1,10 +1,13 @@
 import asyncio
+import base64
 
 import pytest
+from google.genai import types
 from pydantic import BaseModel
 
 from app.llm.base import (
     ChatMessage,
+    CompletionOptions,
     ImageContent,
     RawDelta,
     RawResult,
@@ -12,7 +15,7 @@ from app.llm.base import (
     ToolCall,
     ToolSpec,
 )
-from app.llm.gemini import GeminiProvider
+from app.llm.gemini import GeminiProvider, _thought_signature
 from app.llm.openai import OpenAIProvider
 
 from fakes import FakeLLM
@@ -52,7 +55,9 @@ def test_answer_returns_the_raw_content():
 
 def test_complete_accumulates_a_streamed_result():
     class SplitLLM(FakeLLM):
-        async def stream_complete(self, messages, *, tools=None, json_schema=None):
+        async def stream_complete(
+            self, messages, *, tools=None, json_schema=None, options=None
+        ):
             self.calls.append(messages)
             self.tools.append(tools or [])
             for piece in ("he", "llo"):
@@ -206,3 +211,141 @@ def test_gemini_parts_maps_text_and_images():
     assert parts[1].inline_data is not None
     assert parts[1].inline_data.data == b"abc"
     assert parts[1].inline_data.mime_type == "image/png"
+
+
+# --- completion options (per-call generation parameters) ---
+
+
+def test_options_flow_through_to_stream_complete():
+    options = CompletionOptions(temperature=0.3, reasoning="low")
+    llm = FakeLLM("hi")
+
+    asyncio.run(llm.answer("q", options=options))
+
+    assert llm.options[0] is options
+
+
+def test_options_default_to_none():
+    llm = FakeLLM("hi")
+
+    asyncio.run(llm.answer("q"))
+
+    assert llm.options[0] is None
+
+
+def test_openai_options_map_to_native_params():
+    kwargs: dict = {}
+    options = CompletionOptions(
+        temperature=0.2, max_output_tokens=128, reasoning="high"
+    )
+
+    OpenAIProvider._apply_options(kwargs, options)
+
+    assert kwargs == {
+        "temperature": 0.2,
+        "max_completion_tokens": 128,
+        "reasoning_effort": "high",
+    }
+
+
+def test_openai_options_none_is_a_noop():
+    kwargs = {"model": "x"}
+
+    OpenAIProvider._apply_options(kwargs, None)
+
+    assert kwargs == {"model": "x"}
+
+
+def test_openai_reasoning_none_omits_effort():
+    kwargs: dict = {}
+
+    OpenAIProvider._apply_options(kwargs, CompletionOptions(reasoning="none", temperature=0.5))
+
+    assert kwargs == {"temperature": 0.5}
+
+
+def test_gemini_options_map_to_native_params():
+    config = types.GenerateContentConfig()
+    options = CompletionOptions(
+        temperature=0.7, max_output_tokens=256, reasoning="medium"
+    )
+
+    GeminiProvider._apply_options(config, options)
+
+    assert config.temperature == 0.7
+    assert config.max_output_tokens == 256
+    assert config.thinking_config.thinking_level == types.ThinkingLevel.MEDIUM
+
+
+def test_gemini_options_none_is_a_noop():
+    config = types.GenerateContentConfig()
+
+    GeminiProvider._apply_options(config, None)
+
+    assert config.temperature is None
+    assert config.max_output_tokens is None
+    assert config.thinking_config is None
+
+
+def test_gemini_reasoning_none_omits_thinking():
+    config = types.GenerateContentConfig()
+
+    GeminiProvider._apply_options(config, CompletionOptions(reasoning="none", temperature=0.1))
+
+    assert config.temperature == 0.1
+    assert config.thinking_config is None
+
+
+# --- thought_signature round-trip (Gemini thinking + tools) ---
+
+
+def test_gemini_thought_signature_normalizes_to_base64():
+    encoded = base64.b64encode(b"sig-bytes").decode()
+    # The SDK keeps the signature as bytes; the helper returns base64.
+    part = types.Part(
+        function_call=types.FunctionCall(name="n", args={}), thought_signature=encoded
+    )
+
+    assert _thought_signature(part) == encoded
+    assert _thought_signature(types.Part.from_function_call(name="n", args={})) is None
+
+
+def test_gemini_prepare_echoes_thought_signature():
+    sig = base64.b64encode(b"thought").decode()
+    messages = [
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=(
+                ToolCall(
+                    id="c1",
+                    name="search",
+                    arguments={"q": "x"},
+                    provider_data={"thought_signature": sig},
+                ),
+            ),
+        ),
+    ]
+
+    contents, _ = GeminiProvider()._prepare(messages, None, None, None)
+
+    part = contents[0].parts[0]
+    assert part.function_call.name == "search"
+    # Echoed back on the same function-call part (the SDK stores it as bytes).
+    assert part.thought_signature == b"thought"
+
+
+def test_gemini_prepare_omits_signature_when_absent():
+    messages = [
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=(ToolCall(id="c1", name="search", arguments={"q": "x"}),),
+        ),
+    ]
+
+    contents, _ = GeminiProvider()._prepare(messages, None, None, None)
+
+    part = contents[0].parts[0]
+    assert part.function_call.name == "search"
+    assert part.thought_signature is None

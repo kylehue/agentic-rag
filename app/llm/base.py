@@ -4,11 +4,26 @@ import abc
 import json
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
 Role = Literal["system", "user", "assistant", "tool"]
+ReasoningLevel = Literal["none", "low", "medium", "high"]
+
+
+@dataclass(frozen=True)
+class CompletionOptions:
+    """Per-call, provider-neutral generation parameters.
+
+    Every field is optional; ``None`` means "leave it to the provider/model
+    default". Set only what you want to change. Providers map each field to
+    their native parameter and ignore the unset ones.
+    """
+
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+    reasoning: ReasoningLevel | None = None
 
 
 class StructuredOutputError(Exception):
@@ -25,6 +40,11 @@ class ToolCall:
     id: str
     name: str
     arguments: dict
+    # Opaque, provider-specific data that must be returned to the provider
+    # with this tool call in a later request. The engine and the other
+    # providers carry it without inspecting its contents; None when the
+    # provider needs no round-trip data.
+    provider_data: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -142,12 +162,14 @@ class LLMProvider(abc.ABC):
         *,
         tools: list[ToolSpec] | None = None,
         json_schema: dict | None = None,
+        options: CompletionOptions | None = None,
     ) -> AsyncIterator[RawDelta]:
         """One streamed completion against the provider's API.
 
         The lowest-level public entry point: yields the reply token by
         token (`RawDelta.text`) and each tool call whole, as the provider
-        produces them. Accepts any combination of `tools` and `json_schema`.
+        produces them. Accepts any combination of `tools`, `json_schema`,
+        and per-call `options` (temperature, max output tokens, reasoning).
         """
         raise NotImplementedError
         yield  # pragma: no cover - marks this as an abstract async generator
@@ -158,36 +180,50 @@ class LLMProvider(abc.ABC):
         *,
         tools: list[ToolSpec] | None = None,
         json_schema: dict | None = None,
+        options: CompletionOptions | None = None,
     ) -> RawResult:
         """One raw completion: the accumulated result of `stream_complete`."""
         deltas = [
             delta
             async for delta in self.stream_complete(
-                messages, tools=tools, json_schema=json_schema
+                messages, tools=tools, json_schema=json_schema, options=options
             )
         ]
         return accumulate_result(deltas)
 
-    async def answer(self, query: str) -> str:
+    async def answer(
+        self,
+        query: str,
+        *,
+        options: CompletionOptions | None = None,
+    ) -> str:
         """Generate an answer from a text prompt."""
-        result = await self.complete([ChatMessage(role="user", content=query)])
+        result = await self.complete(
+            [ChatMessage(role="user", content=query)], options=options
+        )
         return result.content
 
     async def chat(
         self,
         messages: list[ChatMessage],
         tools: list[ToolSpec] | None = None,
+        *,
+        options: CompletionOptions | None = None,
     ) -> ChatResult:
         """One chat turn, using native tool calling when tools are offered."""
         if not tools:
-            result = await self.complete(messages)
+            result = await self.complete(messages, options=options)
             return ChatResult(content=result.content)
 
-        result = await self.complete(messages, tools=tools)
+        result = await self.complete(messages, tools=tools, options=options)
         return ChatResult(content=result.content, tool_calls=list(result.tool_calls))
 
     async def structured(
-        self, messages: list[ChatMessage], schema: type[BaseModel]
+        self,
+        messages: list[ChatMessage],
+        schema: type[BaseModel],
+        *,
+        options: CompletionOptions | None = None,
     ) -> BaseModel:
         """One completion that must return an instance of `schema`.
 
@@ -195,7 +231,9 @@ class LLMProvider(abc.ABC):
         the reply with pydantic. Raises StructuredOutputError when the
         reply does not match.
         """
-        result = await self.complete(messages, json_schema=schema.model_json_schema())
+        result = await self.complete(
+            messages, json_schema=schema.model_json_schema(), options=options
+        )
         try:
             return schema.model_validate(_extract_json(result.content))
         except (json.JSONDecodeError, ValidationError) as exc:

@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 from app.core.config import Settings
 from app.llm.base import (
     ChatMessage,
+    CompletionOptions,
     ContentPart,
     LLMProvider,
     RawDelta,
@@ -38,12 +39,30 @@ class OpenAIProvider(LLMProvider):
             )
         return self._client
 
+    @staticmethod
+    def _apply_options(kwargs: dict[str, Any], options: CompletionOptions | None) -> None:
+        """Fold per-call options into the create() kwargs, skipping unset ones.
+
+        `max_output_tokens` maps to the modern `max_completion_tokens` (works
+        for reasoning and non-reasoning models alike). `reasoning` maps to
+        `reasoning_effort`; "none" is omitted (there is no effort below low).
+        """
+        if options is None:
+            return
+        if options.temperature is not None:
+            kwargs["temperature"] = options.temperature
+        if options.max_output_tokens is not None:
+            kwargs["max_completion_tokens"] = options.max_output_tokens
+        if options.reasoning is not None and options.reasoning != "none":
+            kwargs["reasoning_effort"] = options.reasoning
+
     async def stream_complete(
         self,
         messages: list[ChatMessage],
         *,
         tools: list[ToolSpec] | None = None,
         json_schema: dict | None = None,
+        options: CompletionOptions | None = None,
     ) -> AsyncIterator[RawDelta]:
         client = self._ensure_client()
 
@@ -59,6 +78,7 @@ class OpenAIProvider(LLMProvider):
                 "type": "json_schema",
                 "json_schema": {"name": "response", "schema": json_schema},
             }
+        self._apply_options(kwargs, options)
 
         # Tool calls stream in fragments: the id and name arrive once, and
         # the JSON arguments arrive in pieces, each keyed by its index.

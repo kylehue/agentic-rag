@@ -9,7 +9,7 @@ from typing import Any
 
 import pandas as pd
 
-from app.llm.base import LLMProvider
+from app.llm.base import CompletionOptions, LLMProvider
 from app.models.chunk import IngestedChunk
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionContext
@@ -189,7 +189,9 @@ class TablePlugin(Plugin):
                 },
             )
 
-            response = await llm.answer(prompt)
+            response = await llm.answer(
+                prompt, options=CompletionOptions(reasoning="none")
+            )
 
             return self._parse_workbook_analysis(
                 response,

@@ -47,22 +47,28 @@ def to_llm_messages(messages: Sequence[BaseMessage]) -> list[ChatMessage]:
                 ChatMessage(role="user", content=to_content(message.content))
             )
         elif isinstance(message, AIMessage):
+            # Recover the provider round-trip data the model node stored on
+            # the message, keyed by tool call id, and return it to the
+            # provider on the next request. The engine does not inspect it.
+            provider_data = (message.additional_kwargs or {}).get(
+                "tool_call_provider_data"
+            ) or {}
+            tool_calls: list[ToolCall] = []
+            for call in message.tool_calls or ():
+                call_id = call["id"] if call["id"] is not None else f"call_{uuid4().hex}"
+                tool_calls.append(
+                    ToolCall(
+                        id=call_id,
+                        name=call["name"],
+                        arguments=call["args"],
+                        provider_data=provider_data.get(call_id),
+                    )
+                )
             converted.append(
                 ChatMessage(
                     role="assistant",
                     content=to_content(message.content),
-                    tool_calls=tuple(
-                        ToolCall(
-                            id=(
-                                call["id"]
-                                if call["id"] is not None
-                                else f"call_{uuid4().hex}"
-                            ),
-                            name=call["name"],
-                            arguments=call["args"],
-                        )
-                        for call in (message.tool_calls or ())
-                    ),
+                    tool_calls=tuple(tool_calls),
                 )
             )
         elif isinstance(message, ToolMessage):

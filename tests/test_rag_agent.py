@@ -92,6 +92,39 @@ def test_ask_uses_a_tool_then_answers():
     )
 
 
+def test_thought_signature_round_trips_to_the_next_turn():
+    # A tool-calling turn carrying a provider round-trip token (as Gemini
+    # does for thinking models). The token must be echoed on the next
+    # request, so it has to survive the checkpointed message state.
+    import base64
+
+    sig = base64.b64encode(b"thought").decode()
+    provider_data = {"thought_signature": sig}
+    llm = FakeLLM(
+        RawResult(
+            content="",
+            tool_calls=(
+                ToolCall(
+                    id="c1",
+                    name="search_documents",
+                    arguments={"query": "garden"},
+                    provider_data=provider_data,
+                ),
+            ),
+        ),
+        RawResult(content=FULL_ANSWER),
+    )
+    agent = make_agent(llm, [make_tool("search_documents", "found: garden plan")])
+
+    asyncio.run(agent.ask("Where is the garden plan?", chat_id="s1"))
+
+    # The second LLM call re-sends turn 1's assistant tool call; its
+    # provider_data (the gemini thought signature) must have made the round trip.
+    turn2 = llm.calls[1]
+    assistant = [m for m in turn2 if m.role == "assistant" and m.tool_calls][0]
+    assert assistant.tool_calls[0].provider_data == provider_data
+
+
 def test_ask_answers_without_tools_when_none_are_requested():
     calls: list = []
     llm = FakeLLM(RawResult(content="Direct answer."))
@@ -251,7 +284,9 @@ def test_stop_interrupts_a_running_answer():
             super().__init__("never")
             self.entered = asyncio.Event()
 
-        async def stream_complete(self, messages, *, tools=None, json_schema=None):
+        async def stream_complete(
+            self, messages, *, tools=None, json_schema=None, options=None
+        ):
             self.entered.set()
             await asyncio.Event().wait()  # block until the task is cancelled
             yield RawDelta(text="unreachable")

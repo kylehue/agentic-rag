@@ -21,6 +21,7 @@ from app.database import (
 from app.embedders.base import Embedder
 from app.llm.base import (
     ChatMessage,
+    CompletionOptions,
     LLMProvider,
     RawDelta,
     RawResult,
@@ -63,17 +64,20 @@ class FakeLLM(LLMProvider):
         self.prompts: list = []
         self.tools: list[list[ToolSpec]] = []
         self.json_schemas: list[dict | None] = []
+        self.options: list[CompletionOptions | None] = []
 
     def _next(
         self,
         messages: list[ChatMessage],
         tools: list[ToolSpec] | None,
         json_schema: dict | None,
+        options: CompletionOptions | None,
     ) -> RawResult:
         self.calls.append(messages)
         self.prompts.append(messages[-1].content if messages else "")
         self.tools.append(tools or [])
         self.json_schemas.append(json_schema)
+        self.options.append(options)
 
         if len(self._responses) == 1:
             item = self._responses[0]
@@ -93,10 +97,11 @@ class FakeLLM(LLMProvider):
         *,
         tools: list[ToolSpec] | None = None,
         json_schema: dict | None = None,
+        options: CompletionOptions | None = None,
     ) -> AsyncIterator[RawDelta]:
         """Replay the scripted result as a stream: the text in `chunk_size`
         pieces (or one piece), then each tool call whole."""
-        result = self._next(messages, tools, json_schema)
+        result = self._next(messages, tools, json_schema, options)
         if isinstance(result.content, str):
             text = result.content
         else:

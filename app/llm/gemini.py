@@ -1,3 +1,4 @@
+import base64
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
@@ -8,6 +9,7 @@ from google.genai import types
 from app.core.config import Settings
 from app.llm.base import (
     ChatMessage,
+    CompletionOptions,
     ContentPart,
     LLMProvider,
     RawDelta,
@@ -24,12 +26,35 @@ _JSON_TYPE_MAP = {
     "object": types.Type.OBJECT,
 }
 
+# The neutral "none" reasoning level maps to no thinking config at all;
+# "minimal" is not exposed because the neutral set is none/low/medium/high.
+_REASONING_TO_THINKING_LEVEL = {
+    "low": types.ThinkingLevel.LOW,
+    "medium": types.ThinkingLevel.MEDIUM,
+    "high": types.ThinkingLevel.HIGH,
+}
+
 
 def _text_parts(content: str | list[ContentPart]) -> list[str]:
     """The text of a message content (system instructions are text only)."""
     if isinstance(content, str):
         return [content]
     return [part for part in content if isinstance(part, str)]
+
+
+def _thought_signature(part: types.Part) -> str | None:
+    """The part's `thought_signature` as a base64 string.
+
+    Thinking models attach a signature to each function-call part that must
+    be echoed back in the next request or the API rejects it. The SDK keeps
+    it as bytes; we carry it base64-encoded (JSON-safe) on the wire type.
+    """
+    signature = part.thought_signature
+    if signature is None:
+        return None
+    if isinstance(signature, bytes):
+        return base64.b64encode(signature).decode()
+    return signature
 
 
 def _to_genai_schema(node: dict[str, Any]) -> types.Schema:
@@ -73,6 +98,26 @@ class GeminiProvider(LLMProvider):
         return self._client
 
     @staticmethod
+    def _apply_options(
+        config: types.GenerateContentConfig, options: CompletionOptions | None
+    ) -> None:
+        """Fold per-call options into the config, skipping unset ones.
+
+        `reasoning` maps to the model's `thinking_level`; "none" leaves no
+        thinking config (the model's default).
+        """
+        if options is None:
+            return
+        if options.temperature is not None:
+            config.temperature = options.temperature
+        if options.max_output_tokens is not None:
+            config.max_output_tokens = options.max_output_tokens
+        if options.reasoning is not None:
+            level = _REASONING_TO_THINKING_LEVEL.get(options.reasoning)
+            if level is not None:
+                config.thinking_config = types.ThinkingConfig(thinking_level=level)
+
+    @staticmethod
     def _to_parts(content: str | list[ContentPart]) -> list[types.Part]:
         """Map message content to Gemini parts (text and inline images)."""
         if isinstance(content, str):
@@ -93,6 +138,7 @@ class GeminiProvider(LLMProvider):
         messages: list[ChatMessage],
         tools: list[ToolSpec] | None,
         json_schema: dict | None,
+        options: CompletionOptions | None,
     ) -> tuple[list[types.ContentUnionDict], types.GenerateContentConfig]:
         """The Gemini contents and config for one completion."""
         # Gemini pairs function responses by name, not call id: recover the
@@ -102,6 +148,7 @@ class GeminiProvider(LLMProvider):
         }
 
         config = types.GenerateContentConfig()
+        self._apply_options(config, options)
         system = "\n".join(
             text
             for message in messages
@@ -144,11 +191,27 @@ class GeminiProvider(LLMProvider):
                 if message.content:
                     assistant_parts.extend(self._to_parts(message.content))
                 for call in message.tool_calls:
-                    assistant_parts.append(
-                        types.Part.from_function_call(
-                            name=call.name, args=call.arguments
+                    signature = (call.provider_data or {}).get("thought_signature")
+                    if signature is not None:
+                        # Echo the signature Gemini returned with this call,
+                        # on the same function-call part; the API rejects the
+                        # request without it when tools are in play. The wire
+                        # type carries it base64-encoded (checkpoint-safe); the
+                        # SDK wants raw bytes.
+                        assistant_parts.append(
+                            types.Part(
+                                function_call=types.FunctionCall(
+                                    name=call.name, args=call.arguments
+                                ),
+                                thought_signature=base64.b64decode(signature),
+                            )
                         )
-                    )
+                    else:
+                        assistant_parts.append(
+                            types.Part.from_function_call(
+                                name=call.name, args=call.arguments
+                            )
+                        )
                 contents.append(types.Content(role="model", parts=assistant_parts))
             elif message.role == "tool":
                 name = call_names.get(message.tool_call_id or "", "tool")
@@ -172,9 +235,10 @@ class GeminiProvider(LLMProvider):
         *,
         tools: list[ToolSpec] | None = None,
         json_schema: dict | None = None,
+        options: CompletionOptions | None = None,
     ) -> AsyncIterator[RawDelta]:
         client = self._ensure_client()
-        contents, config = self._prepare(messages, tools, json_schema)
+        contents, config = self._prepare(messages, tools, json_schema, options)
 
         saw_candidate = False
         # The aio method is a coroutine that returns an async iterator.
@@ -197,11 +261,17 @@ class GeminiProvider(LLMProvider):
                 if part.text:
                     yield RawDelta(text=part.text)
                 elif part.function_call is not None and part.function_call.name:
+                    signature = _thought_signature(part)
                     yield RawDelta(
                         tool_call=ToolCall(
                             id=f"gemini_{uuid4().hex}",
                             name=part.function_call.name,
                             arguments=dict(part.function_call.args or {}),
+                            provider_data=(
+                                {"thought_signature": signature}
+                                if signature is not None
+                                else None
+                            ),
                         )
                     )
         if not saw_candidate:

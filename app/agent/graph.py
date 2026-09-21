@@ -112,6 +112,15 @@ def build_graph(
             if result.content and not result.tool_calls
             else {}
         )
+        # Provider round-trip data for this turn's tool calls, keyed by call
+        # id. Stored opaquely on the message so it survives the checkpointed
+        # state and is returned to the provider on the next request; the
+        # engine does not inspect its contents.
+        provider_data = {
+            call.id: call.provider_data
+            for call in result.tool_calls
+            if call.provider_data is not None
+        }
         # A list, like the tools node: node outputs are the unit the state
         # (and any stream projection) sees.
         return {
@@ -122,7 +131,10 @@ def build_graph(
                         {"name": call.name, "args": call.arguments, "id": call.id}
                         for call in result.tool_calls
                     ],
-                    additional_kwargs={"citations": citations},
+                    additional_kwargs={
+                        "citations": citations,
+                        "tool_call_provider_data": provider_data,
+                    },
                 )
             ]
         }

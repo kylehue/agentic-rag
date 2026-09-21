@@ -13,6 +13,7 @@ from app.models.ingest import (
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionFile
 from app.plugin.registry import PluginRegistry
+from app.rerankers.base import Reranker
 from app.retrievers.base import Retriever
 from app.services.ingestion import IngestionService
 from app.services.retrieval import RetrievalService
@@ -34,6 +35,8 @@ class RagService:
         sql_storage: SqlStorage,
         file_storage: FileStorage,
         plugins: Sequence[Plugin] | None = None,
+        reranker: Reranker | None = None,
+        retrieval_top_k: int = 5,
     ) -> None:
         registry = PluginRegistry()
         for plugin in (plugins if plugins is not None else []):
@@ -42,6 +45,7 @@ class RagService:
         self._llm = llm
         self._embedder = embedder
         self._retriever = retriever
+        self._reranker = reranker
         self._vector_storage = vector_storage
         self._sql_storage = sql_storage
         self._file_storage = file_storage
@@ -57,6 +61,8 @@ class RagService:
             retriever=retriever,
             llm=llm,
             registry=registry,
+            reranker=reranker,
+            top_k=retrieval_top_k,
         )
         # Background ingest queue: ingest requests are enqueued here and run
         # on a worker pool, reporting progress through each job's events. The
@@ -81,6 +87,10 @@ class RagService:
     @property
     def retriever(self) -> Retriever:
         return self._retriever
+
+    @property
+    def reranker(self) -> Reranker | None:
+        return self._reranker
 
     @property
     def vector_storage(self) -> VectorStorage:

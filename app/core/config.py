@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     FASTEMBED_MODEL: str = "BAAI/bge-small-en-v1.5"
     SENTENCE_TRANSFORMER_MODEL: str = "google/embeddinggemma-300m"
 
+    # reranker model (fastembed cross-encoder; re-ranks retrieved chunks)
+    FASTEMBED_RERANK_MODEL: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+
     # other configs
     UNSTRUCTURED_USE_API: bool = False  # disable = self-host
     # The text plugin's partitioning strategy, applied to both the local and
@@ -30,6 +33,9 @@ class Settings(BaseSettings):
     TEXT_PARTITION_STRATEGY: PartitionStrategy = "fast"
     OPENAI_BASE_URL: str = "https://llmrouter.boyemma.com/v1"
     EMBEDDING_BATCH_SIZE: int = 100
+    # Final number of chunks a retrieval returns. The retrievers fetch a wider
+    # candidate pool and the reranker re-ranks it; this caps the result.
+    RETRIEVAL_TOP_K: int = 5
     SQL_LOCAL_STORAGE_DIR: str = "./.storage/sql"
     FILE_LOCAL_STORAGE_DIR: str = "./.storage/file"
     VECTOR_LOCAL_STORAGE_DIR: str = "./.storage/vector"

@@ -12,6 +12,7 @@ from app.embedders.gemini import GeminiEmbedder
 
 from app.plugins.table import TablePlugin
 from app.plugins.text import TextPlugin
+from app.rerankers.fastembed import FastReranker
 from app.retrievers.vector import VectorRetriever
 from app.retrievers.sparse import SparseRetriever
 from app.retrievers.hybrid import HybridRetriever
@@ -30,15 +31,15 @@ llm = GeminiProvider(
     api_key=settings.GOOGLE_API_KEY,
     model=settings.GEMINI_MODEL,
 )
-embedder = GeminiEmbedder(
-    api_key=settings.GOOGLE_API_KEY,
-    model=settings.GEMINI_EMBEDDING_MODEL,
-    batch_size=settings.EMBEDDING_BATCH_SIZE,
-)
-# embedder = FastEmbedder(
-#     model_name=settings.FASTEMBED_MODEL,
+# embedder = GeminiEmbedder(
+#     api_key=settings.GOOGLE_API_KEY,
+#     model=settings.GEMINI_EMBEDDING_MODEL,
 #     batch_size=settings.EMBEDDING_BATCH_SIZE,
 # )
+embedder = FastEmbedder(
+    model_name=settings.FASTEMBED_MODEL,
+    batch_size=settings.EMBEDDING_BATCH_SIZE,
+)
 
 # Storage
 file_storage = LocalFileStorage(storage_dir=settings.FILE_LOCAL_STORAGE_DIR)
@@ -55,12 +56,12 @@ vector_retriever = VectorRetriever(
     embedder=embedder,
     vector_storage=vector_storage,
     sql_storage=sql_storage,
-    top_k=25,
+    top_k=50,
 )
 
 sparse_retriever = SparseRetriever(
     sql_storage=sql_storage,
-    top_k=25,
+    top_k=50,
 )
 
 hybrid_retriever = HybridRetriever(
@@ -68,13 +69,18 @@ hybrid_retriever = HybridRetriever(
         vector_retriever,
         sparse_retriever,
     ],
-    top_k=5,
+    top_k=50,
 )
+
+# Re-ranker
+reranker = FastReranker(model_name=settings.FASTEMBED_RERANK_MODEL)
 
 rag_service = RagService(
     llm=llm,
     embedder=embedder,
     retriever=hybrid_retriever,
+    reranker=reranker,
+    retrieval_top_k=settings.RETRIEVAL_TOP_K,
     vector_storage=vector_storage,
     sql_storage=sql_storage,
     file_storage=file_storage,

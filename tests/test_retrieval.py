@@ -8,6 +8,7 @@ from app.api_schemas.chunk import RetrievedChunkSchema
 from app.models.chunk import RetrievedChunk
 from app.plugin.base import Plugin
 from app.plugin.registry import PluginRegistry
+from app.rerankers.base import Reranker
 from app.retrievers.base import Retriever
 from app.services.retrieval import RetrievalService
 
@@ -54,11 +55,13 @@ def make_chunk(plugin: str, chunk_id: str = "c1") -> RetrievedChunk:
     )
 
 
-def build_service(registry, retriever):
+def build_service(registry, retriever, reranker=None, top_k=5):
     return RetrievalService(
         retriever=retriever,
         llm=FakeLLM(),
         registry=registry,
+        reranker=reranker,
+        top_k=top_k,
     )
 
 
@@ -86,6 +89,66 @@ def test_chunk_without_finalizing_plugin_passes_through():
     results = asyncio.run(service.retrieve("q"))
 
     assert results[0].text == "text from unknown"
+
+
+class FakeReranker(Reranker):
+    """Reverses the candidate order and stamps a marker score, so a test can
+    prove the service ran the reranker (and on what it was given)."""
+
+    def __init__(self, score: float = 0.99) -> None:
+        self._score = score
+        self.calls: list[tuple[str, list[RetrievedChunk]]] = []
+
+    async def rerank(self, query, chunks):
+        self.calls.append((query, list(chunks)))
+        return [replace(chunk, score=self._score) for chunk in list(chunks)[::-1]]
+
+
+def test_retrieval_service_applies_the_reranker():
+    chunks = [make_chunk("text", "c1"), make_chunk("text", "c2"), make_chunk("text", "c3")]
+    reranker = FakeReranker()
+    service = build_service(PluginRegistry(), FakeRetriever(chunks), reranker)
+
+    results = asyncio.run(service.retrieve("q"))
+
+    # The reranker reversed the order and stamped its marker score...
+    assert [chunk.chunk_id for chunk in results] == ["c3", "c2", "c1"]
+    assert all(chunk.score == 0.99 for chunk in results)
+    # ...and it ran on the retriever's candidates, in the retriever's order.
+    assert reranker.calls == [("q", chunks)]
+
+
+def test_retrieval_without_a_reranker_keeps_the_retriever_order():
+    chunks = [make_chunk("text", "c1"), make_chunk("text", "c2")]
+    service = build_service(PluginRegistry(), FakeRetriever(chunks))
+
+    results = asyncio.run(service.retrieve("q"))
+
+    assert [chunk.chunk_id for chunk in results] == ["c1", "c2"]
+    assert all(chunk.score == 0.5 for chunk in results)
+
+
+def test_retrieval_service_trims_the_candidate_pool_to_top_k():
+    chunks = [make_chunk("text", f"c{i}") for i in range(7)]
+    service = build_service(PluginRegistry(), FakeRetriever(chunks), top_k=3)
+
+    results = asyncio.run(service.retrieve("q"))
+
+    assert len(results) == 3
+    assert [chunk.chunk_id for chunk in results] == ["c0", "c1", "c2"]
+
+
+def test_reranker_runs_before_the_top_k_trim():
+    chunks = [make_chunk("text", f"c{i}") for i in range(7)]
+    # FakeReranker reverses the pool, so the final top_k is the pool's tail.
+    service = build_service(
+        PluginRegistry(), FakeRetriever(chunks), FakeReranker(), top_k=3
+    )
+
+    results = asyncio.run(service.retrieve("q"))
+
+    assert [chunk.chunk_id for chunk in results] == ["c6", "c5", "c4"]
+    assert all(chunk.score == 0.99 for chunk in results)
 
 
 def test_from_dict_requires_origin_source_id():

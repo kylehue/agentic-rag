@@ -39,6 +39,7 @@ The application is designed around separate ingestion, retrieval, and answer-gen
     - [`app/llm`](#appllm)
     - [`app/embedders`](#appembedders)
     - [`app/retrievers`](#appretrievers)
+    - [`app/rerankers`](#apprerankers)
     - [`app/models`](#appmodels)
     - [`app/services`](#appservices)
     - [`app/store_file`, `app/store_sql`, `app/store_vector`](#appstore_file-appstore_sql-appstore_vector)
@@ -205,7 +206,8 @@ flowchart TD
     Q --> B["Search by words"]
     A --> C["Merge the two rankings"]
     B --> C
-    C --> D["Let plugins refine the results"]
+    C --> R["Re-rank the candidates by relevance"]
+    R --> D["Let plugins refine the results"]
     D --> E["Return the top chunks"]
 ```
 
@@ -214,7 +216,7 @@ Retrieval runs two searches in parallel and merges their rankings:
 - **Semantic search** embeds the question with the same embedder used for the chunks and finds the nearest vectors. The vector store keeps only ids and embeddings, so the matching chunk records are then loaded from SQL in the vector's ranking order.
 - **Lexical search** runs full-text search (FTS5) over the chunk text in SQL.
 
-The two rankings are combined with Reciprocal Rank Fusion (RRF). RRF merges ranks instead of scores, so the two searches contribute to one list even though they measure relevance differently. The top chunks then pass through a plugin finalization step (see Plugin Lifecycle) before they are returned.
+The two rankings are combined with Reciprocal Rank Fusion (RRF). RRF merges ranks instead of scores, so the two searches contribute to one list even though they measure relevance differently. The retrievers fetch a **wide** candidate pool (50 each, fused to 50); that pool is then **re-ranked** by a cross-encoder reranker, which scores each (question, chunk) pair directly and reorders it by true relevance (a cheap fused ranking is corrected into a finer one). The result is capped at the final `RETRIEVAL_TOP_K` (5), and those top chunks pass through a plugin finalization step (see Plugin Lifecycle) before they are returned.
 
 ### Answer Generation
 
@@ -560,6 +562,11 @@ The database schema, one SQLAlchemy ORM model per table (one file per table), al
 - `app/retrievers/sparse.py` - lexical retrieval via FTS5 (bounded to a chat with a SQL filter).
 - `app/retrievers/hybrid.py` - runs retrievers concurrently and merges rankings with RRF.
 
+### `app/rerankers`
+
+- `app/rerankers/base.py` - the `Reranker` interface (`rerank(query, chunks)`): re-scores and reorders the retriever's candidate chunks by relevance, preserving the set.
+- `app/rerankers/fastembed.py` - `FastReranker`, a local cross-encoder reranker via fastembed (ONNX, no API key). The model is created lazily and inference runs in a worker thread; it scores each (query, chunk) pair and returns the chunks re-ranked descending.
+
 ### `app/models`
 
 Internal application models.
@@ -575,7 +582,7 @@ Internal application models.
 - `app/services/auth.py` - the auth domain (decoupled from the RAG services; needs only SQL storage): `register`, `login` (bcrypt-hashed passwords, opaque hashed tokens), and `verify_token`.
 - `app/services/chat.py` - user chats: `get_or_create` (ownership-checked), `create`, `delete`, `username_of`, and `list_chats` (a chat's ingested sources are derived from the documents table, so there is no separate bookkeeping).
 - `app/services/ingestion.py` - the pipeline driver: offers each file to all plugins, builds context/runtime (carrying the chat id), runs `on_ingestion_process` on every plugin, persists everything (source files, chunk records, vectors) stamped with the chat id, and re-ingests emitted files. It also manages stored files: `list_files(chat_id)` (origin uploads only), `list_file_chunks(origin_source_id, chat_id)` (a file's whole emission tree via `origin_source_id`), `delete_file(origin_source_id, chat_id)` (reverse ingestion for one file's tree: its chunks, vectors, SQL records, and stored files), and `delete_chat(chat_id)` (reverse ingestion for a whole chat: its chunks, vectors, document records, and stored files). It also reads stored files: `get_file_metadata(source_id)` (the document record) and `get_file_link(source_id)` (the URL to retrieve the file, built via the file storage's `create_link`). `ingest(file, chat_id, emitter=None)` optionally takes a `ProgressEmitter` and reports pipeline stages (`processing` / `saving` / `embedding`) to it as the file's tree is walked.
-- `app/services/retrieval.py` - runs the hybrid retriever (bounded to a chat when given) and runs `on_retrieval_finalize` on every plugin for each chunk.
+- `app/services/retrieval.py` - runs the retriever (bounded to a chat when given), re-ranks the wide candidate pool with the `Reranker` (when one is configured), caps the result at the final `top_k`, and runs `on_retrieval_finalize` on every plugin for each chunk.
 - `app/services/rag.py` - the wrapper for ingestion and retrieval. It builds the `PluginRegistry` from the `plugins` option and the ingestion and retrieval services (which take the registry) from the collaborators it is given, and exposes those collaborators as public properties so the agent's tools can use them. `ingest(file_bytes, filename, content_type, description=None, chat_id=None)` builds the `IngestionFile` and delegates, returning the origin source id with the chunks. `retrieve(user_query, chat_id=None)` returns evidence bounded to that chat's chunks when given. It also delegates the file-management methods: `list_files`, `list_file_chunks`, `delete_file`, `delete_chat`, `get_file_metadata`, and `get_file_link`. It owns the background ingest queue: `start_ingest_queue()` / `stop_ingest_queue()` (called from the lifespan), `enqueue_ingest(files, chat_id)` (queues one job per file and returns the jobs), `get_ingest_job(job_id)`, and `list_ingest_jobs(chat_id)` (the chat's jobs, each with its buffered progress events).
 - `app/services/rag_agent.py` - the `RagAgentService`: the RAG-specific composition over the engine in `app/agent`. It takes the RAG service and the tools (or toolsets) at initialization, and owns the RAG system prompt (a template whose tools block is rendered from the passed tools and toolsets via `render_tool_blocks`, so each toolset's cross-tool instructions and every tool's spec appear, and whose Records section is rendered from the ingestion tables' own class and column docstrings via `agent_table_docs`, so the model knows the table structure and the origin/parent/source id semantics without a hand-maintained copy), the checkpointer (one thread per chat, so a conversation continues across runs and restarts and an interrupted run can resume), the per-run composition (a fresh graph per answer, executors scoped to the chat, the run's `EvidenceIndex`), the MCP merge on `initialize()`, and the translation of a run into neutral `StreamEvent`s (via `to_stream_event`). `ask(question, chat_id=)` returns the `RagAnswer` (its `chunk_refs` are the citations resolved by the engine's model node). `ask_stream(...)` yields the run ending with it. `chat_history(chat_id)` reads a chat's full conversation from the checkpointer (user questions, tool calls, tool results, and answers, in stream order). `stop(chat_id)` interrupts a chat's in-flight run (it tracks each run's driving task and cancels it, returning whether a run was stopped). `delete_chat(chat_id)` deletes a chat's RAG data (via the RAG service) and its conversation history (the checkpointer thread).
 
@@ -596,7 +603,7 @@ Storage abstractions and local implementations:
 
 ### `app/container.py`
 
-The composition root for the external collaborators. It builds the providers, storages, retrievers, and built-in plugins, then composes the services: `AuthService` and `ChatService` (which get SQL storage), the `RagService` wrapper (which gets the plugins through its `plugins` option), the `McpClient` (from `MCP_SERVERS`, or `None` when none are configured), and the `RagAgentService` (which gets the RAG service, the RAG tools, the MCP client, and the agent storage directory its checkpoint database lives in). It also exposes the FastAPI lifespan (creating the schema with `sql_storage.create_tables()`, connecting the MCP servers, opening the agent's checkpoint database, and then closing the MCP connections, the agent checkpoint, the SQL, and the vector databases on shutdown). The pipeline internals (the plugin registry and the ingestion/retrieval services) are composed inside the `RagService`.
+The composition root for the external collaborators. It builds the providers, storages, retrievers, reranker, and built-in plugins, then composes the services: `AuthService` and `ChatService` (which get SQL storage), the `RagService` wrapper (which gets the plugins through its `plugins` option), the `McpClient` (from `MCP_SERVERS`, or `None` when none are configured), and the `RagAgentService` (which gets the RAG service, the RAG tools, the MCP client, and the agent storage directory its checkpoint database lives in). It also exposes the FastAPI lifespan (creating the schema with `sql_storage.create_tables()`, connecting the MCP servers, opening the agent's checkpoint database, and then closing the MCP connections, the agent checkpoint, the SQL, and the vector databases on shutdown). The pipeline internals (the plugin registry and the ingestion/retrieval services) are composed inside the `RagService`.
 
 ## Design Principles
 

@@ -3,11 +3,13 @@ from app.models.chunk import RetrievedChunk
 from app.plugin.context import RetrievalContext
 from app.plugin.registry import PluginRegistry
 from app.plugin.runtime import RetrievalRuntime
+from app.rerankers.base import Reranker
 from app.retrievers.base import Retriever
 
 
 class RetrievalService:
-    """Retrieves chunks and finalizes them through the plugins' lifecycle methods."""
+    """Retrieves chunks, optionally re-ranks them by relevance, and finalizes
+    them through the plugins' lifecycle methods."""
 
     def __init__(
         self,
@@ -15,10 +17,14 @@ class RetrievalService:
         retriever: Retriever,
         llm: LLMProvider,
         registry: PluginRegistry,
+        reranker: Reranker | None = None,
+        top_k: int = 5,
     ) -> None:
         self._retriever = retriever
         self._llm = llm
         self._registry = registry
+        self._reranker = reranker
+        self._top_k = top_k
 
     async def retrieve(
         self,
@@ -41,6 +47,14 @@ class RetrievalService:
         )
 
         chunks = await self._retriever.retrieve(user_query, where)
+
+        # Re-score and reorder the candidate set by relevance to the query.
+        # A no-op when no reranker is configured.
+        if self._reranker is not None:
+            chunks = await self._reranker.rerank(user_query, chunks)
+
+        # The retrievers fetch a wide candidate pool; keep only the final top_k.
+        chunks = chunks[: self._top_k]
 
         finalized: list[RetrievedChunk] = []
 

@@ -4,16 +4,14 @@ from collections.abc import Sequence
 from google import genai
 from google.genai import types
 
-from app.core.config import Settings
 from app.embedders.base import Embedder
 
 
 class GeminiEmbedder(Embedder):
-    def __init__(self, settings: Settings | None = None):
-        settings = settings or Settings()
-        self._api_key = settings.GOOGLE_API_KEY
-        self._model = settings.GEMINI_EMBEDDING_MODEL
-        self._batch_size = settings.EMBEDDING_BATCH_SIZE
+    def __init__(self, *, api_key: str, model: str, batch_size: int):
+        self._api_key = api_key
+        self._model = model
+        self._batch_size = batch_size
         self._client: genai.Client | None = None
 
     def _ensure_client(self) -> genai.Client:

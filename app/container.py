@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.agent_tools import RAG_TOOLSET
 from app.core.config import settings
+from app.embedders.fastembed import FastEmbedder
 from app.mcp import McpClient
 
 from app.llm.gemini import GeminiProvider
@@ -25,8 +26,19 @@ from app.services.rag import RagService
 from app.services.rag_agent import RagAgentService
 
 # Providers
-llm = GeminiProvider(settings)
-embedder = GeminiEmbedder(settings)
+llm = GeminiProvider(
+    api_key=settings.GOOGLE_API_KEY,
+    model=settings.GEMINI_MODEL,
+)
+embedder = GeminiEmbedder(
+    api_key=settings.GOOGLE_API_KEY,
+    model=settings.GEMINI_EMBEDDING_MODEL,
+    batch_size=settings.EMBEDDING_BATCH_SIZE,
+)
+# embedder = FastEmbedder(
+#     model_name=settings.FASTEMBED_MODEL,
+#     batch_size=settings.EMBEDDING_BATCH_SIZE,
+# )
 
 # Storage
 file_storage = LocalFileStorage(storage_dir=settings.FILE_LOCAL_STORAGE_DIR)

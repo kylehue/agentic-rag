@@ -327,7 +327,9 @@ def test_gemini_prepare_echoes_thought_signature():
         ),
     ]
 
-    contents, _ = GeminiProvider()._prepare(messages, None, None, None)
+    contents, _ = GeminiProvider(api_key="test", model="test")._prepare(
+        messages, None, None, None
+    )
 
     part = contents[0].parts[0]
     assert part.function_call.name == "search"
@@ -344,7 +346,9 @@ def test_gemini_prepare_omits_signature_when_absent():
         ),
     ]
 
-    contents, _ = GeminiProvider()._prepare(messages, None, None, None)
+    contents, _ = GeminiProvider(api_key="test", model="test")._prepare(
+        messages, None, None, None
+    )
 
     part = contents[0].parts[0]
     assert part.function_call.name == "search"

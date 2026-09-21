@@ -3,7 +3,6 @@ from collections.abc import Sequence
 
 from fastembed import TextEmbedding
 
-from app.core.config import Settings
 from app.embedders.base import Embedder
 
 
@@ -21,10 +20,9 @@ class FastEmbedder(Embedder):
     synchronous, so inference runs in a worker thread.
     """
 
-    def __init__(self, settings: Settings | None = None):
-        settings = settings or Settings()
-        self._model_name = settings.FASTEMBED_MODEL
-        self._batch_size = settings.EMBEDDING_BATCH_SIZE
+    def __init__(self, *, model_name: str, batch_size: int):
+        self._model_name = model_name
+        self._batch_size = batch_size
         self._model: TextEmbedding | None = None
 
     def _ensure_model(self) -> TextEmbedding:

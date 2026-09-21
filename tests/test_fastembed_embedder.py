@@ -30,7 +30,7 @@ def make_embedder(monkeypatch) -> tuple[FastEmbedder, StubModel]:
     monkeypatch.setattr(
         fastembed_module, "TextEmbedding", lambda *args, **kwargs: stub
     )
-    return FastEmbedder(), stub
+    return FastEmbedder(model_name="stub", batch_size=1), stub
 
 
 def test_embed_documents_returns_one_vector_per_text_in_order(monkeypatch):
@@ -73,8 +73,8 @@ def test_model_is_created_lazily(monkeypatch):
         return StubModel()
 
     monkeypatch.setattr(fastembed_module, "TextEmbedding", factory)
-    FastEmbedder()
+    FastEmbedder(model_name="stub", batch_size=1)
     assert created == []  # construction does not load the model
 
-    asyncio.run(FastEmbedder().embed_query("x"))
+    asyncio.run(FastEmbedder(model_name="stub", batch_size=1).embed_query("x"))
     assert len(created) == 1

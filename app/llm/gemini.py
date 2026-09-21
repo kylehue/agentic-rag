@@ -6,7 +6,6 @@ from uuid import uuid4
 from google import genai
 from google.genai import types
 
-from app.core.config import Settings
 from app.llm.base import (
     ChatMessage,
     CompletionOptions,
@@ -82,11 +81,11 @@ def _to_genai_schema(node: dict[str, Any]) -> types.Schema:
 class GeminiProvider(LLMProvider):
     """Gemini implementation of the LLM interface."""
 
-    def __init__(self, settings: Settings | None = None):
-        """Read settings and defer client creation until it is needed."""
-        settings = settings or Settings()
-        self._api_key = settings.GOOGLE_API_KEY
-        self._model = settings.GEMINI_MODEL
+    def __init__(self, *, api_key: str, model: str):
+        """Take the config this provider needs and defer client creation until
+        it is needed."""
+        self._api_key = api_key
+        self._model = model
         self._client: genai.Client | None = None
 
     def _ensure_client(self) -> genai.Client:

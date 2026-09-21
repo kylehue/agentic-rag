@@ -5,7 +5,6 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from app.core.config import Settings
 from app.llm.base import (
     ChatMessage,
     CompletionOptions,
@@ -20,12 +19,12 @@ from app.llm.base import (
 class OpenAIProvider(LLMProvider):
     """OpenAI-compatible implementation of the LLM interface."""
 
-    def __init__(self, settings: Settings | None = None):
-        """Read settings and defer client creation until it is needed."""
-        settings = settings or Settings()
-        self._api_key = settings.OPENAI_API_KEY
-        self._model = settings.OPENAI_MODEL
-        self._base_url = settings.OPENAI_BASE_URL
+    def __init__(self, *, api_key: str, model: str, base_url: str):
+        """Take the config this provider needs and defer client creation until
+        it is needed."""
+        self._api_key = api_key
+        self._model = model
+        self._base_url = base_url
         self._client: AsyncOpenAI | None = None
 
     def _ensure_client(self) -> AsyncOpenAI:

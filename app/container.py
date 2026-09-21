@@ -4,9 +4,9 @@ from fastapi import FastAPI
 
 from app.agent_tools import RAG_TOOLSET
 from app.core.config import settings
-from app.mcp import McpClient, McpServer
+from app.mcp import McpClient
 
-from app.llm.openai import OpenAIProvider
+from app.llm.gemini import GeminiProvider
 from app.embedders.gemini import GeminiEmbedder
 
 from app.plugins.table import TablePlugin
@@ -25,7 +25,7 @@ from app.services.rag import RagService
 from app.services.rag_agent import RagAgentService
 
 # Providers
-llm = OpenAIProvider(settings)
+llm = GeminiProvider(settings)
 embedder = GeminiEmbedder(settings)
 
 # Storage
@@ -71,6 +71,7 @@ rag_service = RagService(
             ignore_images=True,
             use_api=settings.UNSTRUCTURED_USE_API,
             api_key=settings.UNSTRUCTURED_API_KEY,
+            strategy=settings.TEXT_PARTITION_STRATEGY,
         ),
         TablePlugin(),
     ],

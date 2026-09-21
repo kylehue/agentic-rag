@@ -460,7 +460,7 @@ Built-in document-type plugins. Each module contains one `Plugin` subclass.
 - **Embedded tables** are reassembled across page breaks (see [Text Plugin: Reassembling tables split across pages](#text-plugin-reassembling-tables-split-across-pages)) and emitted as CSVs for the `TablePlugin` to process.
 - **Embedded images** are emitted with a description (caption and nearby text) for a future image plugin, and each figure's description is indexed as its own text chunk so the content stays searchable.
 
-Constructor options: `ignore_images` and `ignore_tables` (both default `False`) skip the processing of embedded images or tables (an ignored image still separates table runs in the document stream), and `use_api` / `api_key` switch partitioning to the hosted Unstructured API.
+Constructor options: `ignore_images` and `ignore_tables` (both default `False`) skip the processing of embedded images or tables (an ignored image still separates table runs in the document stream), `use_api` / `api_key` switch partitioning to the hosted Unstructured API, and `strategy` selects the partitioning strategy (`fast`, the default, or `hi_res` / `ocr_only`) applied to both backends (`hi_res` gives the most accurate tables).
 
 #### `app/plugins/table.py`
 

@@ -475,6 +475,21 @@ def test_default_partition_extracts_images():
     assert kwargs["infer_table_structure"] is True
 
 
+def test_partition_uses_the_configured_strategy():
+    elements = [make_text_element("Body.", page_number=1)]
+
+    # The default is "fast"; an explicit strategy is passed through verbatim.
+    assert partition_kwargs_for(TextPlugin(), elements)["strategy"] == "fast"
+    assert (
+        partition_kwargs_for(TextPlugin(strategy="hi_res"), elements)["strategy"]
+        == "hi_res"
+    )
+    assert (
+        partition_kwargs_for(TextPlugin(strategy="ocr_only"), elements)["strategy"]
+        == "ocr_only"
+    )
+
+
 def api_partition_kwargs_for(plugin: TextPlugin, elements) -> dict:
     """Run the plugin with the API backend stubbed and return the kwargs it
     called the API with. The local partition is stubbed to fail, so the test
@@ -572,11 +587,13 @@ def test_partition_via_api_runs_the_job_flow():
             filename="report.pdf",
             content_type="application/pdf",
             extract_image_block_types=["Image"],
+            strategy="fast",
         )
 
     # The output JSON comes back as real Element objects...
     assert [element.text for element in elements] == ["hello"]
-    # ...the job went to the given endpoint with a hi-res Partitioner node...
+    # ...the job went to the given endpoint with a Partitioner node carrying
+    # the requested strategy...
     client = captured[0]
     assert client.server_url == "http://api.test/v1"
     assert client.api_key_auth == "key-1"
@@ -585,7 +602,7 @@ def test_partition_via_api_runs_the_job_flow():
     )["job_nodes"][0]
     assert node["type"] == "partition"
     assert node["subtype"] == "unstructured_api"
-    assert node["settings"]["strategy"] == "hi_res"
+    assert node["settings"]["strategy"] == "fast"
     assert node["settings"]["infer_table_structure"] is True
     assert node["settings"]["extract_image_block_types"] == ["Image"]
     # ...and the output was downloaded from the job's output file.

@@ -1,7 +1,10 @@
+from typing import Literal
+
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.mcp.server import McpServer
+from app.plugins.text import PartitionStrategy
 
 
 class Settings(BaseSettings):
@@ -21,7 +24,10 @@ class Settings(BaseSettings):
     SENTENCE_TRANSFORMER_MODEL: str = "google/embeddinggemma-300m"
 
     # other configs
-    UNSTRUCTURED_USE_API: bool = True  # disable = self-host
+    UNSTRUCTURED_USE_API: bool = False  # disable = self-host
+    # The text plugin's partitioning strategy, applied to both the local and
+    # the hosted API backends.
+    TEXT_PARTITION_STRATEGY: PartitionStrategy = "fast"
     OPENAI_BASE_URL: str = "https://llmrouter.boyemma.com/v1"
     EMBEDDING_BATCH_SIZE: int = 100
     SQL_LOCAL_STORAGE_DIR: str = "./.storage/sql"

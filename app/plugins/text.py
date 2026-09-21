@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -52,6 +52,10 @@ UNSTRUCTURED_API_URL = "https://platform.unstructuredapp.io/api/v1"
 # How often to poll a running API job for its status.
 API_JOB_POLL_INTERVAL_SECONDS = 10
 
+# The Unstructured partitioning strategies, shared by the local and API
+# backends.
+PartitionStrategy = Literal["fast", "hi_res", "ocr_only"]
+
 
 class TextPlugin(Plugin):
     """Handles text documents (pdf, docx, txt, md, ...)."""
@@ -82,6 +86,7 @@ class TextPlugin(Plugin):
         use_api: bool = False,
         api_key: str = "",
         api_url: str = UNSTRUCTURED_API_URL,
+        strategy: PartitionStrategy = "fast",
     ) -> None:
         """
         - ``ignore_images`` - turn off the plugin's management of embedded images.
@@ -91,17 +96,22 @@ class TextPlugin(Plugin):
           No reassembled CSV is emitted, but the table text still ends up in the
           document chunks (``infer_table_structure`` stays on for that).
         - ``use_api`` - partition with the hosted Unstructured Platform API
-          instead of running the (hi_res) partition locally. Both backends use
-          the same partition settings and return the same Element objects, so
-          this is a pure backend switch (for debugging).
+          instead of running the partition locally. Both backends use the same
+          partition settings and return the same Element objects, so this is a
+          pure backend switch (for debugging).
         - ``api_key`` - the API key, used only when ``use_api`` is True.
         - ``api_url`` - the Platform API endpoint (defaults to Unstructured's).
+        - ``strategy`` - the partitioning strategy (``fast``, ``hi_res``, or
+          ``ocr_only``), applied to both backends. ``fast`` is the quickest and
+          cheapest; ``hi_res`` uses layout detection and is the most accurate
+          (better table extraction).
         """
         self._ignore_images = ignore_images
         self._ignore_tables = ignore_tables
         self._use_api = use_api
         self._api_key = api_key
         self._api_url = api_url
+        self._strategy: PartitionStrategy = strategy
 
     @property
     def name(self) -> str:
@@ -224,6 +234,7 @@ class TextPlugin(Plugin):
             extract_images_in_pdf=extract_images_in_pdf,
             extract_image_block_types=extract_image_block_types,
             extract_image_block_to_payload=extract_image_block_to_payload,
+            strategy=self._strategy,
         )
 
     def _partition_with(
@@ -235,11 +246,12 @@ class TextPlugin(Plugin):
         extract_images_in_pdf: bool,
         extract_image_block_types: list[str] | None,
         extract_image_block_to_payload: bool,
+        strategy: PartitionStrategy,
     ) -> list[Element]:
         """Run the partition on the configured backend.
 
-        The partition settings are equivalent for both backends (hi_res, table
-        structure inference, and the image block types); only the target
+        The partition settings are equivalent for both backends (the strategy,
+        table structure inference, and the image block types); only the target
         differs (hosted API vs. local), so switching is a pure backend change
         that returns the same Element objects either way.
         """
@@ -254,13 +266,14 @@ class TextPlugin(Plugin):
                 filename=file_filename,
                 content_type=content_type,
                 extract_image_block_types=extract_image_block_types,
+                strategy=strategy,
             )
 
         return partition(
             file=BytesIO(file_bytes),
             file_filename=file_filename,
             content_type=content_type,
-            strategy="hi_res",
+            strategy=strategy,
             infer_table_structure=True,  # Needed for the table cell grids.
             extract_images_in_pdf=extract_images_in_pdf,
             extract_image_block_types=extract_image_block_types,
@@ -295,16 +308,17 @@ def _partition_via_api(
     filename: str,
     content_type: str,
     extract_image_block_types: list[str] | None,
+    strategy: PartitionStrategy,
 ) -> list[Element]:
     """Partition one file with the hosted Unstructured Platform API.
 
-    The Platform API is job-based: create a one-file job with a High Res
-    Partitioner node, poll it until it completes, and download the element
-    JSON. Returns the same Element objects the local partition produces, so
-    the rest of the pipeline is unchanged.
+    The Platform API is job-based: create a one-file job with a Partitioner
+    node, poll it until it completes, and download the element JSON. Returns
+    the same Element objects the local partition produces, so the rest of the
+    pipeline is unchanged.
     """
     settings: dict = {
-        "strategy": "hi_res",
+        "strategy": strategy,
         "infer_table_structure": True,  # Needed for the table cell grids.
     }
     if extract_image_block_types:

@@ -61,6 +61,9 @@ class TablePlugin(Plugin):
 
     SUPPORTED_EXTENSIONS = frozenset({"csv", "xlsx", "xls"})
 
+    def __init__(self, *, llm: LLMProvider | None = None) -> None:
+        self._llm = llm
+
     @property
     def name(self) -> str:
         return "table"
@@ -95,7 +98,7 @@ class TablePlugin(Plugin):
         # queries the stored tables.
         await runtime.report_state("analyzing_tables", tables=len(tables))
         workbook_description, table_analyses = await self._analyze_workbook(
-            runtime.llm,
+            self._llm or runtime.llm,
             catalog,
             len(tables),
             context.file.description,

@@ -12,14 +12,18 @@ class Settings(BaseSettings):
     UNSTRUCTURED_API_KEY: str = ""
     GOOGLE_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
+    OPENROUTER_API_KEY: str = ""
     HF_TOKEN: str = ""
 
     # llm models
     GEMINI_MODEL: str = "gemini-3.5-flash-lite"
-    # OPENAI_BASE_URL: str = "https://llmrouter.boyemma.com/v1"
-    # OPENAI_MODEL: str = "auto"
-    OPENAI_BASE_URL: str = "https://openrouter.ai/api/v1"
-    OPENAI_MODEL: str = "openrouter/free"
+    OPENAI_BASE_URL: str = "https://llmrouter.boyemma.com/v1"
+    OPENAI_MODEL: str = "auto"
+    # The auxiliary OpenRouter LLM (openrouter_llm in the container). Defaults
+    # to OpenRouter's free-model router. Used for cheap work like image
+    # description, kept separate from the pipeline LLM.
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_MODEL: str = "openrouter/free"
 
     # embedding models
     GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-2"
@@ -31,10 +35,10 @@ class Settings(BaseSettings):
     # image embedding models (CLIP, a shared text+image space)
     CLIP_TEXT_MODEL: str = "Qdrant/clip-ViT-B-32-text"
     CLIP_IMAGE_MODEL: str = "Qdrant/clip-ViT-B-32-vision"
-    # Have the image plugin ask the (vision) LLM to describe each image,
-    # using any user-provided description as additional context. When False,
-    # only the user-provided description is used (no text chunk if absent).
-    IMAGE_USE_LLM_DESCRIPTION: bool = False  # True = more tokens
+    # Have the image plugin ask the LLM to describe each image, using any
+    # user-provided description as additional context. When False, only the
+    # user-provided description is used (no text chunk if absent).
+    IMAGE_USE_LLM_DESCRIPTION: bool = False
 
     # other configs
     UNSTRUCTURED_USE_API: bool = False  # disable = self-host

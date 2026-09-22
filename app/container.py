@@ -30,16 +30,25 @@ from app.services.chat import ChatService
 from app.services.rag import RagService
 from app.services.rag_agent import RagAgentService
 
-# Providers
-llm = OpenAIProvider(
+# LLM Providers
+# gemini_llm = GeminiProvider(
+#     api_key=settings.GOOGLE_API_KEY,
+#     model=settings.GEMINI_MODEL,
+# )
+
+openai_llm = OpenAIProvider(
     api_key=settings.OPENAI_API_KEY,
     model=settings.OPENAI_MODEL,
     base_url=settings.OPENAI_BASE_URL,
 )
-# llm = GeminiProvider(
-#     api_key=settings.GOOGLE_API_KEY,
-#     model=settings.GEMINI_MODEL,
+
+# openrouter_llm = OpenAIProvider(
+#     api_key=settings.OPENROUTER_API_KEY,
+#     model=settings.OPENROUTER_MODEL,
+#     base_url=settings.OPENROUTER_BASE_URL,
 # )
+
+# Embedders
 # text_embedder = GeminiEmbedder(
 #     api_key=settings.GOOGLE_API_KEY,
 #     model=settings.GEMINI_EMBEDDING_MODEL,
@@ -108,8 +117,9 @@ reranker = FastReranker(
     cache_dir=settings.MODEL_CACHE_DIR,
 )
 
+# Services
 rag_service = RagService(
-    llm=llm,
+    llm=openai_llm,
     text_embedder=text_embedder,
     image_embedder=image_embedder,
     retriever=hybrid_retriever,
@@ -126,13 +136,14 @@ rag_service = RagService(
             api_key=settings.UNSTRUCTURED_API_KEY,
             strategy=settings.TEXT_PARTITION_STRATEGY,
         ),
-        TablePlugin(),
-        ImagePlugin(use_llm_description=settings.IMAGE_USE_LLM_DESCRIPTION),
+        TablePlugin(llm=openai_llm),
+        ImagePlugin(
+            use_llm_description=settings.IMAGE_USE_LLM_DESCRIPTION,
+            llm=openai_llm,
+        ),
     ],
 )
 
-# Auth and chats: decoupled from the RAG services; they only need SQL
-# storage.
 auth_service = AuthService(sql_storage=sql_storage)
 chat_service = ChatService(sql_storage=sql_storage)
 

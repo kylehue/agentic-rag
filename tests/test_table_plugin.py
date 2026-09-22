@@ -96,6 +96,20 @@ def test_process_csv_returns_a_retrieval_chunk():
     assert len(llm.prompts) == 1
 
 
+def test_process_prefers_its_own_llm_over_the_runtime_llm():
+    table_llm = FakeLLM(json.dumps(make_analysis()))
+    runtime_llm = FakeLLM("should not be used")
+    context = csv_context()
+
+    chunks, _ = run_process(context, TablePlugin(llm=table_llm), llm=runtime_llm)
+
+    assert len(chunks) == 1
+    assert "Regional sales figures." in chunks[0].text
+    # The plugin's own LLM was used, not the pipeline LLM from the runtime.
+    assert len(table_llm.prompts) == 1
+    assert not runtime_llm.calls
+
+
 def test_process_xlsx_returns_chunk_per_sheet():
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer) as writer:  # type: ignore[reportArgumentType]

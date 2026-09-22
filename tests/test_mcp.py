@@ -135,7 +135,7 @@ def test_build_mcp_toolsets_groups_tools_by_server_and_namespaces_them():
     # the RAG service and chat it is given.
     executor = tool.create_executor(
         rag_service=build_rag_service(FakeLLM("ok"), NoopRetriever()),
-        context=RunContext(chat_id=None, evidence=EvidenceIndex()),
+            context=RunContext(chat_id=None, query="q", evidence=EvidenceIndex()),
     )
 
     async def run() -> str:

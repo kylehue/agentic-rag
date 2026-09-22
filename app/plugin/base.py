@@ -47,7 +47,7 @@ class Plugin(ABC):
         self,
         context: IngestionContext,
         runtime: IngestionRuntime,
-    ) -> list[IngestedChunk]:
+    ) -> Sequence[IngestedChunk]:
         """Generate the chunks for this file. Return [] to contribute nothing."""
         return []
 

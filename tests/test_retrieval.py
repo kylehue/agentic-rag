@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.api_schemas.chunk import RetrievedChunkSchema
-from app.models.chunk import RetrievedChunk
+from app.models.chunk import RetrievedChunk, RetrievedTextChunk
 from app.plugin.base import Plugin
 from app.plugin.registry import PluginRegistry
 from app.rerankers.base import Reranker
@@ -45,7 +45,7 @@ class EnrichingPlugin(Plugin):
 
 
 def make_chunk(plugin: str, chunk_id: str = "c1") -> RetrievedChunk:
-    return RetrievedChunk(
+    return RetrievedTextChunk(
         chunk_id=chunk_id,
         source_id="s1",
         origin_source_id="s1",
@@ -149,6 +149,47 @@ def test_reranker_runs_before_the_top_k_trim():
 
     assert [chunk.chunk_id for chunk in results] == ["c6", "c5", "c4"]
     assert all(chunk.score == 0.99 for chunk in results)
+
+
+def test_retrieval_dedups_chunks_that_share_a_key():
+    # Two chunks share key "img" (an image and its description); one has a
+    # null key. The retriever returns them best-first.
+    chunks = [
+        RetrievedTextChunk(
+            chunk_id="img-desc", source_id="s", origin_source_id="s",
+            plugin="text", text="the description", score=0.9, key="img",
+        ),
+        RetrievedTextChunk(
+            chunk_id="other", source_id="s2", origin_source_id="s2",
+            plugin="text", text="other", score=0.7, key=None,
+        ),
+        RetrievedTextChunk(
+            chunk_id="img-img", source_id="s", origin_source_id="s",
+            plugin="image", text="", score=0.5, key="img",
+        ),
+    ]
+    service = build_service(PluginRegistry(), FakeRetriever(chunks), top_k=5)
+
+    results = asyncio.run(service.retrieve("q"))
+
+    # The better "img" chunk survives, its duplicate is dropped, and the
+    # null-key chunk is kept.
+    assert [chunk.chunk_id for chunk in results] == ["img-desc", "other"]
+
+
+def test_retrieval_dedup_still_respects_top_k():
+    chunks = [
+        RetrievedTextChunk(
+            chunk_id=f"c{i}", source_id="s", origin_source_id="s",
+            plugin="text", text="t", score=1.0 - i * 0.1, key=f"k{i}",
+        )
+        for i in range(4)
+    ]
+    service = build_service(PluginRegistry(), FakeRetriever(chunks), top_k=2)
+
+    results = asyncio.run(service.retrieve("q"))
+
+    assert [chunk.chunk_id for chunk in results] == ["c0", "c1"]
 
 
 def test_from_dict_requires_origin_source_id():

@@ -18,7 +18,7 @@ from app.database import (
     DOCUMENT_METADATA_TABLE_NAME,
     USERS_TABLE_NAME,
 )
-from app.embedders.base import Embedder
+from app.embedders.base import ImageEmbedder, TextEmbedder
 from app.llm.base import (
     ChatMessage,
     CompletionOptions,
@@ -115,12 +115,17 @@ class FakeLLM(LLMProvider):
             yield RawDelta(tool_call=call)
 
 
-class FakeEmbedder(Embedder):
-    async def embed_documents(self, texts) -> list[list[float]]:
+class FakeEmbedder(TextEmbedder):
+    async def embed_text(self, texts) -> list[list[float]]:
         return [[0.1, 0.2, 0.3] for _ in texts]
 
-    async def embed_query(self, text: str) -> list[float]:
-        return [0.1, 0.2, 0.3]
+
+class FakeImageEmbedder(ImageEmbedder):
+    async def embed_text(self, texts) -> list[list[float]]:
+        return [[0.4, 0.5] for _ in texts]
+
+    async def embed_images(self, images) -> list[list[float]]:
+        return [[0.4, 0.5] for _ in images]
 
 
 class FakeVectorStorage(VectorStorage):
@@ -282,8 +287,8 @@ def build_runtime(
     *,
     registry: PluginRegistry | None = None,
     llm: LLMProvider | None = None,
-    embedder: Embedder | None = None,
-    vector_storage: VectorStorage | None = None,
+    embedder: TextEmbedder | None = None,
+    text_vector_storage: VectorStorage | None = None,
     sql_storage: SqlStorage | None = None,
     file_storage: FileStorage | None = None,
 ) -> SimpleNamespace:
@@ -295,8 +300,10 @@ def build_runtime(
         registry=registry if registry is not None else PluginRegistry(),
         llm=llm if llm is not None else FakeLLM(),
         embedder=embedder if embedder is not None else FakeEmbedder(),
-        vector_storage=(
-            vector_storage if vector_storage is not None else FakeVectorStorage()
+        text_vector_storage=(
+            text_vector_storage
+            if text_vector_storage is not None
+            else FakeVectorStorage()
         ),
         sql_storage=sql_storage if sql_storage is not None else FakeSqlStorage(),
         file_storage=file_storage if file_storage is not None else FakeFileStorage(),
@@ -306,8 +313,8 @@ def build_runtime(
         context=context,
         registry=parts.registry,
         llm=parts.llm,
-        embedder=parts.embedder,
-        vector_storage=parts.vector_storage,
+        text_embedder=parts.embedder,
+        text_vector_storage=parts.text_vector_storage,
         sql_storage=parts.sql_storage,
         file_storage=parts.file_storage,
     )
@@ -405,7 +412,7 @@ def make_tool(name, output="tool result", calls=None):
 
 
 def build_rag_service(
-    llm, retriever, *, sql_storage=None, file_storage=None, vector_storage=None
+    llm, retriever, *, sql_storage=None, file_storage=None, text_vector_storage=None
 ):
     """A real `RagService` over fake collaborators, for agent tests.
 
@@ -415,11 +422,15 @@ def build_rag_service(
     """
     return RagService(
         llm=llm,
-        embedder=FakeEmbedder(),
+        text_embedder=FakeEmbedder(),
+        image_embedder=FakeImageEmbedder(),
         retriever=retriever,
-        vector_storage=(
-            vector_storage if vector_storage is not None else FakeVectorStorage()
+        text_vector_storage=(
+            text_vector_storage
+            if text_vector_storage is not None
+            else FakeVectorStorage()
         ),
+        image_vector_storage=FakeVectorStorage(),
         sql_storage=sql_storage if sql_storage is not None else FakeSqlStorage(),
         file_storage=file_storage if file_storage is not None else FakeFileStorage(),
     )

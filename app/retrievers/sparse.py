@@ -3,7 +3,7 @@ from typing import Any
 from sqlalchemy import ColumnElement, Table
 
 from app.database import CHUNK_TABLE_NAME
-from app.models.chunk import RetrievedChunk
+from app.models.chunk import RetrievedTextChunk
 from app.retrievers.base import Retriever
 from app.store_sql.base import ConditionBuilder, SqlStorage
 
@@ -28,9 +28,10 @@ class SparseRetriever(Retriever):
         result = []
         for i, raw_chunk in enumerate(raw_chunks, 1):
             result.append(
-                RetrievedChunk.from_dict(
+                RetrievedTextChunk.from_dict(
                     raw_chunk,
                     score=0,  # doesn't matter for sparse search (as long as it's sorted)
+                    text=raw_chunk["text"],
                 )
             )
 

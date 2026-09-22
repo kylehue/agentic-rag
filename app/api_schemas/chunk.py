@@ -6,7 +6,8 @@ class IngestedChunkSchema(BaseModel):
 
     plugin: str
     chunk_id: str
-    text: str
+    # None for image chunks (their content is the image, not text).
+    text: str | None = None
     metadata: dict
 
 
@@ -18,6 +19,7 @@ class RetrievedChunkSchema(BaseModel):
     source_id: str
     origin_source_id: str
     parent_source_id: str | None
-    text: str
+    # None for image chunks (their content is the image, fetched via source_id).
+    text: str | None = None
     score: float
     metadata: dict

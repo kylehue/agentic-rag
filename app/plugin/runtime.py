@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
-from app.embedders.base import Embedder
+from app.embedders.base import TextEmbedder
 from app.llm.base import LLMProvider
 from app.plugin.context import IngestionContext, IngestionFile, RetrievalContext
 from app.store_file.base import FileStorage
@@ -37,8 +37,8 @@ class IngestionRuntime:
         context: IngestionContext,
         registry: PluginRegistry,
         llm: LLMProvider,
-        embedder: Embedder,
-        vector_storage: VectorStorage,
+        text_embedder: TextEmbedder,
+        text_vector_storage: VectorStorage,
         sql_storage: SqlStorage,
         file_storage: FileStorage,
         emitter: ProgressEmitter | None = None,
@@ -46,8 +46,8 @@ class IngestionRuntime:
         self._context = context
         self._registry = registry
         self._llm = llm
-        self._embedder = embedder
-        self._vector_storage = vector_storage
+        self._text_embedder = text_embedder
+        self._text_vector_storage = text_vector_storage
         self._sql_storage = sql_storage
         self._file_storage = file_storage
         self._emitter = emitter
@@ -66,12 +66,12 @@ class IngestionRuntime:
         return self._llm
 
     @property
-    def embedder(self) -> Embedder:
-        return self._embedder
+    def text_embedder(self) -> TextEmbedder:
+        return self._text_embedder
 
     @property
-    def vector_storage(self) -> VectorStorage:
-        return self._vector_storage
+    def text_vector_storage(self) -> VectorStorage:
+        return self._text_vector_storage
 
     @property
     def sql_storage(self) -> SqlStorage:

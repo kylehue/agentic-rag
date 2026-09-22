@@ -17,6 +17,7 @@ from app.agent_tools.search_documents import SearchDocumentTool
 from app.agent_tools.validate_chunk_as_structured_data import (
     ValidateChunkAsStructuredDataTool,
 )
+from app.agent_tools.view_images import ViewImagesTool
 
 __all__ = [
     "AgentTool",
@@ -29,6 +30,7 @@ __all__ = [
     "SearchDocumentTool",
     "ToolExecutor",
     "ValidateChunkAsStructuredDataTool",
+    "ViewImagesTool",
     "flatten_tools",
     "render_tool_blocks",
     "resolve_citations",

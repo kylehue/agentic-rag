@@ -31,4 +31,5 @@ build/
 # Others
 architecture.md
 .storage/
+.models/
 example_docs/

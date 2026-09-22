@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
+from app.models.content import ContentPart, ImageContent
+
 Role = Literal["system", "user", "assistant", "tool"]
 ReasoningLevel = Literal["none", "low", "medium", "high"]
 
@@ -54,17 +56,6 @@ class ToolSpec:
     name: str
     description: str
     parameters: dict
-
-
-@dataclass(frozen=True)
-class ImageContent:
-    """An image part of a message content."""
-
-    data: bytes
-    mime_type: str
-
-
-ContentPart = str | ImageContent
 
 
 @dataclass(frozen=True)

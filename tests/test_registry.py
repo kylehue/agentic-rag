@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import pytest
 
-from app.models.chunk import IngestedChunk, RetrievedChunk
+from app.models.chunk import IngestedTextChunk, RetrievedTextChunk
 from app.plugin.base import Plugin
 from app.plugin.context import RetrievalContext
 from app.plugin.registry import PluginRegistry
@@ -80,7 +80,7 @@ def test_ingestion_process_aggregates_chunks_in_registration_order():
 
         async def on_ingestion_process(self, context, runtime) -> list:
             return [
-                IngestedChunk(plugin=self.name, text=text) for text in self._texts
+                IngestedTextChunk(plugin=self.name, text=text) for text in self._texts
             ]
 
     registry.register(ChunkPlugin("a", ["a1"]))
@@ -94,9 +94,33 @@ def test_ingestion_process_aggregates_chunks_in_registration_order():
     assert [chunk.text for chunk in chunks] == ["a1", "b1", "b2"]
 
 
+def test_ingestion_process_skips_plugins_that_do_not_accept():
+    registry = PluginRegistry()
+    called: list = []
+
+    class Plugin_(NoopPlugin):
+        def __init__(self, name: str, accept: bool) -> None:
+            super().__init__(name, accepts_all=accept)
+
+        async def on_ingestion_process(self, context, runtime) -> list:
+            called.append(self.name)
+            return [IngestedTextChunk(plugin=self.name, text=self.name)]
+
+    registry.register(Plugin_("ok", accept=True))
+    registry.register(Plugin_("no", accept=False))
+
+    context = make_context()
+    parts = build_runtime(context, registry=registry)
+    chunks = asyncio.run(registry.ingestion_process(context, parts.runtime))
+
+    # The non-accepting plugin is never invoked, so it needs no self-gate.
+    assert called == ["ok"]
+    assert [chunk.text for chunk in chunks] == ["ok"]
+
+
 def test_retrieval_finalize_returns_one_result_per_plugin():
     registry = PluginRegistry()
-    chunk = RetrievedChunk(
+    chunk = RetrievedTextChunk(
         chunk_id="c1",
         source_id="s1",
         origin_source_id="s1",

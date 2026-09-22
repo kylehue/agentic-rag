@@ -217,12 +217,37 @@ class LocalSqlStorage(SqlStorage):
     async def create_tables(self) -> None:
         """Create every table defined on the database base, if it is absent.
 
-        The schema is owned by the ORM models in app.database; this only
-        applies it. Existing tables are left as-is (checkfirst), so a changed
-        column set needs a fresh database rather than an in-place edit.
+        The schema is owned by the ORM models in app.database; this applies
+        it. New tables are created whole; for tables that already exist, any
+        missing *nullable* column is added in place (a schema addition, like a
+        new optional chunk column), so an existing database picks it up without
+        a wipe. Non-nullable or primary-key columns are never added in place.
         """
         async with self._engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(self._create_and_migrate)
+
+    def _create_and_migrate(self, conn) -> None:
+        from sqlalchemy import inspect as sa_inspect
+
+        Base.metadata.create_all(conn)
+        inspector = sa_inspect(conn)
+        for table in Base.metadata.sorted_tables:
+            try:
+                existing = {c["name"] for c in inspector.get_columns(table.name)}
+            except NoSuchTableError:
+                continue  # just created by create_all, already whole
+            for column in table.columns:
+                if column.name in existing or column.primary_key:
+                    continue
+                if not column.nullable:
+                    continue
+                coltype = column.type.compile(dialect=conn.dialect)
+                conn.execute(
+                    text(
+                        f'ALTER TABLE "{table.name}" '
+                        f'ADD COLUMN "{column.name}" {coltype}'
+                    )
+                )
 
     async def upsert(
         self,

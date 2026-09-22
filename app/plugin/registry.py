@@ -16,11 +16,13 @@ if TYPE_CHECKING:
 class PluginRegistry:
     """Holds registered plugins and fans pipeline events out to them.
 
-    Every event reaches every registered plugin, concurrently, in
-    registration order; each plugin decides for itself whether to act. The
-    two response events return per-plugin results the caller combines:
-    ``ingestion_process`` returns the flattened chunks, and
-    ``retrieval_finalize`` returns one optional replacement per plugin.
+    Notification events reach every registered plugin, concurrently, in
+    registration order. The ``ingestion_process`` event reaches only the
+    plugins that ``accept`` the file, so plugins do not have to self-gate
+    their processing. The two response events return per-plugin results the
+    caller combines: ``ingestion_process`` returns the flattened chunks, and
+    ``retrieval_finalize`` returns one optional replacement per plugin (it
+    still reaches every plugin; each decides whether to act).
     """
 
     def __init__(self) -> None:
@@ -48,14 +50,19 @@ class PluginRegistry:
         context: IngestionContext,
         runtime: IngestionRuntime,
     ) -> None:
-        await self._fan(lambda p: p.on_ingestion_started(context, runtime))
+        await self._fan(self._plugins, lambda p: p.on_ingestion_started(context, runtime))
 
     async def ingestion_process(
         self,
         context: IngestionContext,
         runtime: IngestionRuntime,
     ) -> list[IngestedChunk]:
-        results = await self._fan(lambda p: p.on_ingestion_process(context, runtime))
+        # Only the plugins that accept this file process it; the rest are
+        # skipped, so plugins need no self-gate.
+        results = await self._fan(
+            self.accepting_plugins(context),
+            lambda p: p.on_ingestion_process(context, runtime),
+        )
         return [chunk for result in results if result for chunk in result]
 
     async def file_emitted(
@@ -64,7 +71,7 @@ class PluginRegistry:
         context: IngestionContext,
         runtime: IngestionRuntime,
     ) -> None:
-        await self._fan(lambda p: p.on_file_emitted(emitted_file, context, runtime))
+        await self._fan(self._plugins, lambda p: p.on_file_emitted(emitted_file, context, runtime))
 
     async def file_subprocessed(
         self,
@@ -74,7 +81,8 @@ class PluginRegistry:
         runtime: IngestionRuntime,
     ) -> None:
         await self._fan(
-            lambda p: p.on_file_subprocessed(emitted_file, chunks, context, runtime)
+            self._plugins,
+            lambda p: p.on_file_subprocessed(emitted_file, chunks, context, runtime),
         )
 
     async def file_completed(
@@ -83,7 +91,7 @@ class PluginRegistry:
         context: IngestionContext,
         runtime: IngestionRuntime,
     ) -> None:
-        await self._fan(lambda p: p.on_file_completed(chunks, context, runtime))
+        await self._fan(self._plugins, lambda p: p.on_file_completed(chunks, context, runtime))
 
     async def ingestion_completed(
         self,
@@ -91,7 +99,7 @@ class PluginRegistry:
         context: IngestionContext,
         runtime: IngestionRuntime,
     ) -> None:
-        await self._fan(lambda p: p.on_ingestion_completed(chunks, context, runtime))
+        await self._fan(self._plugins, lambda p: p.on_ingestion_completed(chunks, context, runtime))
 
     # --- retrieval events ---
 
@@ -101,9 +109,13 @@ class PluginRegistry:
         context: RetrievalContext,
         runtime: RetrievalRuntime,
     ) -> list[RetrievedChunk | None]:
-        """One optional replacement per plugin, in registration order."""
+        """One optional replacement per plugin, in registration order.
+
+        Reaches every plugin (no gating); each decides whether to act on the
+        chunk, typically by checking it produced the chunk.
+        """
         return await self._fan(
-            lambda p: p.on_retrieval_finalize(chunk, context, runtime)
+            self._plugins, lambda p: p.on_retrieval_finalize(chunk, context, runtime)
         )
 
     async def retrieval_completed(
@@ -112,12 +124,12 @@ class PluginRegistry:
         context: RetrievalContext,
         runtime: RetrievalRuntime,
     ) -> None:
-        await self._fan(lambda p: p.on_retrieval_completed(chunks, context, runtime))
+        await self._fan(self._plugins, lambda p: p.on_retrieval_completed(chunks, context, runtime))
 
     # --- fan-out ---
 
-    async def _fan(self, action) -> list[Any]:
-        if not self._plugins:
+    async def _fan(self, plugins: Sequence[Plugin], action) -> list[Any]:
+        if not plugins:
             return []
 
         async def call(plugin: Plugin) -> Any:
@@ -130,4 +142,4 @@ class PluginRegistry:
             finally:
                 current_plugin.reset(token)
 
-        return list(await asyncio.gather(*(call(plugin) for plugin in self._plugins)))
+        return list(await asyncio.gather(*(call(plugin) for plugin in plugins)))

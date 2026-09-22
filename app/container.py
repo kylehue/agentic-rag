@@ -4,16 +4,20 @@ from fastapi import FastAPI
 
 from app.agent_tools import RAG_TOOLSET
 from app.core.config import settings
+from app.embedders.clip import ClipImageEmbedder
 from app.embedders.fastembed import FastEmbedder
 from app.mcp import McpClient
 
+from app.llm.openai import OpenAIProvider
 from app.llm.gemini import GeminiProvider
 from app.embedders.gemini import GeminiEmbedder
 
+from app.plugins.image import ImagePlugin
 from app.plugins.table import TablePlugin
 from app.plugins.text import TextPlugin
 from app.rerankers.fastembed import FastReranker
-from app.retrievers.vector import VectorRetriever
+from app.retrievers.text_vector import TextVectorRetriever
+from app.retrievers.image_vector import ImageVectorRetriever
 from app.retrievers.sparse import SparseRetriever
 from app.retrievers.hybrid import HybridRetriever
 
@@ -27,34 +31,59 @@ from app.services.rag import RagService
 from app.services.rag_agent import RagAgentService
 
 # Providers
-llm = GeminiProvider(
-    api_key=settings.GOOGLE_API_KEY,
-    model=settings.GEMINI_MODEL,
+llm = OpenAIProvider(
+    api_key=settings.OPENAI_API_KEY,
+    model=settings.OPENAI_MODEL,
+    base_url=settings.OPENAI_BASE_URL,
 )
-# embedder = GeminiEmbedder(
+# llm = GeminiProvider(
+#     api_key=settings.GOOGLE_API_KEY,
+#     model=settings.GEMINI_MODEL,
+# )
+# text_embedder = GeminiEmbedder(
 #     api_key=settings.GOOGLE_API_KEY,
 #     model=settings.GEMINI_EMBEDDING_MODEL,
 #     batch_size=settings.EMBEDDING_BATCH_SIZE,
 # )
-embedder = FastEmbedder(
+text_embedder = FastEmbedder(
     model_name=settings.FASTEMBED_MODEL,
     batch_size=settings.EMBEDDING_BATCH_SIZE,
+    cache_dir=settings.MODEL_CACHE_DIR,
+)
+# The image embedder is a CLIP cross-encoder: its text and vision encoders
+# share a space, so a text query can be matched against image chunks.
+image_embedder = ClipImageEmbedder(
+    text_model=settings.CLIP_TEXT_MODEL,
+    image_model=settings.CLIP_IMAGE_MODEL,
+    cache_dir=settings.MODEL_CACHE_DIR,
 )
 
 # Storage
 file_storage = LocalFileStorage(storage_dir=settings.FILE_LOCAL_STORAGE_DIR)
 
-vector_storage = LocalVectorStorage(
+text_vector_storage = LocalVectorStorage(
     storage_dir=settings.VECTOR_LOCAL_STORAGE_DIR,
     collection_name=settings.VECTOR_COLLECTION_NAME,
+)
+
+image_vector_storage = LocalVectorStorage(
+    storage_dir=settings.VECTOR_LOCAL_STORAGE_DIR,
+    collection_name=settings.IMAGE_VECTOR_COLLECTION_NAME,
 )
 
 sql_storage = LocalSqlStorage(storage_dir=settings.SQL_LOCAL_STORAGE_DIR)
 
 # Retrievers
-vector_retriever = VectorRetriever(
-    embedder=embedder,
-    vector_storage=vector_storage,
+text_vector_retriever = TextVectorRetriever(
+    embedder=text_embedder,
+    text_vector_storage=text_vector_storage,
+    sql_storage=sql_storage,
+    top_k=50,
+)
+
+image_vector_retriever = ImageVectorRetriever(
+    embedder=image_embedder,
+    image_vector_storage=image_vector_storage,
     sql_storage=sql_storage,
     top_k=50,
 )
@@ -66,32 +95,39 @@ sparse_retriever = SparseRetriever(
 
 hybrid_retriever = HybridRetriever(
     retrievers=[
-        vector_retriever,
+        text_vector_retriever,
+        image_vector_retriever,
         sparse_retriever,
     ],
     top_k=50,
 )
 
 # Re-ranker
-reranker = FastReranker(model_name=settings.FASTEMBED_RERANK_MODEL)
+reranker = FastReranker(
+    model_name=settings.FASTEMBED_RERANK_MODEL,
+    cache_dir=settings.MODEL_CACHE_DIR,
+)
 
 rag_service = RagService(
     llm=llm,
-    embedder=embedder,
+    text_embedder=text_embedder,
+    image_embedder=image_embedder,
     retriever=hybrid_retriever,
     reranker=reranker,
     retrieval_top_k=settings.RETRIEVAL_TOP_K,
-    vector_storage=vector_storage,
+    text_vector_storage=text_vector_storage,
+    image_vector_storage=image_vector_storage,
     sql_storage=sql_storage,
     file_storage=file_storage,
     plugins=[
         TextPlugin(
-            ignore_images=True,
+            ignore_images=False,
             use_api=settings.UNSTRUCTURED_USE_API,
             api_key=settings.UNSTRUCTURED_API_KEY,
             strategy=settings.TEXT_PARTITION_STRATEGY,
         ),
         TablePlugin(),
+        ImagePlugin(use_llm_description=settings.IMAGE_USE_LLM_DESCRIPTION),
     ],
 )
 
@@ -131,4 +167,5 @@ async def lifespan(app: FastAPI):
     if mcp_client is not None:
         await mcp_client.close()
     await sql_storage.close()
-    await vector_storage.close()
+    await text_vector_storage.close()
+    await image_vector_storage.close()

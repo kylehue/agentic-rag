@@ -8,7 +8,7 @@ import pytest
 
 from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME, Base
 from app.errors.document import InvalidDocumentError
-from app.models.chunk import IngestedChunk
+from app.models.chunk import IngestedTextChunk
 from app.plugin.base import Plugin
 from app.plugin.registry import PluginRegistry
 from app.plugins import text as text_module
@@ -18,6 +18,7 @@ from app.store_sql.local import LocalSqlStorage
 
 from fakes import (
     FakeEmbedder,
+    FakeImageEmbedder,
     FakeLLM,
     FakeVectorStorage,
     make_ingestion_file,
@@ -52,7 +53,7 @@ class SidecarPlugin(Plugin):
         if not self.accepts(context):
             return []
 
-        return [IngestedChunk(plugin=self.name, text="sidecar marker")]
+        return [IngestedTextChunk(plugin=self.name, text="sidecar marker")]
 
 
 class EmptyPlugin(Plugin):
@@ -85,7 +86,7 @@ class UnacceptedEmitterPlugin(Plugin):
             content_type="application/x-unknown",
             file_bytes=b"mystery bytes",
         )
-        return [IngestedChunk(plugin=self.name, text="txt body")]
+        return [IngestedTextChunk(plugin=self.name, text="txt body")]
 
 
 class PageMetadataPlugin(Plugin):
@@ -108,7 +109,7 @@ class PageMetadataPlugin(Plugin):
             file_bytes=b"a,b\n1,2",
         )
         return [
-            IngestedChunk(
+            IngestedTextChunk(
                 plugin=self.name,
                 text="txt body",
                 metadata={"color": "red", "source_page_number": 7},
@@ -131,7 +132,7 @@ class CsvColorPlugin(Plugin):
             return []
 
         return [
-            IngestedChunk(
+            IngestedTextChunk(
                 plugin=self.name,
                 text="csv body",
                 metadata={"color": "blue"},
@@ -162,7 +163,7 @@ class FailsOnEmitPlugin(Plugin):
             content_type="text/csv",
             file_bytes=b"a,b\n1,2",
         )
-        return [IngestedChunk(plugin=self.name, text="txt body")]
+        return [IngestedTextChunk(plugin=self.name, text="txt body")]
 
 
 class ChainEmitterPlugin(Plugin):
@@ -189,7 +190,7 @@ class ChainEmitterPlugin(Plugin):
                 file_bytes=b"a,b\n1,2",
             )
 
-        return [IngestedChunk(plugin=self.name, text=f"level {level}")]
+        return [IngestedTextChunk(plugin=self.name, text=f"level {level}")]
 
 
 def build_service(tmp_path, *, llm=None, plugins=None):
@@ -197,6 +198,7 @@ def build_service(tmp_path, *, llm=None, plugins=None):
     sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
     file_storage = LocalFileStorage(storage_dir=tmp_path / "file")
     vector_storage = FakeVectorStorage()
+    image_vector_storage = FakeVectorStorage()
     registry = PluginRegistry()
     for plugin in (plugins if plugins is not None else [TextPlugin(), TablePlugin()]):
         registry.register(plugin)
@@ -204,8 +206,10 @@ def build_service(tmp_path, *, llm=None, plugins=None):
     service = IngestionService(
         registry=registry,
         llm=llm,
-        embedder=FakeEmbedder(),
-        vector_storage=vector_storage,
+        text_embedder=FakeEmbedder(),
+        image_embedder=FakeImageEmbedder(),
+        text_vector_storage=vector_storage,
+        image_vector_storage=image_vector_storage,
         sql_storage=sql_storage,
         file_storage=file_storage,
     )

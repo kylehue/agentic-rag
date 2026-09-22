@@ -2,13 +2,13 @@ import asyncio
 
 import pytest
 
-from app.models.chunk import RetrievedChunk
+from app.models.chunk import RetrievedChunk, RetrievedTextChunk
 from app.rerankers import fastembed as fastembed_rerank_module
 from app.rerankers.fastembed import FastReranker
 
 
 def make_chunk(text: str, chunk_id: str) -> RetrievedChunk:
-    return RetrievedChunk(
+    return RetrievedTextChunk(
         chunk_id=chunk_id,
         source_id="s1",
         origin_source_id="s1",
@@ -44,11 +44,9 @@ def make_reranker(monkeypatch) -> tuple[FastReranker, StubCrossEncoder]:
         "TextCrossEncoder",
         lambda *args, **kwargs: StubCrossEncoder(*args, **kwargs),
     )
+    # The model loads eagerly at construction (the stub is created then).
     reranker = FastReranker(model_name="stub-model", batch_size=8)
-    # Force the lazy model to load (an empty rerank returns before loading it).
-    asyncio.run(reranker.rerank("load", [make_chunk("x", "x")]))
     stub = StubCrossEncoder.instances[0]
-    stub.rerank_calls.clear()  # drop the loading call; tests assert their own
     return reranker, stub
 
 
@@ -83,18 +81,15 @@ def test_rerank_rejects_an_empty_query(monkeypatch):
         asyncio.run(reranker.rerank("   ", [make_chunk("doc", "c1")]))
 
 
-def test_model_is_created_lazily_and_configured(monkeypatch):
+def test_model_is_created_eagerly_and_configured(monkeypatch):
     StubCrossEncoder.instances = []
     monkeypatch.setattr(
         fastembed_rerank_module,
         "TextCrossEncoder",
         lambda *args, **kwargs: StubCrossEncoder(*args, **kwargs),
     )
-    FastReranker(model_name="stub-model", batch_size=8)
-    assert StubCrossEncoder.instances == []  # construction does not load the model
-
-    reranker = FastReranker(model_name="stub-model", batch_size=8)
-    asyncio.run(reranker.rerank("q", [make_chunk("doc", "c1")]))
+    FastReranker(model_name="stub-model", batch_size=8, cache_dir="/tmp/models")
+    # The model loads at construction, not on first use, into the cache dir.
     assert len(StubCrossEncoder.instances) == 1
     assert StubCrossEncoder.instances[0].model_name == "stub-model"
-    assert StubCrossEncoder.instances[0].lazy_load is True
+    assert StubCrossEncoder.instances[0].lazy_load is False

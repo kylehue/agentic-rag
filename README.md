@@ -202,21 +202,24 @@ A document's content ends up in three stores: the original and derived files in 
 
 ```mermaid
 flowchart TD
-    Q[/Question/] --> A["Search by meaning"]
-    Q --> B["Search by words"]
-    A --> C["Merge the two rankings"]
+    Q[/Question/] --> A["Search text by meaning"]
+    Q --> B["Search text by words"]
+    Q --> I["Search images by meaning"]
+    A --> C["Merge the rankings"]
     B --> C
-    C --> R["Re-rank the candidates by relevance"]
+    I --> C
+    C --> R["Re-rank the text candidates by relevance"]
     R --> D["Let plugins refine the results"]
     D --> E["Return the top chunks"]
 ```
 
-Retrieval runs two searches in parallel and merges their rankings:
+Retrieval runs three searches in parallel and merges their rankings:
 
-- **Semantic search** embeds the question with the same embedder used for the chunks and finds the nearest vectors. The vector store keeps only ids and embeddings, so the matching chunk records are then loaded from SQL in the vector's ranking order.
-- **Lexical search** runs full-text search (FTS5) over the chunk text in SQL.
+- **Text semantic search** embeds the question with the text embedder and finds the nearest text-chunk vectors. The vector store keeps only ids and embeddings, so the matching chunk records are then loaded from SQL in the vector's ranking order.
+- **Text lexical search** runs full-text search (FTS5) over the chunk text in SQL.
+- **Image semantic search** embeds the question with the image embedder's text encoder (CLIP) and finds the nearest image-chunk vectors in the image collection.
 
-The two rankings are combined with Reciprocal Rank Fusion (RRF). RRF merges ranks instead of scores, so the two searches contribute to one list even though they measure relevance differently. The retrievers fetch a **wide** candidate pool (50 each, fused to 50); that pool is then **re-ranked** by a cross-encoder reranker, which scores each (question, chunk) pair directly and reorders it by true relevance (a cheap fused ranking is corrected into a finer one). The result is capped at the final `RETRIEVAL_TOP_K` (5), and those top chunks pass through a plugin finalization step (see Plugin Lifecycle) before they are returned.
+The rankings are combined with Reciprocal Rank Fusion (RRF). RRF merges ranks instead of scores, so the searches contribute to one list even though they measure relevance differently. The retrievers fetch a **wide** candidate pool (50 each, fused to 50); that pool is then **re-ranked** by a cross-encoder reranker, which scores each (question, text-chunk) pair directly and reorders the text candidates by true relevance (a cheap fused ranking is corrected into a finer one). Image chunks have no text to score, so they keep their retrieval score. The result is then **de-duplicated by `key`** (at most one chunk per non-null key, so an image and its description occupy a single slot) and capped at the final `RETRIEVAL_TOP_K` (5); those top chunks pass through a plugin finalization step (see Plugin Lifecycle) before they are returned.
 
 ### Answer Generation
 
@@ -293,7 +296,7 @@ A chat is a user's working space, and the unit of both the corpus and the conver
 
 ## Plugin Lifecycle
 
-The pipeline is driven by a fixed set of lifecycle events. Each event is a method on the `Plugin` base class with a no-op default; plugins override only what they care about. The registry fires every event to **all** registered plugins (concurrently, in registration order), and each plugin decides for itself whether to act (typically by guarding with `accepts`, or by recognizing its own chunks via `chunk.plugin`). Every event receives the per-run context and the runtime of its phase: ingestion events carry `IngestionRuntime`, retrieval events carry `RetrievalRuntime`.
+The pipeline is driven by a fixed set of lifecycle events. Each event is a method on the `Plugin` base class with a no-op default; plugins override only what they care about. Notification events reach **all** registered plugins (concurrently, in registration order). The `ingestion_process` event is the exception: the registry offers the file only to the plugins that `accept` it, so a plugin never has to self-gate its processing. Every event receives the per-run context and the runtime of its phase: ingestion events carry `IngestionRuntime`, retrieval events carry `RetrievalRuntime`.
 
 Where each hook is triggered in the two services:
 
@@ -369,8 +372,8 @@ Plugin constructors take **options only, no services**. Lifecycle methods receiv
 | ----------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | `context`                                                         | The ingestion context for this run.                                        |
 | `llm`                                                             | The LLM provider being used in the pipeline.                               |
-| `embedder`                                                        | The embedding provider.                                                    |
-| `vector_storage` / `sql_storage` / `file_storage`                 | The shared storages, for plugins that need to read or write other content. |
+| `text_embedder`                                                   | The text embedding provider.                                               |
+| `text_vector_storage` / `sql_storage` / `file_storage`            | The shared storages, for plugins that need to read or write other content. |
 | `registry`                                                        | The plugin registry; `emit_file` reports emitted files through it.         |
 | `emit_file(filename, content_type, file_bytes, description=None)` | Emit a file for subprocess by the plugins that accept it.                  |
 
@@ -423,9 +426,9 @@ The agent engine, decoupled from RAG: it orchestrates a tool-calling LLM and kno
 
 ### `app/agent_tools`
 
-The RAG agent's tools, plugin-style: one module per tool (`search_documents.py`, `validate_chunk_as_structured_data.py`, `perform_sql_to_document.py`, `perform_sql_to_document_records.py`), plus `base.py` (the `AgentTool` and `AgentToolset` base classes, the `RunContext` per-answer context, and the outline/render helpers), `common.py` (the shared source/table resolution, spreadsheet loading, and in-memory SQL helpers), `evidence.py` (the per-answer `EvidenceIndex` that maps a citation number to a real chunk, and `resolve_citations`), `mcp.py` (the `McpTool` `AgentTool` adapter and `build_mcp_toolsets`, which turn MCP servers' tools into agent tools), and `rag_toolset.py` (the `AgentToolset` that groups the RAG tools with their cross-tool instructions). The tools are decoupled from the plugins: they only know the `rag_service` (and the per-answer `RunContext`), and treat a stored chunk as a table when its metadata carries a schema.
+The RAG agent's tools, plugin-style: one module per tool (`search_documents.py`, `validate_chunk_as_structured_data.py`, `perform_sql_to_document.py`, `perform_sql_to_document_records.py`, `view_images.py`), plus `base.py` (the `AgentTool` and `AgentToolset` base classes, the `RunContext` per-answer context, and the outline/render helpers), `common.py` (the shared source/table resolution, spreadsheet loading, and in-memory SQL helpers), `evidence.py` (the per-answer `EvidenceIndex` that maps a citation number to a real chunk, and `resolve_citations`), `mcp.py` (the `McpTool` `AgentTool` adapter and `build_mcp_toolsets`, which turn MCP servers' tools into agent tools), and `rag_toolset.py` (the `AgentToolset` that groups the RAG tools with their cross-tool instructions). The tools are decoupled from the plugins: they only know the `rag_service` (and the per-answer `RunContext`), and treat a stored chunk as a table when its metadata carries a schema.
 
-`AgentTool` declares the tool's `name`, `description`, and `parameters` (the JSON schema the model sees) and implements `create_executor(rag_service, context)`, which returns the async execute function the agent uses (a closure over the RAG service pieces it needs and the run's context; the RAG service exposes its collaborators as public properties for this). Each tool's description is decoupled and describes only itself. Tools are read-only and token-lean: `validate_chunk_as_structured_data` returns a source's stored table schema(s) with no data read, and `perform_sql_to_document` loads a source's spreadsheet (a csv, or a workbook's sheets, each named by its `table_name`) into a throwaway in-memory database and tells the model to bound its own output with a LIMIT.
+`AgentTool` declares the tool's `name`, `description`, and `parameters` (the JSON schema the model sees) and implements `create_executor(rag_service, context)`, which returns the async execute function the agent uses (a closure over the RAG service pieces it needs and the run's context; the RAG service exposes its collaborators as public properties for this). Each tool's description is decoupled and describes only itself. Tools are read-only and token-lean: `validate_chunk_as_structured_data` returns a source's stored table schema(s) with no data read, and `perform_sql_to_document` loads a source's spreadsheet (a csv, or a workbook's sheets, each named by its `table_name`) into a throwaway in-memory database and tells the model to bound its own output with a LIMIT. `view_images` loads the given images (by `source_id`) and asks the vision LLM to describe them with a `reason` the model supplies, so the agent can reason about what an image shows. The per-answer `RunContext` also carries the user's `query`.
 
 `AgentToolset` is a named group of tools plus the cross-tool orchestration instructions (e.g. "validate a source's schema before running SQL over it"). It is transparent to the tool-call wire format (the model calls its member tools), and its `render()` block (name + instructions + each tool's spec) is what the agent's system prompt shows. `flatten_tools()` unwraps a mix of bare tools and toolsets into the tools the model actually calls; `render_tool_blocks()` renders that mix for the prompt; `tools_outline()` renders a bare set of tools' specs. `rag_toolset.py` declares the RAG tools one by one as module constants (so the instructions can reference their real names) and the `RAG_TOOLSET` constant (named "RAG") that groups them.
 
@@ -460,7 +463,7 @@ Built-in document-type plugins. Each module contains one `Plugin` subclass.
 `TextPlugin` handles text documents (pdf, docx, txt, md, html, and more). It parses the source with Unstructured.io (locally, or through the hosted API when `use_api=True`), chunks the text (`chunk_by_title` when titles are present, otherwise `chunk_elements`), and manages the embedded content:
 
 - **Embedded tables** are reassembled across page breaks (see [Text Plugin: Reassembling tables split across pages](#text-plugin-reassembling-tables-split-across-pages)) and emitted as CSVs for the `TablePlugin` to process.
-- **Embedded images** are emitted with a description (caption and nearby text) for a future image plugin, and each figure's description is indexed as its own text chunk so the content stays searchable.
+- **Embedded images** are emitted as files (with the caption and nearby text as the source description) for the `ImagePlugin` to index.
 
 Constructor options: `ignore_images` and `ignore_tables` (both default `False`) skip the processing of embedded images or tables (an ignored image still separates table runs in the document stream), `use_api` / `api_key` switch partitioning to the hosted Unstructured API, and `strategy` selects the partitioning strategy (`fast`, the default, or `hi_res` / `ocr_only`) applied to both backends (`hi_res` gives the most accurate tables).
 
@@ -474,6 +477,17 @@ It asks the LLM for one workbook-level pass that produces retrieval-optimized de
 - **metadata**: `table_name`, the precomputed `schema` (column names and inferred types), `row_count`, and `column_count`. For tables embedded in a parent document, the metadata also carries the `source_page_number` inherited from the parent's chunks. The description is not duplicated into the metadata; it is already in the text.
 
 Storing the schema is what lets the agent inspect a table without reading its data. The table data itself stays a file (the uploaded spreadsheet, or the emitted CSV for embedded tables), linked from the chunk record. The agent reads it through `perform_sql_to_document`, which loads a source's spreadsheet into a throwaway in-memory database (a csv as one table; a workbook's sheets each as a table named by their `table_name`) and runs SQL over it, so a workbook's sheets can be JOINed. The plugin does not emit or store any file of its own, and table rows are not loaded into SQL at ingestion.
+
+#### `app/plugins/image.py`
+
+`ImagePlugin` handles images (png, jpg, jpeg, webp, gif, bmp, tiff). It accepts both standalone image uploads and the image files emitted by `TextPlugin` from documents. It produces one or two chunks:
+
+- an **image chunk** carrying the image bytes, embedded as an image (via the CLIP image embedder) into the image vector collection, so a text query can retrieve it; and
+- an optional **description text chunk**. With `use_llm_description=True`, the (vision) LLM describes the image, using the source description (the user's description for an upload, or the caption + nearby text for an emitted figure) as additional context. With `use_llm_description=False`, only the source description is used (no description chunk if there is none).
+
+Both chunks share the same `key` (the image's `source_id`), so retrieval de-duplicates them into a single result slot.
+
+The image bytes are also persisted as a file (addressable by `source_id`); a retrieved image chunk carries no bytes, so they are loaded on demand by the agent's `view_images` tool.
 
 ### `app/api`
 
@@ -550,15 +564,16 @@ The database schema, one SQLAlchemy ORM model per table (one file per table), al
 
 ### `app/embedders`
 
-- `app/embedders/base.py` - the `Embedder` interface.
-- `app/embedders/fastembed.py` - local embeddings via fastembed.
-- `app/embedders/sentence-transformers.py` - local embeddings via huggingface.
-- `app/embedders/gemini.py` - the Gemini embedding implementation.
+- `app/embedders/base.py` - the `TextEmbedder` interface (`embed_text`) and `ImageEmbedder` (a `TextEmbedder` that also has `embed_images`, in a shared space so text queries match image chunks).
+- `app/embedders/fastembed.py` - local text embeddings via fastembed.
+- `app/embedders/clip.py` - `ClipImageEmbedder`: a CLIP cross-encoder (fastembed text + vision models) that embeds text and images into one shared space.
+- `app/embedders/gemini.py` - the Gemini text-embedding implementation.
 
 ### `app/retrievers`
 
-- `app/retrievers/base.py` - the `Retriever` interface (`retrieve(user_query, chat_id=None)`).
-- `app/retrievers/vector.py` - dense retrieval via Chroma (bounded to a chat through the stored `chat_id` vector metadata), re-loading chunk records from SQL.
+- `app/retrievers/base.py` - the `Retriever` interface (`retrieve(user_query, where=None)`).
+- `app/retrievers/text_vector.py` - dense retrieval of text chunks via the text vector collection (bounded to a chat through the stored `chat_id` metadata), re-loading chunk records from SQL.
+- `app/retrievers/image_vector.py` - dense retrieval of image chunks via the image (CLIP) collection; the query is embedded with the image embedder's text encoder.
 - `app/retrievers/sparse.py` - lexical retrieval via FTS5 (bounded to a chat with a SQL filter).
 - `app/retrievers/hybrid.py` - runs retrievers concurrently and merges rankings with RRF.
 
@@ -571,7 +586,8 @@ The database schema, one SQLAlchemy ORM model per table (one file per table), al
 
 Internal application models.
 
-- `app/models/chunk.py` - `IngestedChunk` and `RetrievedChunk`. Both carry `plugin` (the name of the plugin that produced the chunk), which is how retrieval routes chunks back to their finalizer; `RetrievedChunk` also carries `chat_id` (the chat the chunk was ingested into).
+- `app/models/content.py` - `ImageContent` (raw bytes + mime type) and `ContentPart` (text or image), the shared definition of an image used by the LLM (vision), the embedders, and the image chunk.
+- `app/models/chunk.py` - the chunk model. Two bases: `IngestedChunk` (identity + metadata + an optional `key`) and `RetrievedChunk` (adds lineage, score, and `chat_id`), each with a text and an image variant. `IngestedTextChunk` carries the text; `IngestedImageChunk` carries the image bytes (embedded as an image). `RetrievedTextChunk` carries the text; `RetrievedImageChunk` is a marker whose image is loaded on demand via `source_id` (not carried at retrieval). `plugin` names the producing plugin, which is how retrieval routes chunks back to their finalizer. `key` is an optional dedup identity: chunks sharing a non-null `key` are one logical unit (e.g. an image and its description), so retrieval keeps only the best of them; null (the default) means the chunk is its own unit.
 - `app/models/rag.py` - `RagAnswer` (query, answer, and `chunk_refs`: the chunks the answer cites, keyed by the citation marker `#[1]`).
 - `app/models/stream.py` - `StreamEvent`: the neutral item the answer stream yields (a wire event name plus a payload), so the API never sees the agent's event types.
 - `app/models/ingest.py` - the ingest progress event names (`chat` / `queued` / `started` / `stage` / `plugin_state` / `file_done` / `done` / `error`) and `INGEST_TERMINAL`. The neutral `Event` type itself lives in `app/utils/events.py`.
@@ -581,7 +597,7 @@ Internal application models.
 
 - `app/services/auth.py` - the auth domain (decoupled from the RAG services; needs only SQL storage): `register`, `login` (bcrypt-hashed passwords, opaque hashed tokens), and `verify_token`.
 - `app/services/chat.py` - user chats: `get_or_create` (ownership-checked), `create`, `delete`, `username_of`, and `list_chats` (a chat's ingested sources are derived from the documents table, so there is no separate bookkeeping).
-- `app/services/ingestion.py` - the pipeline driver: offers each file to all plugins, builds context/runtime (carrying the chat id), runs `on_ingestion_process` on every plugin, persists everything (source files, chunk records, vectors) stamped with the chat id, and re-ingests emitted files. It also manages stored files: `list_files(chat_id)` (origin uploads only), `list_file_chunks(origin_source_id, chat_id)` (a file's whole emission tree via `origin_source_id`), `delete_file(origin_source_id, chat_id)` (reverse ingestion for one file's tree: its chunks, vectors, SQL records, and stored files), and `delete_chat(chat_id)` (reverse ingestion for a whole chat: its chunks, vectors, document records, and stored files). It also reads stored files: `get_file_metadata(source_id)` (the document record) and `get_file_link(source_id)` (the URL to retrieve the file, built via the file storage's `create_link`). `ingest(file, chat_id, emitter=None)` optionally takes a `ProgressEmitter` and reports pipeline stages (`processing` / `saving` / `embedding`) to it as the file's tree is walked.
+- `app/services/ingestion.py` - the pipeline driver: offers each file to the plugins that accept it, builds context/runtime (carrying the chat id), runs `on_ingestion_process` on them, persists everything (source files, chunk records, vectors) stamped with the chat id, and re-ingests emitted files. It also manages stored files: `list_files(chat_id)` (origin uploads only), `list_file_chunks(origin_source_id, chat_id)` (a file's whole emission tree via `origin_source_id`), `delete_file(origin_source_id, chat_id)` (reverse ingestion for one file's tree: its chunks, vectors, SQL records, and stored files), and `delete_chat(chat_id)` (reverse ingestion for a whole chat: its chunks, vectors, document records, and stored files). It also reads stored files: `get_file_metadata(source_id)` (the document record) and `get_file_link(source_id)` (the URL to retrieve the file, built via the file storage's `create_link`). `ingest(file, chat_id, emitter=None)` optionally takes a `ProgressEmitter` and reports pipeline stages (`processing` / `saving` / `embedding`) to it as the file's tree is walked.
 - `app/services/retrieval.py` - runs the retriever (bounded to a chat when given), re-ranks the wide candidate pool with the `Reranker` (when one is configured), caps the result at the final `top_k`, and runs `on_retrieval_finalize` on every plugin for each chunk.
 - `app/services/rag.py` - the wrapper for ingestion and retrieval. It builds the `PluginRegistry` from the `plugins` option and the ingestion and retrieval services (which take the registry) from the collaborators it is given, and exposes those collaborators as public properties so the agent's tools can use them. `ingest(file_bytes, filename, content_type, description=None, chat_id=None)` builds the `IngestionFile` and delegates, returning the origin source id with the chunks. `retrieve(user_query, chat_id=None)` returns evidence bounded to that chat's chunks when given. It also delegates the file-management methods: `list_files`, `list_file_chunks`, `delete_file`, `delete_chat`, `get_file_metadata`, and `get_file_link`. It owns the background ingest queue: `start_ingest_queue()` / `stop_ingest_queue()` (called from the lifespan), `enqueue_ingest(files, chat_id)` (queues one job per file and returns the jobs), `get_ingest_job(job_id)`, and `list_ingest_jobs(chat_id)` (the chat's jobs, each with its buffered progress events).
 - `app/services/rag_agent.py` - the `RagAgentService`: the RAG-specific composition over the engine in `app/agent`. It takes the RAG service and the tools (or toolsets) at initialization, and owns the RAG system prompt (a template whose tools block is rendered from the passed tools and toolsets via `render_tool_blocks`, so each toolset's cross-tool instructions and every tool's spec appear, and whose Records section is rendered from the ingestion tables' own class and column docstrings via `agent_table_docs`, so the model knows the table structure and the origin/parent/source id semantics without a hand-maintained copy), the checkpointer (one thread per chat, so a conversation continues across runs and restarts and an interrupted run can resume), the per-run composition (a fresh graph per answer, executors scoped to the chat, the run's `EvidenceIndex`), the MCP merge on `initialize()`, and the translation of a run into neutral `StreamEvent`s (via `to_stream_event`). `ask(question, chat_id=)` returns the `RagAnswer` (its `chunk_refs` are the citations resolved by the engine's model node). `ask_stream(...)` yields the run ending with it. `chat_history(chat_id)` reads a chat's full conversation from the checkpointer (user questions, tool calls, tool results, and answers, in stream order). `stop(chat_id)` interrupts a chat's in-flight run (it tracks each run's driving task and cancels it, returning whether a run was stopped). `delete_chat(chat_id)` deletes a chat's RAG data (via the RAG service) and its conversation history (the checkpointer thread).
@@ -608,7 +624,7 @@ The composition root for the external collaborators. It builds the providers, st
 ## Design Principles
 
 - **The pipeline is the plugin lifecycle.** Services fire a fixed set of lifecycle events through the registry; plugins react by overriding the matching methods, with data (chunks, replacement chunks) or observations. There is no per-type dispatch in the system and no open event namespace.
-- **Plugins own document types.** A plugin decides which files it wants to manage (`accepts`) and overrides the ingestion/retrieval lifecycle methods for them. The system does not special-case document types and offers every file to all plugins.
+- **Plugins own document types.** A plugin decides which files it wants to manage (`accepts`) and overrides the ingestion/retrieval lifecycle methods for them. The system does not special-case document types: the registry offers each file to `on_ingestion_process` only for the plugins that accept it, so plugins never self-gate their processing.
 - **Services own chunk and source persistence.** Plugins generate and return data; the ingestion service is the only component that embeds, stores, or commits chunks, files, and vectors (the storages are exposed on the runtime for other plugin needs).
 - **Context and runtime, not globals.** Lifecycle methods receive everything they need per run: a read-only context (document details) plus a runtime (shared services such as the LLM, embedder, and storages, and `emit_file`). Plugin constructors take options only, never services.
 - **Decoupled stores and providers.** Storage and AI providers sit behind small interfaces (`FileStorage`, `SqlStorage`, `VectorStorage`, `LLMProvider`, `Embedder`).
@@ -636,7 +652,7 @@ It exercises the auth and chat services (against real local SQLite), the plugin 
 
 1. Create a module in `app/plugins/` with a `Plugin` subclass. The constructor may take plugin options (tunables, thresholds) but never services; the LLM is available on `runtime.llm` in both phases.
 2. Give it a unique `name` and implement `accepts(context)`: decide which files this plugin wants to manage. A plugin may accept as many document shapes as it likes; multiple plugins may accept the same file and will all run.
-3. Override `on_ingestion_process` to generate `IngestedChunk`s (set `plugin=self.name` on each so retrieval can route them back, and emit embedded content with `runtime.emit_file`). Do any parsing you need inside the method. The service never parses for you. Return the chunks. The service persists them.
+3. Override `on_ingestion_process` to generate `IngestedChunk`s (set `plugin=self.name` on each so retrieval can route them back, and emit embedded content with `runtime.emit_file`). Do any parsing you need inside the method. The service never parses for you. Return the chunks. The service persists them. The registry only calls this for files your `accepts` approves, so no self-gating is needed.
 4. Optionally override `on_retrieval_finalize` for query-aware enrichment: return a replacement chunk for chunks where `chunk.plugin == self.name`, or `None` otherwise.
 5. Add it to the `plugins` option of `RagService` in `app/container.py`, alongside the built-in `TextPlugin` and `TablePlugin`.
 

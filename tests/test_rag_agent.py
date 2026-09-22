@@ -16,7 +16,7 @@ from app.agent_tools import (
     resolve_citations,
 )
 from app.llm.base import RawDelta, RawResult, ToolCall
-from app.models.chunk import RetrievedChunk
+from app.models.chunk import RetrievedChunk, RetrievedTextChunk
 from app.models.rag import RagAnswer
 from app.models.stream import StreamEvent
 from app.retrievers.base import Retriever
@@ -43,7 +43,7 @@ class NoopRetriever(Retriever):
 
 
 def make_chunk(chunk_id: str, plugin: str = "text", text: str = "evidence"):
-    return RetrievedChunk(
+    return RetrievedTextChunk(
         chunk_id=chunk_id,
         source_id="s1",
         origin_source_id="s1",
@@ -322,7 +322,7 @@ def test_delete_chat_removes_the_history_and_the_rag_data(tmp_path):
     from app.store_file.local import LocalFileStorage
     from app.store_sql.local import LocalSqlStorage
 
-    from fakes import FakeEmbedder, FakeVectorStorage
+    from fakes import FakeEmbedder, FakeImageEmbedder, FakeVectorStorage
     from test_file_management import seed_tree
 
     sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
@@ -330,9 +330,11 @@ def test_delete_chat_removes_the_history_and_the_rag_data(tmp_path):
     vector_storage = FakeVectorStorage()
     rag = RagService(
         llm=FakeLLM("ok"),
-        embedder=FakeEmbedder(),
+        text_embedder=FakeEmbedder(),
+        image_embedder=FakeImageEmbedder(),
         retriever=NoopRetriever(),
-        vector_storage=vector_storage,
+        text_vector_storage=vector_storage,
+        image_vector_storage=FakeVectorStorage(),
         sql_storage=sql_storage,
         file_storage=file_storage,
     )
@@ -691,10 +693,12 @@ def test_rag_toolset_provides_the_rag_tools_and_workflow():
         "validate_chunk_as_structured_data",
         "perform_sql_to_document",
         "perform_sql_to_document_records",
+        "view_images",
     ]
     # The cross-tool orchestration lives in the toolset, not the tools.
     assert "search_documents" in toolset.instructions
     assert "perform_sql_to_document" in toolset.instructions
+    assert "view_images" in toolset.instructions
 
 
 def test_duplicate_tool_names_across_a_toolset_and_a_bare_tool_are_deduped():

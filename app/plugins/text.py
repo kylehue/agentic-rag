@@ -32,7 +32,7 @@ from unstructured_client.models.operations import (
 )
 from unstructured_client.models.shared import BodyCreateJob, InputFiles
 
-from app.models.chunk import IngestedChunk
+from app.models.chunk import IngestedTextChunk
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionContext
 from app.plugin.runtime import IngestionRuntime
@@ -125,10 +125,8 @@ class TextPlugin(Plugin):
         self,
         context: IngestionContext,
         runtime: IngestionRuntime,
-    ) -> list[IngestedChunk]:
-        if not self.accepts(context):
-            return []
-
+    ) -> list[IngestedTextChunk]:
+        # The registry only calls this for files the plugin accepts.
         await runtime.report_state("partitioning")
         elements = await asyncio.to_thread(
             self._partition,
@@ -141,7 +139,7 @@ class TextPlugin(Plugin):
             ignore_tables=self._ignore_tables,
         )
 
-        chunks: list[IngestedChunk] = []
+        chunks: list[IngestedTextChunk] = []
 
         if text_elements:
             raw_chunks = await asyncio.to_thread(
@@ -149,7 +147,7 @@ class TextPlugin(Plugin):
                 text_elements,
             )
             chunks.extend(
-                IngestedChunk(
+                IngestedTextChunk(
                     plugin=self.name,
                     text=chunk.text,
                     metadata={
@@ -163,12 +161,12 @@ class TextPlugin(Plugin):
                 for chunk in raw_chunks
             )
 
-        chunks.extend(
-            await _emit_image_chunks(
-                runtime,
-                elements,
-                image_positions,
-            )
+        # Extracted images are emitted as files; the image plugin indexes them
+        # (one image chunk + an optional description chunk).
+        await _emit_image_files(
+            runtime,
+            elements,
+            image_positions,
         )
 
         stem = Path(context.file.filename).stem
@@ -815,20 +813,17 @@ def _table_description(
 # --- embedded images ---
 
 
-async def _emit_image_chunks(
+async def _emit_image_files(
     runtime: IngestionRuntime,
     elements: Sequence[Element],
     image_positions: Sequence[tuple[int, Element]],
-) -> list[IngestedChunk]:
-    """Emit each extracted image as a file and index a chunk for its text.
+) -> None:
+    """Emit each extracted image as a file for the image plugin to index.
 
-    The image bytes are handed to ``runtime.emit_file`` so the file is
-    available for persistence/subprocessing instead of riding on the chunk.
-    The returned chunk carries the description (caption + nearby text), which
-    is what makes the figure searchable; its metadata links back to the
-    emitted filename.
+    The image bytes and a source description (caption + nearby text) are
+    handed to ``runtime.emit_file``; the image plugin turns each emitted file
+    into an image chunk plus an optional description chunk.
     """
-    chunks: list[IngestedChunk] = []
     index = 0
 
     for position, element in image_positions:
@@ -839,7 +834,6 @@ async def _emit_image_chunks(
         index += 1
         raw_bytes = base64.b64decode(encoded)
         mime_type = getattr(element.metadata, "image_mime_type", None) or "image/jpeg"
-        page_number = element.metadata.page_number
         filename = f"figure_{index}{_extension_for_mime(mime_type)}"
 
         description = _image_description(
@@ -855,19 +849,6 @@ async def _emit_image_chunks(
             file_bytes=raw_bytes,
             description=description,
         )
-
-        chunks.append(
-            IngestedChunk(
-                plugin="text",
-                text=description,
-                metadata={
-                    "source_page_number": page_number,
-                    "emitted_filename": filename,
-                },
-            )
-        )
-
-    return chunks
 
 
 def _image_description(

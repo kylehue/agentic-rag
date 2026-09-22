@@ -12,9 +12,11 @@ from app.agent_tools import (
     RunContext,
     SearchDocumentTool,
     ValidateChunkAsStructuredDataTool,
+    ViewImagesTool,
 )
 from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
-from app.models.chunk import RetrievedChunk
+from app.models.chunk import RetrievedChunk, RetrievedTextChunk
+from app.models.content import ImageContent
 from app.retrievers.base import Retriever
 from app.store_file.local import LocalFileStorage
 from app.store_sql.local import LocalSqlStorage
@@ -65,7 +67,7 @@ class FixedRetriever(Retriever):
 def make_chunk(
     chunk_id: str, plugin: str, text: str, chat_id: str | None = None, **metadata
 ) -> RetrievedChunk:
-    return RetrievedChunk(
+    return RetrievedTextChunk(
         chunk_id=chunk_id,
         source_id="s1",
         origin_source_id="s1",
@@ -248,7 +250,7 @@ def build_tools(tmp_path, *, retriever_chunks=None, chat_id=None):
         PerformSqlToDocumentTool(),
         PerformSqlToDocumentRecordsTool(),
     ]
-    context = RunContext(chat_id=chat_id, evidence=EvidenceIndex())
+    context = RunContext(chat_id=chat_id, query="q", evidence=EvidenceIndex())
     executors = {
         tool.name: tool.create_executor(rag_service, context) for tool in tools
     }
@@ -274,13 +276,15 @@ def test_search_documents_returns_chunk_ids_and_text(tmp_path):
     output = execute(tools, "search_documents", query="evidence?")
 
     assert retriever.queries == ["evidence?"]
-    # Each chunk is shown with its citation number and its ids (the model
-    # passes source_id to the other table tools), then its text.
+    # Each chunk is shown with its citation number, its ids, and its plugin
+    # (the model passes source_id to the other table tools), then its text.
     assert (
-        "[1] source_id=s1 chunk_id=c1 origin_source_id=s1\nfirst evidence" in output
+        "[1] source_id=s1 chunk_id=c1 origin_source_id=s1 plugin=text\n"
+        "first evidence" in output
     )
     assert (
-        "[2] source_id=s1 chunk_id=c2 origin_source_id=s1\nsecond evidence" in output
+        "[2] source_id=s1 chunk_id=c2 origin_source_id=s1 plugin=table\n"
+        "second evidence" in output
     )
 
 
@@ -493,3 +497,47 @@ def test_records_scoped_to_the_chat(tmp_path):
         sql="SELECT chunk_id, chat_id FROM __chunks__ WHERE source_id = 'tbl-src'",
     )
     assert "sales-chunk" in output
+
+
+def test_view_images_describes_with_the_reason(monkeypatch):
+    from types import SimpleNamespace
+
+    image = ImageContent(data=b"img", mime_type="image/png")
+
+    async def fake_get_image(source_id, chat_id):
+        return image
+
+    llm = FakeLLM("A chart showing total sales by region.")
+    rag = SimpleNamespace(get_image=fake_get_image, llm=llm)
+    context = RunContext(chat_id="c", query="q", evidence=EvidenceIndex())
+
+    executor = ViewImagesTool().create_executor(rag, context)
+    output = asyncio.run(
+        executor({"source_ids": ["s1"], "reason": "find the total in the chart"})
+    )
+
+    assert "A chart showing total sales by region." in output
+    # The reason is passed to the LLM so it focuses the description.
+    prompt = llm.prompts[0]
+    assert any(
+        isinstance(part, str) and "find the total in the chart" in part
+        for part in prompt
+    )
+
+
+def test_view_images_reports_missing_images(monkeypatch):
+    from types import SimpleNamespace
+
+    async def fake_get_image(source_id, chat_id):
+        return None
+
+    llm = FakeLLM("unused")
+    rag = SimpleNamespace(get_image=fake_get_image, llm=llm)
+    context = RunContext(chat_id="c", query="q", evidence=EvidenceIndex())
+
+    executor = ViewImagesTool().create_executor(rag, context)
+    output = asyncio.run(
+        executor({"source_ids": ["s1"], "reason": "describe it"})
+    )
+
+    assert "image not found" in output

@@ -282,7 +282,7 @@ class RagAgentService:
         nothing).
         """
         task = self._track_run(chat_id)
-        context = RunContext(chat_id=chat_id, evidence=EvidenceIndex())
+        context = RunContext(chat_id=chat_id, query=question, evidence=EvidenceIndex())
         try:
             graph, input_state, config = await self._prepare_run(question, context)
             answer = None
@@ -318,7 +318,7 @@ class RagAgentService:
         chat's chunks.
         """
         task = self._track_run(chat_id)
-        context = RunContext(chat_id=chat_id, evidence=EvidenceIndex())
+        context = RunContext(chat_id=chat_id, query=question, evidence=EvidenceIndex())
         try:
             graph, input_state, config = await self._prepare_run(question, context)
             # The stream is consumed to completion before the terminal frame

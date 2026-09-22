@@ -1,21 +1,21 @@
 from app.database import CHUNK_TABLE_NAME
-from app.embedders.base import Embedder
-from app.models.chunk import RetrievedChunk
+from app.embedders.base import TextEmbedder
+from app.models.chunk import RetrievedTextChunk
 from app.retrievers.base import Retriever
 from app.store_sql.base import SqlStorage
 from app.store_vector.base import VectorStorage
 
 
-class VectorRetriever(Retriever):
+class TextVectorRetriever(Retriever):
     def __init__(
         self,
-        embedder: Embedder,
-        vector_storage: VectorStorage,
+        embedder: TextEmbedder,
+        text_vector_storage: VectorStorage,
         sql_storage: SqlStorage,
         top_k: int,
     ):
         self._embedder = embedder
-        self._vector_storage = vector_storage
+        self._text_vector_storage = text_vector_storage
         self._sql_storage = sql_storage
         self._top_k = top_k
 
@@ -23,12 +23,12 @@ class VectorRetriever(Retriever):
         self,
         user_query: str,
         where: dict | None = None,
-    ) -> list[RetrievedChunk]:
+    ) -> list[RetrievedTextChunk]:
         # Retrieve from the vector database. The where map is the index's
         # own metadata filter (the chunks' stored metadata, e.g. their chat).
-        query_embedding = await self._embedder.embed_query(user_query)
+        query_embedding = (await self._embedder.embed_text([user_query]))[0]
 
-        vector_results = await self._vector_storage.search(
+        vector_results = await self._text_vector_storage.search(
             query_embedding,
             self._top_k,
             where=where,
@@ -50,7 +50,7 @@ class VectorRetriever(Retriever):
         chunks_by_id = {raw_chunk["chunk_id"]: raw_chunk for raw_chunk in raw_chunks}
 
         # Restore the original vector ranking order and attach scores.
-        results: list[RetrievedChunk] = []
+        results: list[RetrievedTextChunk] = []
 
         for vector_result in vector_results:
             raw_chunk = chunks_by_id.get(vector_result.chunk_id)
@@ -59,9 +59,10 @@ class VectorRetriever(Retriever):
                 continue
 
             results.append(
-                RetrievedChunk.from_dict(
+                RetrievedTextChunk.from_dict(
                     raw_chunk,
                     score=vector_result.score,
+                    text=raw_chunk["text"],
                 )
             )
 

@@ -1,5 +1,6 @@
 from app.agent_tools.base import AgentTool
 from app.agent_tools.common import object_schema
+from app.models.chunk import RetrievedTextChunk
 
 
 class SearchDocumentTool(AgentTool):
@@ -14,9 +15,9 @@ class SearchDocumentTool(AgentTool):
         return (
             "Search the ingested document corpus for evidence relevant to a "
             "query. Returns ranked chunks; each result lists its source_id, "
-            "chunk_id, origin_source_id, and the chunk text. For a table "
-            "chunk, the text is the table's description and a small sample, "
-            "not its full data."
+            "chunk_id, origin_source_id, plugin, and the chunk text (image "
+            "chunks have no text). For a table chunk, the text is the table's "
+            "description and a small sample, not its full data."
         )
 
     @property
@@ -52,12 +53,17 @@ class SearchDocumentTool(AgentTool):
                 index = context.evidence.register(
                     chunk.origin_source_id, chunk.chunk_id
                 )
-                lines.append(
+                header = (
                     f"[{index}] source_id={chunk.source_id} "
                     f"chunk_id={chunk.chunk_id} "
-                    f"origin_source_id={chunk.origin_source_id}\n"
-                    f"{chunk.text}"
+                    f"origin_source_id={chunk.origin_source_id} "
+                    f"plugin={chunk.plugin}"
                 )
+                if isinstance(chunk, RetrievedTextChunk):
+                    lines.append(f"{header}\n{chunk.text}")
+                else:
+                    # Image chunks carry no text.
+                    lines.append(header)
             return "\n\n".join(lines)
 
         return execute

@@ -4,10 +4,10 @@ from collections.abc import Sequence
 from google import genai
 from google.genai import types
 
-from app.embedders.base import Embedder
+from app.embedders.base import TextEmbedder
 
 
-class GeminiEmbedder(Embedder):
+class GeminiEmbedder(TextEmbedder):
     def __init__(self, *, api_key: str, model: str, batch_size: int):
         self._api_key = api_key
         self._model = model
@@ -21,11 +21,8 @@ class GeminiEmbedder(Embedder):
             self._client = genai.Client(api_key=self._api_key)
         return self._client
 
-    async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed_text(self, texts: Sequence[str]) -> list[list[float]]:
         return await self._embed(texts, task_type="RETRIEVAL_DOCUMENT")
-
-    async def embed_query(self, text: str) -> list[float]:
-        return (await self._embed([text], task_type="RETRIEVAL_QUERY"))[0]
 
     async def _embed(self, texts: Sequence[str], task_type: str) -> list[list[float]]:
         if not texts:

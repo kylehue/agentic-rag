@@ -6,7 +6,7 @@ import pytest
 
 from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
 from app.errors.document import InvalidDocumentError
-from app.models.chunk import RetrievedChunk
+from app.models.chunk import RetrievedChunk, RetrievedTextChunk
 from app.plugins.table import TablePlugin
 from app.plugins.text import TextPlugin
 from app.retrievers.base import Retriever
@@ -15,6 +15,7 @@ from app.services.rag import RagService
 from fakes import (
     FakeEmbedder,
     FakeFileStorage,
+    FakeImageEmbedder,
     FakeLLM,
     FakeSqlStorage,
     FakeVectorStorage,
@@ -52,15 +53,19 @@ def build_rag(llm=None, retriever=None, plugins=None):
         llm=llm,
         retriever=retriever if retriever is not None else NoopRetriever(),
         embedder=FakeEmbedder(),
-        vector_storage=FakeVectorStorage(),
+        image_embedder=FakeImageEmbedder(),
+        text_vector_storage=FakeVectorStorage(),
+        image_vector_storage=FakeVectorStorage(),
         sql_storage=FakeSqlStorage(),
         file_storage=FakeFileStorage(),
     )
     rag = RagService(
         llm=parts.llm,
-        embedder=parts.embedder,
+        text_embedder=parts.embedder,
+        image_embedder=parts.image_embedder,
         retriever=parts.retriever,
-        vector_storage=parts.vector_storage,
+        text_vector_storage=parts.text_vector_storage,
+        image_vector_storage=parts.image_vector_storage,
         sql_storage=parts.sql_storage,
         file_storage=parts.file_storage,
         plugins=plugins
@@ -107,8 +112,8 @@ def test_ingest_end_to_end_through_the_wrapper():
 
     # The chunk was embedded, vector-added (chat metadata), and recorded
     # (chat column).
-    assert parts.vector_storage.added[0][0] == [chunks[0].chunk_id]
-    assert parts.vector_storage.added[0][2] == [{"chat_id": "chat-1"}]
+    assert parts.text_vector_storage.added[0][0] == [chunks[0].chunk_id]
+    assert parts.text_vector_storage.added[0][2] == [{"chat_id": "chat-1"}]
     rows = parts.sql_storage.tables[CHUNK_TABLE_NAME]
     assert len(rows) == 1
     assert rows[0]["origin_source_id"] == rows[0]["source_id"] == origin_source_id
@@ -158,7 +163,7 @@ def test_plugins_option_limits_registered_plugins():
 
 
 def test_retrieve_delegates_through_the_wrapper():
-    chunk = RetrievedChunk(
+    chunk = RetrievedTextChunk(
         chunk_id="c1",
         source_id="s1",
         origin_source_id="s1",
@@ -194,7 +199,7 @@ class ScopedRetriever(Retriever):
 
 def test_retrieve_scoped_to_a_chat():
     chunks = [
-        RetrievedChunk(
+        RetrievedTextChunk(
             chunk_id="c1",
             source_id="s1",
             origin_source_id="s1",
@@ -203,7 +208,7 @@ def test_retrieve_scoped_to_a_chat():
             score=0.9,
             chat_id="chat-a",
         ),
-        RetrievedChunk(
+        RetrievedTextChunk(
             chunk_id="c2",
             source_id="s2",
             origin_source_id="s2",

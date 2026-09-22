@@ -9,11 +9,16 @@ from uuid import uuid4
 from sqlalchemy import ColumnElement, Table
 
 from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
-from app.embedders.base import Embedder
+from app.embedders.base import ImageEmbedder, TextEmbedder
 from app.errors.document import InvalidDocumentError
 from app.ingest.events import ProgressEmitter
 from app.llm.base import LLMProvider
-from app.models.chunk import IngestedChunk
+from app.models.chunk import (
+    IngestedChunk,
+    IngestedImageChunk,
+    IngestedTextChunk,
+)
+from app.models.content import ImageContent
 from app.plugin.context import IngestionContext, IngestionFile
 from app.plugin.registry import PluginRegistry
 from app.plugin.runtime import IngestionRuntime
@@ -34,15 +39,19 @@ class IngestionService:
         *,
         registry: PluginRegistry,
         llm: LLMProvider,
-        embedder: Embedder,
-        vector_storage: VectorStorage,
+        text_embedder: TextEmbedder,
+        image_embedder: ImageEmbedder,
+        text_vector_storage: VectorStorage,
+        image_vector_storage: VectorStorage,
         sql_storage: SqlStorage,
         file_storage: FileStorage,
     ) -> None:
         self._registry = registry
         self._llm = llm
-        self._embedder = embedder
-        self._vector_storage = vector_storage
+        self._text_embedder = text_embedder
+        self._image_embedder = image_embedder
+        self._text_vector_storage = text_vector_storage
+        self._image_vector_storage = image_vector_storage
         self._sql_storage = sql_storage
         self._file_storage = file_storage
 
@@ -105,8 +114,8 @@ class IngestionService:
                 context=context,
                 registry=self._registry,
                 llm=self._llm,
-                embedder=self._embedder,
-                vector_storage=self._vector_storage,
+                text_embedder=self._text_embedder,
+                text_vector_storage=self._text_vector_storage,
                 sql_storage=self._sql_storage,
                 file_storage=self._file_storage,
                 emitter=emitter,
@@ -230,7 +239,10 @@ class IngestionService:
         source_ids.add(origin_source_id)
 
         if chunk_ids:
-            await self._vector_storage.delete(chunk_ids)
+            # Image chunks live in the image collection; text chunks in the text
+            # one. Delete from both (each ignores ids it does not hold).
+            await self._text_vector_storage.delete(chunk_ids)
+            await self._image_vector_storage.delete(chunk_ids)
         if chunk_rows:
             await self._sql_storage.delete(
                 CHUNK_TABLE_NAME, condition=chunk_condition
@@ -264,7 +276,10 @@ class IngestionService:
         )
         chunk_ids = [row["chunk_id"] for row in chunk_rows]
         if chunk_ids:
-            await self._vector_storage.delete(chunk_ids)
+            # Delete from both collections (image + text); each ignores ids
+            # it does not hold.
+            await self._text_vector_storage.delete(chunk_ids)
+            await self._image_vector_storage.delete(chunk_ids)
         if chunk_rows:
             await self._sql_storage.delete(
                 CHUNK_TABLE_NAME, condition=chunk_condition
@@ -297,6 +312,22 @@ class IngestionService:
         if document is None:
             return None
         return self._file_storage.create_link(document["file_path"])
+
+    async def get_image(
+        self, source_id: str, chat_id: str | None = None
+    ) -> ImageContent | None:
+        """The stored image for a source id, scoped to the chat.
+
+        Loads the file bytes from file storage. Returns None if the file is
+        absent or belongs to a different chat.
+        """
+        document = await self.get_file_metadata(source_id)
+        if document is None:
+            return None
+        if chat_id is not None and document.get("chat_id") != chat_id:
+            return None
+        data = await self._file_storage.read_bytes(document["file_path"])
+        return ImageContent(data=data, mime_type=document["file_content_type"])
 
     async def list_files(self, chat_id: str | None = None) -> list[dict]:
         """The origin files in the chat (what the user uploaded), excluding
@@ -403,22 +434,54 @@ class IngestionService:
         even though chunks from several files are saved in one batch. Chunk
         metadata is saved as-is.
         """
-        chunks = [chunk for _, chunk in records]
-
-        embeddings = await self._embedder.embed_documents(
-            [chunk.text for chunk in chunks]
-        )
-        # The chat id travels as vector metadata so the vector leg of
+        # The chat id travels as vector metadata so the vector legs of
         # retrieval can be bounded to a chat at the index.
-        metadatas = [
-            {"chat_id": context.chat_id} if context.chat_id else {}
-            for context, _ in records
+        def metas(records_subset):
+            return [
+                {"chat_id": context.chat_id} if context.chat_id else {}
+                for context, _ in records_subset
+            ]
+
+        # Route chunks by modality: text chunks go to the text embedder and
+        # the text collection; image chunks to the image embedder and the
+        # image collection. The SQL records are the same either way.
+        text_records = [
+            (context, chunk)
+            for context, chunk in records
+            if isinstance(chunk, IngestedTextChunk)
         ]
-        await self._vector_storage.add(
-            [chunk.chunk_id for chunk in chunks],
-            embeddings,
-            metadatas=metadatas,
-        )
+        image_records = [
+            (context, chunk)
+            for context, chunk in records
+            if isinstance(chunk, IngestedImageChunk)
+        ]
+
+        if text_records:
+            text_chunks = [chunk for _, chunk in text_records]
+            text_embeddings = await self._text_embedder.embed_text(
+                [chunk.text for chunk in text_chunks]
+            )
+            await self._text_vector_storage.add(
+                [chunk.chunk_id for chunk in text_chunks],
+                text_embeddings,
+                metadatas=metas(text_records),
+            )
+
+        if image_records:
+            image_chunks = [chunk for _, chunk in image_records]
+            # IngestedImageChunk guarantees a non-None image (checked in
+            # __post_init__); the filter is only to satisfy the type checker.
+            images = [
+                chunk.image
+                for chunk in image_chunks
+                if chunk.image is not None
+            ]
+            image_embeddings = await self._image_embedder.embed_images(images)
+            await self._image_vector_storage.add(
+                [chunk.chunk_id for chunk in image_chunks],
+                image_embeddings,
+                metadatas=metas(image_records),
+            )
 
         rows = [
             {
@@ -429,9 +492,12 @@ class IngestionService:
                 ),
                 "origin_source_id": context.origin_file.source_id,
                 "plugin": chunk.plugin,
-                "text": chunk.text,
+                # Image chunks carry no searchable text; their description is
+                # a separate text chunk.
+                "text": chunk.text if isinstance(chunk, IngestedTextChunk) else "",
                 "metadata": chunk.metadata,
                 "chat_id": context.chat_id,
+                "key": chunk.key,
             }
             for context, chunk in records
         ]

@@ -16,11 +16,13 @@ ToolExecutor = Callable[[dict], Awaitable[str]]
 class RunContext:
     """Per-answer state handed to the tools when their executors are built.
 
-    ``chat_id`` scopes lookups to the chat; ``evidence`` is the index the
-    chunk-surfacing tools register into, so the answer can cite a chunk by a
-    small integer the service later resolves to the real ids."""
+    ``chat_id`` scopes lookups to the chat; ``query`` is the user's question
+    for this run; ``evidence`` is the index the chunk-surfacing tools register
+    into, so the answer can cite a chunk by a small integer the service later
+    resolves to the real ids."""
 
     chat_id: str | None
+    query: str
     evidence: EvidenceIndex
 
 

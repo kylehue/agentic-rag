@@ -10,7 +10,7 @@ from typing import Any
 import pandas as pd
 
 from app.llm.base import CompletionOptions, LLMProvider
-from app.models.chunk import IngestedChunk
+from app.models.chunk import IngestedTextChunk
 from app.plugin.base import Plugin
 from app.plugin.context import IngestionContext
 from app.plugin.runtime import IngestionRuntime
@@ -73,11 +73,11 @@ class TablePlugin(Plugin):
         self,
         context: IngestionContext,
         runtime: IngestionRuntime,
-    ) -> list[IngestedChunk]:
-        """Generate one chunk per table, enriched by a workbook-level LLM description."""
-        if not self.accepts(context):
-            return []
+    ) -> list[IngestedTextChunk]:
+        """Generate one chunk per table, enriched by a workbook-level LLM description.
 
+        The registry only calls this for files the plugin accepts.
+        """
         await runtime.report_state("reading_tables")
         tables = await asyncio.to_thread(
             self._read_tables,
@@ -101,13 +101,13 @@ class TablePlugin(Plugin):
             context.file.description,
         )
 
-        chunks: list[IngestedChunk] = []
+        chunks: list[IngestedTextChunk] = []
 
         for index, table in enumerate(tables):
             analysis = table_analyses[index]
 
             chunks.append(
-                IngestedChunk(
+                IngestedTextChunk(
                     plugin=self.name,
                     text=self._analysis_text(
                         table_name=table.name,

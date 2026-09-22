@@ -9,7 +9,13 @@ from app.services.ingestion import IngestionService
 from app.store_file.local import LocalFileStorage
 from app.store_sql.local import LocalSqlStorage
 
-from fakes import FakeEmbedder, FakeLLM, FakeVectorStorage, build_rag_service
+from fakes import (
+    FakeEmbedder,
+    FakeImageEmbedder,
+    FakeLLM,
+    FakeVectorStorage,
+    build_rag_service,
+)
 
 DOCUMENTS = DOCUMENT_METADATA_TABLE_NAME
 CHUNKS = CHUNK_TABLE_NAME
@@ -29,8 +35,10 @@ def build_service(tmp_path):
     service = IngestionService(
         registry=PluginRegistry(),
         llm=FakeLLM(),
-        embedder=FakeEmbedder(),
-        vector_storage=vector_storage,
+        text_embedder=FakeEmbedder(),
+        image_embedder=FakeImageEmbedder(),
+        text_vector_storage=vector_storage,
+        image_vector_storage=FakeVectorStorage(),
         sql_storage=sql_storage,
         file_storage=file_storage,
     )
@@ -367,9 +375,11 @@ def test_rag_service_delegates_file_management(tmp_path):
     vector_storage = FakeVectorStorage()
     rag = RagService(
         llm=FakeLLM(),
-        embedder=FakeEmbedder(),
+        text_embedder=FakeEmbedder(),
+        image_embedder=FakeImageEmbedder(),
         retriever=NoopRetriever(),
-        vector_storage=vector_storage,
+        text_vector_storage=vector_storage,
+        image_vector_storage=FakeVectorStorage(),
         sql_storage=sql_storage,
         file_storage=file_storage,
     )
@@ -398,9 +408,11 @@ def test_rag_service_delegates_file_metadata_and_link(tmp_path):
     vector_storage = FakeVectorStorage()
     rag = RagService(
         llm=FakeLLM(),
-        embedder=FakeEmbedder(),
+        text_embedder=FakeEmbedder(),
+        image_embedder=FakeImageEmbedder(),
         retriever=NoopRetriever(),
-        vector_storage=vector_storage,
+        text_vector_storage=vector_storage,
+        image_vector_storage=FakeVectorStorage(),
         sql_storage=sql_storage,
         file_storage=file_storage,
     )

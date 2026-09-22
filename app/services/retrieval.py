@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 from app.llm.base import LLMProvider
 from app.models.chunk import RetrievedChunk
 from app.plugin.context import RetrievalContext
@@ -53,8 +55,10 @@ class RetrievalService:
         if self._reranker is not None:
             chunks = await self._reranker.rerank(user_query, chunks)
 
-        # The retrievers fetch a wide candidate pool; keep only the final top_k.
-        chunks = chunks[: self._top_k]
+        # The retrievers fetch a wide candidate pool; keep the final top_k,
+        # at most one chunk per dedup key, so one logical unit (e.g. an image
+        # and its description) cannot occupy two of the slots.
+        chunks = self._top_diverse(chunks, self._top_k)
 
         finalized: list[RetrievedChunk] = []
 
@@ -73,3 +77,25 @@ class RetrievalService:
         await self._registry.retrieval_completed(finalized, context, runtime)
 
         return finalized
+
+    @staticmethod
+    def _top_diverse(
+        chunks: Sequence[RetrievedChunk], top_k: int
+    ) -> list[RetrievedChunk]:
+        """The top_k chunks, at most one per non-null dedup key.
+
+        Chunks arrive best-first, so the first chunk seen for a key is its
+        best. A chunk whose key an earlier (better) chunk already used is
+        dropped; chunks with a null key never dedup against anything.
+        """
+        seen: set[str] = set()
+        result: list[RetrievedChunk] = []
+        for chunk in chunks:
+            if len(result) >= top_k:
+                break
+            if chunk.key is not None:
+                if chunk.key in seen:
+                    continue
+                seen.add(chunk.key)
+            result.append(chunk)
+        return result

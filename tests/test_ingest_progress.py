@@ -14,7 +14,7 @@ from app.store_sql.local import LocalSqlStorage
 from app.utils.events import Event, EventBus
 from app.utils.queue import JobQueue
 
-from fakes import FakeEmbedder, FakeLLM, FakeVectorStorage
+from fakes import FakeEmbedder, FakeImageEmbedder, FakeLLM, FakeVectorStorage
 
 ANALYSIS = {
     "workbook_description": "Regional sales figures.",
@@ -168,8 +168,10 @@ def _build_service(tmp_path, plugins):
     service = IngestionService(
         registry=PluginRegistry(),
         llm=FakeLLM(json.dumps(ANALYSIS)),
-        embedder=FakeEmbedder(),
-        vector_storage=FakeVectorStorage(),
+        text_embedder=FakeEmbedder(),
+        image_embedder=FakeImageEmbedder(),
+        text_vector_storage=FakeVectorStorage(),
+        image_vector_storage=FakeVectorStorage(),
         sql_storage=sql_storage,
         file_storage=file_storage,
     )
@@ -230,9 +232,11 @@ def test_rag_service_enqueue_and_process_emits_full_progress(tmp_path):
     file_storage = LocalFileStorage(storage_dir=tmp_path / "file")
     rag = RagService(
         llm=FakeLLM(json.dumps(ANALYSIS)),
-        embedder=FakeEmbedder(),
+        text_embedder=FakeEmbedder(),
+        image_embedder=FakeImageEmbedder(),
         retriever=NoopRetriever(),
-        vector_storage=FakeVectorStorage(),
+        text_vector_storage=FakeVectorStorage(),
+        image_vector_storage=FakeVectorStorage(),
         sql_storage=sql_storage,
         file_storage=file_storage,
         plugins=[TablePlugin()],
@@ -267,9 +271,11 @@ def test_enqueue_ingest_makes_one_job_per_file(tmp_path):
     sql_storage = LocalSqlStorage(storage_dir=tmp_path / "sql")
     rag = RagService(
         llm=FakeLLM(json.dumps(ANALYSIS)),
-        embedder=FakeEmbedder(),
+        text_embedder=FakeEmbedder(),
+        image_embedder=FakeImageEmbedder(),
         retriever=NoopRetriever(),
-        vector_storage=FakeVectorStorage(),
+        text_vector_storage=FakeVectorStorage(),
+        image_vector_storage=FakeVectorStorage(),
         sql_storage=sql_storage,
         file_storage=LocalFileStorage(storage_dir=tmp_path / "file"),
         plugins=[TablePlugin()],
@@ -301,9 +307,11 @@ def test_enqueue_ingest_makes_one_job_per_file(tmp_path):
 def test_list_ingest_jobs_returns_the_chats_jobs(tmp_path):
     rag = RagService(
         llm=FakeLLM(),
-        embedder=FakeEmbedder(),
+        text_embedder=FakeEmbedder(),
+        image_embedder=FakeImageEmbedder(),
         retriever=NoopRetriever(),
-        vector_storage=FakeVectorStorage(),
+        text_vector_storage=FakeVectorStorage(),
+        image_vector_storage=FakeVectorStorage(),
         sql_storage=LocalSqlStorage(storage_dir=tmp_path / "sql"),
         file_storage=LocalFileStorage(storage_dir=tmp_path / "file"),
     )

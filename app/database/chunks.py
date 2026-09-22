@@ -49,3 +49,8 @@ class Chunk(Base):
         nullable=True,
         doc="The chat this chunk was ingested into. Null for data predating chats.",
     )
+    key = Column(
+        String,
+        nullable=True,
+        doc="Optional dedup identity. Chunks sharing a non-null key are the same logical unit (e.g. an image and its description), so retrieval keeps only the best of them. Null means the chunk is its own unit.",
+    )

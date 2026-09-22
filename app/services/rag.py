@@ -1,10 +1,11 @@
 from collections.abc import Sequence
 
 from app.core.config import settings
-from app.embedders.base import Embedder
+from app.embedders.base import ImageEmbedder, TextEmbedder
 from app.ingest.events import ProgressEmitter
 from app.llm.base import LLMProvider
 from app.models.chunk import IngestedChunk, RetrievedChunk
+from app.models.content import ImageContent
 from app.models.ingest import (
     INGEST_CHAT,
     INGEST_ERROR,
@@ -29,9 +30,11 @@ class RagService:
         self,
         *,
         llm: LLMProvider,
-        embedder: Embedder,
+        text_embedder: TextEmbedder,
+        image_embedder: ImageEmbedder,
         retriever: Retriever,
-        vector_storage: VectorStorage,
+        text_vector_storage: VectorStorage,
+        image_vector_storage: VectorStorage,
         sql_storage: SqlStorage,
         file_storage: FileStorage,
         plugins: Sequence[Plugin] | None = None,
@@ -43,17 +46,21 @@ class RagService:
             registry.register(plugin)
 
         self._llm = llm
-        self._embedder = embedder
+        self._text_embedder = text_embedder
+        self._image_embedder = image_embedder
         self._retriever = retriever
         self._reranker = reranker
-        self._vector_storage = vector_storage
+        self._text_vector_storage = text_vector_storage
+        self._image_vector_storage = image_vector_storage
         self._sql_storage = sql_storage
         self._file_storage = file_storage
         self._ingestion_service = IngestionService(
             registry=registry,
             llm=llm,
-            embedder=embedder,
-            vector_storage=vector_storage,
+            text_embedder=text_embedder,
+            image_embedder=image_embedder,
+            text_vector_storage=text_vector_storage,
+            image_vector_storage=image_vector_storage,
             sql_storage=sql_storage,
             file_storage=file_storage,
         )
@@ -81,8 +88,12 @@ class RagService:
         return self._llm
 
     @property
-    def embedder(self) -> Embedder:
-        return self._embedder
+    def text_embedder(self) -> TextEmbedder:
+        return self._text_embedder
+
+    @property
+    def image_embedder(self) -> ImageEmbedder:
+        return self._image_embedder
 
     @property
     def retriever(self) -> Retriever:
@@ -93,8 +104,12 @@ class RagService:
         return self._reranker
 
     @property
-    def vector_storage(self) -> VectorStorage:
-        return self._vector_storage
+    def text_vector_storage(self) -> VectorStorage:
+        return self._text_vector_storage
+
+    @property
+    def image_vector_storage(self) -> VectorStorage:
+        return self._image_vector_storage
 
     @property
     def sql_storage(self) -> SqlStorage:
@@ -200,6 +215,12 @@ class RagService:
     async def get_file_link(self, source_id: str) -> str | None:
         """The URL at which one stored file can be retrieved, or None."""
         return await self._ingestion_service.get_file_link(source_id)
+
+    async def get_image(
+        self, source_id: str, chat_id: str | None = None
+    ) -> ImageContent | None:
+        """The stored image for a source id, scoped to the chat."""
+        return await self._ingestion_service.get_image(source_id, chat_id)
 
     async def list_files(self, chat_id: str | None = None) -> list[dict]:
         """The origin files (user uploads) in the chat, excluding emitted files."""

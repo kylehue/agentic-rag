@@ -236,7 +236,7 @@ def test_page_furniture_between_tables_does_not_break_the_run():
     ]
 
 
-def test_image_is_emitted_as_a_file_and_indexed_by_a_text_chunk():
+def test_image_is_emitted_as_a_file_for_the_image_plugin():
     image_bytes = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
     elements = [
         make_text_element("An image follows.", page_number=1),
@@ -252,24 +252,19 @@ def test_image_is_emitted_as_a_file_and_indexed_by_a_text_chunk():
         context, TextPlugin(), partition_result=elements
     )
 
-    image_chunks = [c for c in chunks if "A chart of sales." in c.text]
-    assert len(image_chunks) == 1
-    image = image_chunks[0]
-    assert image.plugin == "text"
-    # The chunk carries the description (caption + nearby text), not the bytes.
-    assert "A chart of sales." in image.text
-    assert "An image follows." in image.text
-    assert "followed by more text" in image.text
-    assert image.metadata["source_page_number"] == 1
-    assert image.metadata["emitted_filename"] == "figure_1.jpg"
+    # The text plugin no longer indexes images; it only emits the file (with
+    # the caption + nearby text as the source description) for the image
+    # plugin. So no image-derived text chunk is produced here.
+    assert all("A chart of sales." not in c.text for c in chunks)
 
-    # The bytes ride on an emitted file, not on the chunk.
+    # The bytes ride on an emitted file, not on any chunk.
     emitted = parts.runtime.pop_emitted_files()
     assert len(emitted) == 1
     assert emitted[0].filename == "figure_1.jpg"
     assert emitted[0].content_type == "image/jpeg"
     assert emitted[0].file_bytes == image_bytes
     assert "A chart of sales." in (emitted[0].description or "")
+    assert "An image follows." in (emitted[0].description or "")
 
 
 def test_image_without_extracted_bytes_emits_and_indexes_nothing():

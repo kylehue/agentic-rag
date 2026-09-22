@@ -11,9 +11,6 @@ from app.database import CHUNK_TABLE_NAME, DOCUMENT_METADATA_TABLE_NAME
 from app.store_file.base import FileStorage
 from app.store_sql.base import SqlStorage
 
-# Row caps keep tool output small enough for the model's context.
-SQL_MAX_ROWS = 5
-
 # The stored-file extensions that mark a source as tabular data.
 TABLE_EXTENSIONS = frozenset({"csv", "xlsx", "xls"})
 

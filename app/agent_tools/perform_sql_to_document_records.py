@@ -2,11 +2,15 @@ import json
 import re
 
 from app.agent_tools.base import AgentTool
-from app.agent_tools.common import SQL_MAX_ROWS, object_schema
+from app.agent_tools.common import object_schema
 
 # Chat ids are system-generated (uuid4 hex); this guard keeps the value that
 # gets inlined into the wrapped query free of SQL metacharacters.
 _CHAT_ID_SHAPE = re.compile(r"[\w-]+")
+
+# The query's row cap lives in the SQL itself, so a LIMIT clause is required
+# and enforced here rather than applied on the tool side.
+_HAS_LIMIT = re.compile(r"\blimit\b", re.IGNORECASE)
 
 
 class PerformSqlToDocumentRecordsTool(AgentTool):
@@ -22,7 +26,9 @@ class PerformSqlToDocumentRecordsTool(AgentTool):
             "Run a read-only SELECT query against the RAG document database "
             "(the chunk and document records described in the Records section). "
             "Always include chat_id in the SELECT list; results are bounded to "
-            "the current chat, and a query without it is rejected."
+            "the current chat, and a query without it is rejected. The query "
+            "must end with a LIMIT clause; pick the limit for the question, not "
+            "for the table: only as many rows as the answer needs."
         )
 
     @property
@@ -31,12 +37,11 @@ class PerformSqlToDocumentRecordsTool(AgentTool):
             {
                 "sql": {
                     "type": "string",
-                    "description": "A read-only SQL SELECT query.",
-                },
-                "limit": {
-                    "type": "integer",
                     "description": (
-                        f"Maximum rows to return (default {SQL_MAX_ROWS})."
+                        "A read-only SQL SELECT query, with chat_id in the "
+                        "SELECT list and a LIMIT clause. Choose the limit "
+                        "smartly: the fewest rows that answer the question "
+                        "(a COUNT needs 1). Extra rows just crowd the context."
                     ),
                 },
             },
@@ -55,11 +60,11 @@ class PerformSqlToDocumentRecordsTool(AgentTool):
             if first_word != "SELECT":
                 return "Error: only read-only SELECT queries are allowed."
 
-            try:
-                limit = int(arguments.get("limit") or SQL_MAX_ROWS)
-            except (TypeError, ValueError):
-                limit = SQL_MAX_ROWS
-            limit = max(1, min(limit, SQL_MAX_ROWS))
+            if not _HAS_LIMIT.search(sql):
+                return (
+                    "Error: include a LIMIT clause in the query, sized to how "
+                    "many rows the question actually needs."
+                )
 
             if context.chat_id is not None:
                 if not _CHAT_ID_SHAPE.fullmatch(context.chat_id):
@@ -78,7 +83,8 @@ class PerformSqlToDocumentRecordsTool(AgentTool):
                     f"WHERE scoped.chat_id = '{context.chat_id}'"
                 )
 
-            rows = await sql_storage.query(sql, limit)
+            # No tool-side cap: the LIMIT clause in the SQL is the row bound.
+            rows = await sql_storage.query(sql, None)
             if not rows:
                 return "No rows."
 

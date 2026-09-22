@@ -429,7 +429,7 @@ def test_records_queries_the_chunks_table(tmp_path):
     output = execute(
         tools,
         "perform_sql_to_document_records",
-        sql="SELECT chunk_id FROM __chunks__ WHERE source_id = 'tbl-src'",
+        sql="SELECT chunk_id FROM __chunks__ WHERE source_id = 'tbl-src' LIMIT 5",
     )
 
     assert "sales-chunk" in output
@@ -443,7 +443,7 @@ def test_records_numbers_chunk_rows_so_they_are_citable(tmp_path):
         "perform_sql_to_document_records",
         sql=(
             "SELECT chunk_id, origin_source_id, chat_id FROM __chunks__ "
-            "WHERE source_id = 'tbl-src'"
+            "WHERE source_id = 'tbl-src' LIMIT 5"
         ),
     )
 
@@ -486,7 +486,7 @@ def test_records_scoped_to_the_chat(tmp_path):
     output = execute(
         tools,
         "perform_sql_to_document_records",
-        sql="SELECT chunk_id FROM __chunks__",
+        sql="SELECT chunk_id FROM __chunks__ LIMIT 5",
     )
     assert "must include chat_id" in output
 
@@ -494,9 +494,24 @@ def test_records_scoped_to_the_chat(tmp_path):
     output = execute(
         tools,
         "perform_sql_to_document_records",
-        sql="SELECT chunk_id, chat_id FROM __chunks__ WHERE source_id = 'tbl-src'",
+        sql=(
+            "SELECT chunk_id, chat_id FROM __chunks__ "
+            "WHERE source_id = 'tbl-src' LIMIT 5"
+        ),
     )
     assert "sales-chunk" in output
+
+
+def test_records_requires_a_limit_clause(tmp_path):
+    tools, _ = build_tools(tmp_path)
+
+    output = execute(
+        tools,
+        "perform_sql_to_document_records",
+        sql="SELECT chunk_id FROM __chunks__ WHERE source_id = 'tbl-src'",
+    )
+
+    assert "include a LIMIT clause" in output
 
 
 def test_view_images_describes_with_the_reason(monkeypatch):

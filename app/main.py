@@ -1,3 +1,4 @@
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.auth import router as auth_router
@@ -18,9 +19,7 @@ register_exception_handlers(app)
 # cross-site requests from carrying it; override CORS_ORIGINS to lock it
 # down further.
 _cors_origins = [
-    origin.strip()
-    for origin in settings.CORS_ORIGINS.split(",")
-    if origin.strip()
+    origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -35,3 +34,5 @@ app.include_router(auth_router)
 app.include_router(chats_router)
 app.include_router(rag_router)
 app.include_router(rag_agent_router)
+
+logging.basicConfig(level=logging.INFO)

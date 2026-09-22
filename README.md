@@ -19,14 +19,16 @@ The application is designed around separate ingestion, retrieval, and answer-gen
     - [Retrieval Pipeline](#retrieval-pipeline)
     - [Answer Generation](#answer-generation)
   - [Users and Chats](#users-and-chats)
+    - [Authentication](#authentication)
+    - [Chats](#chats)
   - [Plugin Lifecycle](#plugin-lifecycle)
   - [Context and Runtime](#context-and-runtime)
   - [File Emission and Subprocess](#file-emission-and-subprocess)
     - [File descriptions](#file-descriptions)
     - [Text Plugin: Reassembling tables split across pages](#text-plugin-reassembling-tables-split-across-pages)
-   - [Project Structure](#project-structure)
-     - [`app/agent`](#appagent)
-     - [`app/agent_tools`](#appagent_tools)
+  - [Project Structure](#project-structure)
+    - [`app/agent`](#appagent)
+    - [`app/agent_tools`](#appagent_tools)
     - [`app/mcp`](#appmcp)
     - [`app/ingest`](#appingest)
     - [`app/plugin`](#appplugin)
@@ -219,7 +221,7 @@ Retrieval runs three searches in parallel and merges their rankings:
 - **Text lexical search** runs full-text search (FTS5) over the chunk text in SQL.
 - **Image semantic search** embeds the question with the image embedder's text encoder (CLIP) and finds the nearest image-chunk vectors in the image collection.
 
-The rankings are combined with Reciprocal Rank Fusion (RRF). RRF merges ranks instead of scores, so the searches contribute to one list even though they measure relevance differently. The retrievers fetch a **wide** candidate pool (50 each, fused to 50); that pool is then **re-ranked** by a cross-encoder reranker, which scores each (question, text-chunk) pair directly and reorders the text candidates by true relevance (a cheap fused ranking is corrected into a finer one). Image chunks have no text to score, so they keep their retrieval score. The result is then **de-duplicated by `key`** (at most one chunk per non-null key, so an image and its description occupy a single slot) and capped at the final `RETRIEVAL_TOP_K` (5); those top chunks pass through a plugin finalization step (see Plugin Lifecycle) before they are returned.
+The rankings are combined with Reciprocal Rank Fusion (RRF). RRF merges ranks instead of scores, so the searches contribute to one list even though they measure relevance differently. The retrievers fetch a **wide** candidate pool (50 each, fused to 50); that pool is then **re-ranked** by a cross-encoder reranker, which scores each (question, text-chunk) pair directly and reorders the text candidates by true relevance (a cheap fused ranking is corrected into a finer one). Image chunks have no text to score, so they keep the retrievers' ranking; the re-ranked text ranking and the untouched image ranking are then merged back together with RRF (rank-based, so the two different score systems are never mixed). The result is then **de-duplicated by `key`** (at most one chunk per non-null key, so an image and its description occupy a single slot) and capped at the final `RETRIEVAL_TOP_K` (5); those top chunks pass through a plugin finalization step (see Plugin Lifecycle) before they are returned.
 
 ### Answer Generation
 
@@ -579,8 +581,8 @@ The database schema, one SQLAlchemy ORM model per table (one file per table), al
 
 ### `app/rerankers`
 
-- `app/rerankers/base.py` - the `Reranker` interface (`rerank(query, chunks)`): re-scores and reorders the retriever's candidate chunks by relevance, preserving the set.
-- `app/rerankers/fastembed.py` - `FastReranker`, a local cross-encoder reranker via fastembed (ONNX, no API key). The model is created lazily and inference runs in a worker thread; it scores each (query, chunk) pair and returns the chunks re-ranked descending.
+- `app/rerankers/base.py` - the `Reranker` interface (`rerank(query, chunks)`): re-orders the retriever's candidate chunks by relevance, preserving the set.
+- `app/rerankers/fastembed.py` - `FastReranker`, a local cross-encoder reranker via fastembed (ONNX, no API key). The model is loaded eagerly and inference runs in a worker thread. It scores the (query, text-chunk) pairs to produce a re-ranked text ranking; image chunks have no text to score, so they keep the retrievers' ranking. The two rankings are merged back with RRF (rank-based) so the differing score systems are never mixed, and the chunks are returned re-ranked descending.
 
 ### `app/models`
 

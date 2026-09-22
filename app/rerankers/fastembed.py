@@ -6,6 +6,7 @@ from fastembed.rerank.cross_encoder import TextCrossEncoder
 
 from app.models.chunk import RetrievedChunk, RetrievedTextChunk
 from app.rerankers.base import Reranker
+from app.utils.ranking import rrf
 
 
 def _score(
@@ -47,13 +48,14 @@ class FastReranker(Reranker):
             raise ValueError("Cannot rerank with an empty query")
 
         # The cross-encoder scores (query, text) pairs, so it can only re-rank
-        # text chunks. Image chunks have no text: they keep their retrieval
-        # score. (Note the two score scales differ, so re-ranked text chunks
-        # generally order above image chunks.)
+        # text chunks. Image chunks have no text to score, so they keep the
+        # ranking the retrievers produced. The two are on different scales
+        # (cross-encoder scores vs. the retrievers' RRF scores), so they are
+        # combined by RRF over their ranks, never by mixing raw scores.
         text_chunks = [c for c in chunks if isinstance(c, RetrievedTextChunk)]
         image_chunks = [c for c in chunks if not isinstance(c, RetrievedTextChunk)]
 
-        ranked: list[RetrievedChunk] = []
+        text_ranking: list[RetrievedChunk] = []
         if text_chunks:
             texts = [chunk.text for chunk in text_chunks]
             scores = await asyncio.to_thread(_score, self._model, query, texts, self._batch_size)
@@ -61,11 +63,15 @@ class FastReranker(Reranker):
                 raise RuntimeError(
                     "Reranker returned an unexpected number of scores"
                 )
-            ranked.extend(
-                replace(chunk, score=score)
-                for chunk, score in zip(text_chunks, scores)
-            )
-        ranked.extend(image_chunks)
+            # The cross-encoder ranking, best to worst.
+            text_ranking = [
+                chunk
+                for chunk, _ in sorted(
+                    zip(text_chunks, scores), key=lambda pair: pair[1], reverse=True
+                )
+            ]
 
-        ranked.sort(key=lambda chunk: chunk.score, reverse=True)
-        return ranked
+        # image_chunks is already best-to-worst (the retrievers' order), so the
+        # two rankings fuse cleanly on one (RRF) scale.
+        fused = rrf([text_ranking, image_chunks], id_fn=lambda c: c.chunk_id)
+        return [replace(chunk, score=score) for chunk, score in fused]

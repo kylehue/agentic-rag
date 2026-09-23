@@ -5,7 +5,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./storage:/app/storage
+      - ./storage:/app/.storage
+      - ./models:/app/.models
     env_file:
       - .env
     restart: unless-stopped

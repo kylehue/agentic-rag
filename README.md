@@ -50,6 +50,7 @@ It is built around a **plugin architecture** for extensibility: each document ty
 
 - Python 3.11+
 - The LLM API key depends on what LLM you choose in the composition root (`container.py`).
+- The configured LLM must support **tool calling** and **vision**. The answer agent is tool-driven (search, table schemas, and SQL all run as tool calls), and vision is used to read images (image descriptions and the `view_images` tool).
 - Optionally, an Unstructured API key, if you partition documents through the hosted Unstructured API. For local partitioning, Unstructured's system dependencies are needed (poppler-utils, tesseract-ocr, libreoffice, libmagic1).
 
 ### Environment Configuration

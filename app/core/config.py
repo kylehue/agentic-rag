@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # the hosted API backends.
     TEXT_PARTITION_STRATEGY: PartitionStrategy = "fast"
     EMBEDDING_BATCH_SIZE: int = 100
-    AGENT_MAX_TOOL_ROUNDS = 24
+    AGENT_MAX_TOOL_ROUNDS: int = 24
     # Final number of chunks a retrieval returns. The retrievers fetch a wider
     # candidate pool and the reranker re-ranks it; this caps the result.
     RETRIEVAL_TOP_K: int = 5

@@ -154,6 +154,7 @@ rag_agent_service = RagAgentService(
     tools=[RAG_TOOLSET],
     mcp_client=mcp_client,
     checkpoint_dir=settings.AGENT_LOCAL_STORAGE_DIR,
+    max_tool_rounds=settings.AGENT_MAX_TOOL_ROUNDS,
 )
 
 

@@ -37,8 +37,6 @@ from app.models.stream import StreamEvent
 from app.services.rag import RagService
 from app.utils.string import render_template
 
-DEFAULT_MAX_TOOL_ROUNDS = 8
-
 # The checkpoint database's file name, inside the agent storage dir.
 CHECKPOINT_DB_FILENAME = "checkpoints.sqlite"
 
@@ -96,7 +94,7 @@ class RagAgentService:
         *,
         rag_service: RagService,
         tools: Sequence[AgentTool | AgentToolset],
-        max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
+        max_tool_rounds: int,
         checkpointer: BaseCheckpointSaver | None = None,
         checkpoint_dir: str | None = None,
         mcp_client: McpClient | None = None,

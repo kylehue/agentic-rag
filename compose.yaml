@@ -21,6 +21,8 @@ services:
             - caddy_config:/config
         depends_on:
             - api
+        env_file:
+            - .env
         restart: unless-stopped
 
 volumes:

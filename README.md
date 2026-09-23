@@ -122,7 +122,7 @@ docker compose up --build
 - `api`: builds the image from `Dockerfile` (which bundles Unstructured's system dependencies), exposes port 8000 on the internal network, reads your `.env`, and mounts `./.storage` and `./.models` so the app's data and local model cache persist on the host (assuming the app stays self-hosted).
 - `caddy`: a reverse proxy that publishes ports 80 and 443 and forwards requests to the `api` service on port 8000.
 
-> The `Caddyfile` is the only thing you need to change to serve a real host. Its site block is currently `localhost`; replace it with your domain and Caddy provisions TLS automatically.
+> The Caddy host is set by the `CADDY_HOST` variable in your `.env` (the `Caddyfile` reads it as `{$CADDY_HOST}`); it is currently `localhost`. Change it to your real domain.
 
 ## Architecture
 

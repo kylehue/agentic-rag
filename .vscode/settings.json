@@ -2,16 +2,13 @@
     "prettier.tabWidth": 4,
     "prettier.useTabs": false,
     "editor.tabSize": 4,
-    "editor.detectIndentation": true,
+    "editor.detectIndentation": false,
     "[python]": {
         "editor.tabSize": 4,
         "editor.formatOnSave": true,
         "editor.defaultFormatter": "ms-python.black-formatter"
     },
-    "[yaml]": {
-        "editor.tabSize": 4,
-        "editor.insertSpaces": true,
-        "editor.defaultFormatter": "esbenp.prettier-vscode"
-    },
-    "python-envs.defaultEnvManager": "ms-python.python:system"
+    "[vue]": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+    }
 }

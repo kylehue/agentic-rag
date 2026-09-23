@@ -13,7 +13,7 @@ It is built around a **plugin architecture** for extensibility: each document ty
     - [Requirements](#requirements)
     - [Environment Configuration](#environment-configuration)
     - [Start the Application](#start-the-application)
-    - [Talking to it (for debug only)](#talking-to-it-for-debug-only)
+    - [Talking to it](#talking-to-it)
   - [Deployment](#deployment)
   - [Architecture](#architecture)
     - [Ingestion Pipeline](#ingestion-pipeline)
@@ -83,31 +83,20 @@ python -m run
 
 The server listens on port 8000 with reload enabled for development, and the interactive API docs are at `http://localhost:8000/docs`.
 
-### Talking to it (for debug only)
+### Talking to it
 
-The RAG endpoints are per-user and per-chat, authenticated by a session cookie. `stream_agent.py` handles all of that for you: on first use it registers and logs in a test account and keeps the session cookie in the OS temp dir, so you just run it.
+There is a web dashboard in the `dashboard/` directory (a Vite + Vue project). It talks to the backend and lets you sign in, ingest documents, ask questions, and inspect the cited chunks behind each answer.
 
-- **Ask a question and watch the agent work:**
+1. With the backend running, start the dashboard:
 
-  ```bash
-  python stream_agent.py "your question"
-  ```
+   ```bash
+   cd dashboard
+   npm install
+   npm run dev
+   ```
 
-  The script prints each tool call and result as it happens, types out the answer token by token, and lists the chunks the answer cites at the end. Run it without arguments for an interactive conversation with chat management built in (`/chats`, `/use`, `/del`, and more; see `/help` in the script). Follow-up questions continue the server-side chat, and `RAG_CHAT=<chat_id>` continues a previous one.
-
-- **Ingest files with curl** (a new chat is created when none is given; ingestion runs in the background and the response returns the job ids):
-
-  ```bash
-  # Log in once: -c saves the session cookie the server sets.
-  curl -c cookies.txt -X POST localhost:8000/auth/login \
-    -H "Content-Type: application/json" \
-    -d '{"username": "you", "password": "your-password"}'
-
-  # -b sends it. Send one or many files as repeated `files` parts.
-  curl -b cookies.txt -X POST localhost:8000/rag/ingest \
-    -F "files=@example_docs/a.pdf" -F "files=@example_docs/b.csv"
-  # -> {"chat_id": "...", "jobs": [{"job_id": "...", "status": "queued", "file": "a.pdf"}, {"job_id": "...", "status": "queued", "file": "b.csv"}]}
-  ```
+   The dev server opens at `http://localhost:5173`. By default it points at the backend on `http://localhost:8000`; set `VITE_RAG_BASE_URL` to point it elsewhere.
+2. Sign up: open that URL and create an account (or sign in if you already have one). From there you can ingest files and ask questions.
 
 ## Deployment
 
@@ -386,8 +375,6 @@ The code lives under `app/`, grouped by concern:
 - `store_vector/` - Vector storage (local: Chroma in `.storage/vector`).
 - `utils/` - Generic building blocks: events (`EventBus`), queue (`JobQueue`), ranking (RRF), and prompt templates.
 - `container.py` - The composition root: builds the providers, storages, and plugins, composes the services, and owns the FastAPI lifespan.
-
-At the top level there is also `run.py` (the uvicorn entry point), `stream_agent.py` (a test client for the agent), and `tests/`.
 
 ## Design Principles
 

@@ -14,6 +14,7 @@ It is built around a **plugin architecture** for extensibility: each document ty
     - [Environment Configuration](#environment-configuration)
     - [Start the Application](#start-the-application)
     - [Talking to it (for debug only)](#talking-to-it-for-debug-only)
+  - [Deployment](#deployment)
   - [Architecture](#architecture)
     - [Ingestion Pipeline](#ingestion-pipeline)
     - [Retrieval Pipeline](#retrieval-pipeline)
@@ -47,9 +48,9 @@ It is built around a **plugin architecture** for extensibility: each document ty
 
 ### Requirements
 
-- Python 3.11+ (or Docker)
+- Python 3.11+
 - The LLM API key depends on what LLM you choose in the composition root (`container.py`).
-- Optionally, an Unstructured API key, if you partition documents through the hosted Unstructured API. For local partitioning, Unstructured's system dependencies are needed (poppler-utils, tesseract-ocr, libreoffice, libmagic1). The Docker image already includes them.
+- Optionally, an Unstructured API key, if you partition documents through the hosted Unstructured API. For local partitioning, Unstructured's system dependencies are needed (poppler-utils, tesseract-ocr, libreoffice, libmagic1).
 
 ### Environment Configuration
 
@@ -73,8 +74,6 @@ UNSTRUCTURED_API_KEY=your-unstructured-key
 
 ### Start the Application
 
-With Python:
-
 ```bash
 python -m venv venv
 source venv/bin/activate
@@ -83,14 +82,6 @@ python -m run
 ```
 
 The server listens on port 8000 with reload enabled for development, and the interactive API docs are at `http://localhost:8000/docs`.
-
-With Docker:
-
-```bash
-docker compose up --build
-```
-
-`compose.yaml` builds the image (including Unstructured's system dependencies), exposes port 8000, and reads your `.env`. It mounts `./storage` to `/app/.storage` and `./models` to `/app/.models`. That is exactly where the app writes its data and its local model cache by default, so both persist on the host automatically.
 
 ### Talking to it (for debug only)
 
@@ -117,6 +108,21 @@ The RAG endpoints are per-user and per-chat, authenticated by a session cookie. 
     -F "files=@example_docs/a.pdf" -F "files=@example_docs/b.csv"
   # -> {"chat_id": "...", "jobs": [{"job_id": "...", "status": "queued", "file": "a.pdf"}, {"job_id": "...", "status": "queued", "file": "b.csv"}]}
   ```
+
+## Deployment
+
+To run it as a container, use Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+`compose.yaml` defines two services:
+
+- `api`: builds the image from `Dockerfile` (which bundles Unstructured's system dependencies), exposes port 8000 on the internal network, reads your `.env`, and mounts `./.storage` and `./.models` so the app's data and local model cache persist on the host (assuming the app stays self-hosted).
+- `caddy`: a reverse proxy that publishes ports 80 and 443 and forwards requests to the `api` service on port 8000.
+
+> The `Caddyfile` is the only thing you need to change to serve a real host. Its site block is currently `localhost`; replace it with your domain and Caddy provisions TLS automatically.
 
 ## Architecture
 

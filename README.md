@@ -4,6 +4,8 @@ An agentic Retrieval-Augmented Generation (RAG) pipeline. You upload files (docu
 
 It is built around a **plugin architecture** for extensibility: each document type is a plugin that the system discovers and orchestrates, and the work is split into separate ingestion, retrieval, and answer-generation stages.
 
+https://github.com/user-attachments/assets/6a188067-d639-47d0-8653-211868a2e979
+
 ## Table of Contents
 
 - [Agentic RAG](#agentic-rag)
